@@ -147,51 +147,30 @@ def validate_config(
             f"({minimal_bsz})"
         )
 
-    def check_mutually_exclusive(mbs, mbs_per_gpu, name: str):
-        """Validate mutually exclusive micro batch size configuration options.
-
-        Ensures that users don't set both deprecated micro_batch_size and
-        the new micro_batch_size_per_gpu parameters simultaneously.
+    def check_micro_batch_size_per_gpu(mbs_per_gpu, name: str):
+        """Validate that the per-GPU log-prob micro batch size is configured.
 
         Args:
-            mbs: Deprecated micro batch size parameter value.
-            mbs_per_gpu: New micro batch size per GPU parameter value.
+            mbs_per_gpu: Micro batch size per GPU parameter value.
             name (str): Configuration section name for error messages.
 
         Raises:
-            ValueError: If both parameters are set or neither is set.
+            ValueError: If the per-GPU parameter is not set.
         """
-        settings = {
-            "train_actor_rollout_ref.ref": "log_prob_micro_batch_size",
-            "train_actor_rollout_ref.rollout": "log_prob_micro_batch_size",
-        }
-
-        if name in settings:
-            param = settings[name]
-            param_per_gpu = f"{param}_per_gpu"
-
-            if mbs is None and mbs_per_gpu is None:
-                raise ValueError(f"[{name}] Please set at least one of '{name}.{param}' or '{name}.{param_per_gpu}'.")
-
-            if mbs is not None and mbs_per_gpu is not None:
-                raise ValueError(
-                    f"[{name}] You have set both '{name}.{param}' AND '{name}.{param_per_gpu}'. Please remove "
-                    f"'{name}.{param}' because only '*_{param_per_gpu}' is supported (the former is deprecated)."
-                )
+        if mbs_per_gpu is None:
+            raise ValueError(f"[{name}] Please set '{name}.log_prob_micro_batch_size_per_gpu'.")
 
     actor_config = omega_conf_to_dataclass(config.train_actor_rollout_ref.actor)
     actor_config.validate(train_n_gpus, config.data.train_batch_size, config.train_actor_rollout_ref.model)
 
     if not config.train_actor_rollout_ref.actor.use_dynamic_bsz:
         if use_reference_policy:
-            check_mutually_exclusive(
-                config.train_actor_rollout_ref.ref.log_prob_micro_batch_size,
+            check_micro_batch_size_per_gpu(
                 config.train_actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu,
                 "train_actor_rollout_ref.ref",
             )
 
-        check_mutually_exclusive(
-            config.train_actor_rollout_ref.rollout.log_prob_micro_batch_size,
+        check_micro_batch_size_per_gpu(
             config.train_actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu,
             "train_actor_rollout_ref.rollout",
         )
@@ -203,13 +182,6 @@ def validate_config(
     if use_critic:
         critic_config = omega_conf_to_dataclass(config.critic)
         critic_config.validate(train_n_gpus, config.data.train_batch_size)
-
-    if config.data.get("val_batch_size", None) is not None:
-        print(
-            "WARNING: val_batch_size is deprecated."
-            + " Validation datasets are sent to inference engines as a whole batch,"
-            + " which will schedule the memory themselves."
-        )
 
     # check eval config
     if config.train_actor_rollout_ref.rollout.val_kwargs.do_sample:

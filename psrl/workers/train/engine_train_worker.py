@@ -160,14 +160,13 @@ class PSRL_EngineTrainWorker(ActorRolloutRefWorker, PSRL_BaseTrainWorker):
             copy_to_local(self.config.model.path),
             trust_remote_code=self.config.model.get("trust_remote_code", False),
         )
-        if strategy in {"fsdp", "fsdp2"}:
+        if strategy == "fsdp2":
             from psrl.utils.converter.fsdp_converter import convert_fsdp_inplace
 
             parameter_mapping = create_parameter_mapping("FSDP", model_config)
             self.unified_state_dict, self.local_sharding_dict = convert_fsdp_inplace(
                 parameter_mapping,
                 self.actor.engine.module,
-                fsdp_strategy=self.config.actor.strategy,
             )
             self.param_sync_plan = ParamSyncPlan()
         elif strategy == "megatron":

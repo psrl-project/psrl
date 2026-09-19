@@ -517,7 +517,6 @@ from omegaconf import DictConfig
 
 from psrl.utils.logger import (
     EventType,
-    deprecated,
     get_ps_logger,
     get_worker_info,
     log_dual_events,

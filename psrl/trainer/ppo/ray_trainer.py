@@ -2437,18 +2437,8 @@ class PSRL_RayPPOTrainer(RayPPOTrainer):
             )
         )
 
-        remove_previous_ckpt_in_save = self.config.trainer.get("remove_previous_ckpt_in_save", False)
-        if remove_previous_ckpt_in_save:
-            psrl_logger.warning(
-                "remove_previous_ckpt_in_save is deprecated,"
-                + " set max_actor_ckpt_to_keep=1 and max_critic_ckpt_to_keep=1 instead"
-            )
-        max_actor_ckpt_to_keep = (
-            self.config.trainer.get("max_actor_ckpt_to_keep", None) if not remove_previous_ckpt_in_save else 1
-        )
-        max_critic_ckpt_to_keep = (
-            self.config.trainer.get("max_critic_ckpt_to_keep", None) if not remove_previous_ckpt_in_save else 1
-        )
+        max_actor_ckpt_to_keep = self.config.trainer.get("max_actor_ckpt_to_keep", None)
+        max_critic_ckpt_to_keep = self.config.trainer.get("max_critic_ckpt_to_keep", None)
 
         # AGENT(VERL): PSRL use `actor_wg` while VERL use `actor_rollout_wg`.
 

@@ -3,8 +3,8 @@
 Audit human-readable source text against the PSRL prose rules.
 
 The audit covers comments, Python docstrings, log messages, and assertion
-messages. It intentionally ignores vendored patches, deprecated code, and
-documentation because those trees have separate ownership or tooling.
+messages. It intentionally ignores vendored patches and documentation because
+those trees have separate ownership or tooling.
 """
 
 from __future__ import annotations
@@ -31,7 +31,6 @@ SUPPORTED_SUFFIXES = {
 DEFAULT_PATHS = (
     "psrl",
     "tests",
-    "unit_tests",
     "examples",
     "scripts",
     "hydra_plugins",
@@ -47,7 +46,6 @@ EXCLUDED_PARTS = {
     ".ruff_cache",
     "__pycache__",
     "_vendor",
-    "deprecated",
     "external",
     "patch",
 }

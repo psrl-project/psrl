@@ -22,8 +22,8 @@ show_usage() {
     echo "Examples:"
     echo "  $0                              # Auto-detect and apply appropriate patch"
     echo "  $0 --auto                       # Use latest patch file"
-    echo "  $0 dfc914cb.patch               # Apply specific patch file"
-    echo "  $0 --force dfc914cb.patch       # Force apply specific patch"
+    echo "  $0 a7f22be7.patch               # Apply specific patch file"
+    echo "  $0 --force a7f22be7.patch       # Force apply specific patch"
 }
 
 # Function to list available patch files

@@ -312,10 +312,10 @@ global_profiler:
       # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
       _target_: verl.utils.profiler.config.PrecisionDebuggerToolConfig
 
-      # Deprecated and ignored. Use global_profiler.steps.
+      # Path to the msprobe config.json.
       config_path: null
 
-      # Profile steps
+      # Deprecated and ignored. Use global_profiler.steps.
       steps: null
 
       # Limit profiling to selected actor, reference, critic, value, or reward stages.

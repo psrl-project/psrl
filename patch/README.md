@@ -16,7 +16,7 @@ Use the shared script with the patch subdirectory name:
 ```bash
 bash patch/apply_patch.sh vllm
 bash patch/apply_patch.sh verl --list
-bash patch/apply_patch.sh lm_cache --force dfc914cb.patch
+bash patch/apply_patch.sh lm_cache --force a7f22be7.patch
 ```
 
 By default, the script selects a patch matching the installed distribution's

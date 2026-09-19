@@ -1,4 +1,3 @@
-from .lazy_primitives import LazyObjectRef, lazy_get, lazy_put
 from .lock_context import (
     AsyncBusyPollingRayLock,
     AsyncRayLock,
@@ -23,7 +22,4 @@ __all__ = [
     "AsyncRayLock",
     "BusyPollingRayLock",
     "AsyncBusyPollingRayLock",
-    "lazy_put",
-    "lazy_get",
-    "LazyObjectRef",
 ]

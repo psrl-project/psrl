@@ -89,7 +89,7 @@ echo "rollouts: ${N_RESP_PER_PROMPT} per prompt, ${MAX_TURNS} max turns"
 
 PYTHONUNBUFFERED=1 python3 -m psrl.trainer.main_ppo \
     --config-path="${PSRL_PATH}/psrl/trainer/config" \
-    --config-name=ppo_megatron_trainer \
+    --config-name=ppo_trainer model_engine=megatron \
     algorithm.adv_estimator=grpo \
     algorithm.use_kl_in_reward=False \
     algorithm.norm_adv_by_std_in_grpo=True \

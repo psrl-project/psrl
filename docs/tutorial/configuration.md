@@ -73,7 +73,7 @@ Groups marked *(veRL)* are not duplicated in this repository. A Hydra search-pat
 plugin appends `pkg://verl.trainer.config` as a fallback, so any group PSRL does not
 define locally resolves against the installed veRL package. Dropping a same-named
 YAML into PSRL's own `config/` directory overrides the veRL version. For Megatron
-training, use `ppo_megatron_trainer.yaml`.
+training, pass `model_engine=megatron`.
 
 :::{note}
 The **rollout (train)** group, `train_actor_rollout_ref.rollout`, exists only to

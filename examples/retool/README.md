@@ -406,7 +406,7 @@ the same algorithm / reward / tool wiring as Path A but differ in:
 
 | Area | Difference |
 |------|------------|
-| Trainer config | `--config-name='ppo_megatron_trainer'` instead of `'ppo_trainer'` |
+| Trainer config | `--config-name='ppo_trainer' model_engine=megatron` instead of `'ppo_trainer'` |
 | Checkpoint | Requires a distributed Megatron checkpoint; `convert_hf_to_mcore.py` is invoked at the top of the script |
 | Parallelism | `TRAIN_TP`, `TRAIN_PP`, `TRAIN_CP` (plus `TRAIN_EP` / `TRAIN_ETP` for MoE) replace `TRAIN_FSDP` / `TRAIN_SP` |
 | Offload | `offload=True` is supported (param / optimizer / grad offload) |

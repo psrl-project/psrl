@@ -58,13 +58,13 @@ sysctl vm.compaction_proactiveness=20
 sysctl vm.min_free_kbytes=9437184
 
 python3 -m psrl.trainer.main_ppo --config-path=./config \
-    --config-name='ppo_megatron_trainer' \
+    --config-name='ppo_trainer' model_engine=megatron \
     psrl.ps_manager_ip=${LOCAL_IP} \
     psrl.rollout_n=${rollout_N} \
     psrl.staleness=0 \
     psrl.staleness_buffer_entries=${train_batch_size} \
     psrl.ps_mode=nixl_cpu \
-    psrl.logging_path=${PSRL_PATH}/examples/precision_test/dapo/megatron_psrl_log/${experiment_name} \
+    psrl.logging_path=${PSRL_PATH}/examples/tx/psrl_log/${experiment_name} \
     psrl.log_prob.enable_rollout_engine_log_prob=True \
     psrl.deployment.n_rollout_instances=${GEN_INSTANCES} \
     psrl.deployment.rollout_nnodes_per_instance=1 \

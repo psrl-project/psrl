@@ -140,10 +140,10 @@ pytestmark = pytest.mark.cpu_test
 
 ### Large-array tests
 
-`tests/ray_utils/test_lazy_primitives.py` and `tests/ray_utils/test_get_ref.py` default to small arrays for CI. To run the original large benchmark sizes (40 GB):
+`tests/ray_utils/test_get_ref.py` defaults to small arrays for CI. To run the original large benchmark sizes (40 GB):
 
 ```bash
-PSRL_TEST_LARGE_ARRAYS=1 pytest tests/ray_utils/test_lazy_primitives.py tests/ray_utils/test_get_ref.py -v
+PSRL_TEST_LARGE_ARRAYS=1 pytest tests/ray_utils/test_get_ref.py -v
 ```
 
 ### CI/CD workflows

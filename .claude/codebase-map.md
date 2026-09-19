@@ -5,7 +5,7 @@
 >
 > **Major shifts since 2026-05**: rollout now runs through the vendored **SMG** gateway (Rust router) with **SessionRouter + TITO** session capture; sample data moves over **TransferQueue** instead of Ray-serialized batches; KV cache offload/reuse via **LMCache**; **RolloutCoordinator** (mixin-composed) replaces the old `rollout_coordinator.py`; a unified **engine train worker** supersedes the separate FSDP/Megatron workers; a standalone **reward-model service** and **gen reward functions** were added; **resource elasticity** (`elastic_rm`) and a **gRPC PSManager** service landed. See §15 for the terminology glossary.
 >
-> **Latest changes (2026-07-25/26, commit `11b6d65`)**: the monolithic `psrl.yaml` was **split into 16 per-topic group files** plus the 6 existing `rollout_coordination/` ones (§4) — note `elastic_rm` moved under `psrl.deployment.elastic_rm`; **fine-grained rollout/train overlap** landed as a `StepStrategy` (`psrl.fine_grain_overlap`); pre-SMG dead code (gen worker, FSDP/Megatron train workers, Python router/route-strategy/request-queue, mini-SWE loop v0) moved to top-level `deprecated/`; the real test suite is `tests/` (pytest `testpaths`), not `unit_tests/`.
+> **Latest changes (2026-07-25/26, commit `11b6d65`)**: the monolithic `psrl.yaml` was **split into 16 per-topic group files** plus the 6 existing `rollout_coordination/` ones (§4) — note `elastic_rm` moved under `psrl.deployment.elastic_rm`; **fine-grained rollout/train overlap** landed as a `StepStrategy` (`psrl.fine_grain_overlap`); pre-SMG dead code (gen worker, FSDP/Megatron train workers, Python router/route-strategy/request-queue, mini-SWE loop v0) and the legacy `unit_tests/` suite were removed, leaving `tests/` (pytest `testpaths`) as the only test suite.
 
 ---
 
@@ -90,7 +90,7 @@ psrl/
 │       │   └── rollout_coordination/*.yaml  # routing / sync_and_mig / partial / redundant /
 │       │                                     #   proactive_filter / session strategies
 │       ├── critic/, data/, reward/, rollout/ # component group configs
-│       └── ppo_trainer.yaml / ppo_megatron_trainer.yaml  # top-level templates
+│       └── ppo_trainer.yaml    # top-level template
 │
 ├── workers/                      # ★ Distributed workers (Ray actors)
 │   ├── gen/                      # --- Generation / Rollout ---
@@ -119,7 +119,7 @@ psrl/
 │   │           └── thunder_agent.py # ThunderAgentScheduler: KV-capacity hang/continue (ThunderAgent port)
 │   │
 │   ├── train/                    # --- Training ---
-│   │   ├── engine_train_worker.py # ★ NEW unified worker (fsdp_/megatron_ workers moved to deprecated/)
+│   │   ├── engine_train_worker.py # ★ NEW unified worker (replaces the separate fsdp/megatron workers)
 │   │   └── base_train_worker.py  # PSRL_BaseTrainWorker: NIXL push, version mgmt
 │   │
 │   ├── ps/                       # --- Parameter Server ---
@@ -222,7 +222,7 @@ psrl/
 │   │   ├── weight_layout_plan.py, weight_layout_transforms.py  # ★ NEW vllm-hf layout plugin
 │   │   ├── utils/parallel_states.py
 │   │   └── modeling/             # per-format model loading
-│   ├── logger/                   # Logging subsystem (data/env/memory/ps/ray + deprecated)
+│   ├── logger/                   # Logging subsystem (data/env/memory/ps/ray)
 │   ├── dataset/                  # data_processor.py (DataProcessor), rl_dataset.py, utils.py
 │   ├── post_processor/           # base.py + buffer_post_process/ + group_post_process/
 │   ├── profiling/                # collector / event_converter / records
@@ -276,19 +276,6 @@ docs/                # ★ Sphinx/MyST docs — read design/ for authoritative s
 
 tests/               # ★ THE test suite (pyproject `testpaths = ["tests"]`) — ~100 files, see §10
 
-unit_tests/          # Legacy remnant, NOT on testpaths; only kv_cache/ + workers/ps/ survive
-                     # (agent_loop suite moved to deprecated/unit_tests/ with the router code)
-
-deprecated/          # ★ Top-level graveyard: pre-SMG code, not imported by anything active
-├── workers/gen/gen_worker.py               # PSRL_GenWorker (superseded by PSRL_vLLMReplica)
-├── workers/train/fsdp_train_worker.py      # PSRL_FSDPTrainWorker (superseded by EngineTrainWorker)
-├── workers/train/megatron_train_worker.py  # PSRL_MegatronTrainWorker (superseded by EngineTrainWorker)
-├── workers/agent_loop/router.py            # RolloutRouter (superseded by RolloutGateway/SMG)
-├── workers/agent_loop/route_strategy.py    # Python routing strategies (now in the SMG Rust router)
-├── workers/agent_loop/request_queue.py     # Python request queue (now in SMG)
-├── workers/agent_loop/loops/mini_swe_agent_loop.py     # MiniSWEAgentLoop v0 (superseded by V1)
-└── unit_tests/workers/agent_loop/{conftest.py,test_kv_cache_aware_strategy.py}
-
 examples/
 ├── mini_swe/        # ★ SWE-bench RL recipe: fsdp_/megatron_ launch scripts (7B–32B, swe_gym +
 │                    #   swe_smith), config.py, reward.py, swebench_grader.py, runner.py,
@@ -297,8 +284,7 @@ examples/
 ├── tx/              # Qwen3 / Qwen3.5 launch scripts (8B/32B, 4B/35B-A3B)
 ├── anaylsis/        # [sic] Rollout analysis plots: plot_request_route_timeline.py,
 │                    #   plot_trajectory_record.py, build_cost_model.py, regression.py, scripts/
-├── bench/rollout/, ray/, retool/, visualization/
-└── deprecated/      # Old grpo/ppo/precision recipes (kept for reference)
+└── bench/rollout/, ray/, retool/, visualization/
 ```
 
 ---
@@ -346,7 +332,7 @@ python -m psrl.trainer.main_ppo \
     +train_actor_rollout_ref.model.path=/path/to/model
 ```
 
-Templates: `ppo_trainer.yaml` (FSDP) / `ppo_megatron_trainer.yaml` (Megatron).
+Templates: `ppo_trainer.yaml`. `model_engine` (default `dp`) selects the actor/ref/critic groups; pass `model_engine=megatron` for Megatron.
 
 ---
 
@@ -586,7 +572,7 @@ Supports newer arches (DeepSeek-V2, Qwen3.5). Per-format loading in `converter/m
 
 ## 10. Testing Map
 
-**`tests/` is the real suite** — `pyproject.toml` sets `testpaths = ["tests"]`. (`unit_tests/` is a legacy leftover holding only `kv_cache/test_lmcache_config.py` and `workers/ps/test_ps_manager_broadcast.py`; it is not collected by default.)
+**`tests/` is the test suite** — `pyproject.toml` sets `testpaths = ["tests"]`.
 
 ```
 tests/
@@ -695,8 +681,7 @@ main_ppo.py (TaskRunner, TransferQueue init)
 | Debug SWE agent rollouts | `workers/agent_loop/loops/mini_swe_agent_loop_v1.py` |
 | Change SWE grading | `examples/mini_swe/swebench_grader.py` |
 | Run benchmarks | `psrl/bench/`, `examples/bench/` |
-| Run / add tests | `tests/` (pytest `testpaths`); `unit_tests/` is a legacy remnant |
-| Find pre-SMG legacy code | top-level `deprecated/` (gen worker, FSDP/Megatron train workers, Python router, mini-SWE loop v0) |
+| Run / add tests | `tests/` (pytest `testpaths`) |
 | Plot rollout routing / trajectories | `examples/anaylsis/plot_request_route_timeline.py`, `plot_trajectory_record.py` |
 | Install from scratch | `scripts/install_basic.sh` → `install_nixl.sh` → `install_lmcache.sh` → `install_megatron.sh` → `reinstall_smg.sh` |
 | Read authoritative subsystem specs | `docs/design/` |

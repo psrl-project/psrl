@@ -11,7 +11,6 @@ from torch.distributed.tensor import DTensor
 from psrl.utils.common.http_utils import find_available_port
 from psrl.utils.logger import (
     EventType,
-    deprecated,
     get_ps_logger,
     get_worker_info,
     log_dual_events,
@@ -155,11 +154,6 @@ class PSManager(RequestStatusTracker):
     def get_grpc_server_port(self) -> int | None:
         """Get current PS Manager gRPC server port."""
         return self.grpc_state_port
-
-    @deprecated("It is too slow to get the PS handle by `ray.get_runtime_context()`")
-    def get_ps_manager_handle(self):
-        """Get the PS handle."""
-        return ray.get_runtime_context().current_actor
 
     @_state_locked
     def register_rollout_instance(self, rollout_instance_ids: RolloutInstanceId | list[RolloutInstanceId]):

@@ -14,7 +14,7 @@ from nixl._api import nixl_agent, nixl_agent_config
 from omegaconf import DictConfig
 
 from psrl.utils.common.patch_utils import apply_tms_patch
-from psrl.utils.logger import DualOutputHandler, deprecated, get_worker_info, log_tensor
+from psrl.utils.logger import DualOutputHandler, get_worker_info, log_tensor
 from psrl.utils.nixl.comm_plan import NIXLCommPlan
 from psrl.utils.nixl.meta_buffer import MetaBuffer
 from psrl.utils.nixl.network_topology import get_local_gpu_id, get_local_ip
@@ -258,45 +258,6 @@ class NIXLStorageClient:
         self._registered_descs = {}
         for desc in descs:
             self.agent.deregister_memory(desc)
-
-    @deprecated("Do NOT use this on regions from _record_region_registration.")
-    def _merge_contiguous_regions(
-        self, region_list: list[tuple[int, int, int, str]]
-    ) -> list[tuple[int, int, int, str]]:
-        """Merge contiguous memory regions to reduce registration calls.
-
-        Args:
-            region_list: List of (base_addr, nbytes, device_id, mem_type) tuples.
-        Returns:
-            Merged list of (base_addr, nbytes, device_id, mem_type) tuples.
-
-        NOTE(lhy): Do NOT use this on regions from _record_region_registration.
-        Each entry there is one untyped_storage = one cudaMalloc allocation.
-        Merging two virtually-adjacent allocations is invalid for RDMA/UCX:
-        the pin is per-allocation, so check_xfer_state returns ERR at transfer time.
-        The deduplication in _reg_regions already provides the only safe batching:
-        multiple tensor views sharing the same storage are registered exactly once.
-        """
-        if not region_list:
-            return []
-
-        # Sort regions by base address
-        sorted_regions = sorted(region_list, key=lambda x: x[0])
-        merged_regions = []
-        current_base, current_size, current_device_id, current_mem_type = sorted_regions[0]
-
-        for base, size, device_id, mem_type in sorted_regions[1:]:
-            if current_base + current_size == base and current_device_id == device_id and current_mem_type == mem_type:
-                # Merge contiguous region
-                current_size += size
-            else:
-                # Append the current region and start a new one
-                merged_regions.append((current_base, current_size, current_device_id, current_mem_type))
-                current_base, current_size, current_device_id, current_mem_type = base, size, device_id, mem_type
-
-        # Append the last region
-        merged_regions.append((current_base, current_size, current_device_id, current_mem_type))
-        return merged_regions
 
     def _register_memory(self, mem_type: str, reg_list: list[tuple[int, int, int, str]]) -> nixlBind.nixlRegDList:
         """Register memory with NIXL."""

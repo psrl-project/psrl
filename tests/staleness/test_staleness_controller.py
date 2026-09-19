@@ -9,7 +9,7 @@ from psrl.workers.ps.staleness_controller import (
 pytestmark = pytest.mark.cpu_test
 
 
-# ── EntryInfo hashing (migrated from unit_tests/staleness/test_hash.py) ──────
+# ── EntryInfo hashing ───────────────────────────────────────────────────────
 
 
 class TestEntryInfoHashing:

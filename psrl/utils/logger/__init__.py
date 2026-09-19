@@ -1,5 +1,4 @@
 from .data_logger import log_data_protocol, log_tensor
-from .deprecated import deprecated
 from .env_logger import log_env_info
 from .memory_logger import (
     MemoryLogger,
@@ -31,7 +30,6 @@ __all__ = [
     "log_data_protocol",
     "log_tensor",
     "log_env_info",
-    "deprecated",
     "get_ps_logger",
     "setup_ps_logger",
     "MemoryLogger",

@@ -91,7 +91,7 @@ test_freq=5
 
 PYTHONUNBUFFERED=1 python3 -m psrl.trainer.main_ppo \
     --config-path="${PSRL_PATH}/psrl/trainer/config" \
-    --config-name=ppo_megatron_trainer \
+    --config-name=ppo_trainer model_engine=megatron \
     psrl.ps_manager_ip=${LOCAL_IP:-127.0.0.1} \
     psrl.rollout_n=${rollout_N} \
     psrl.staleness=0 \

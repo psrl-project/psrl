@@ -148,7 +148,7 @@ class MegatronClient:
 
 def test_megatron():
     """Test Megatron client"""
-    log_dir = os.environ.get("PSRL_WORKSPACE") + "/psrl/unit_tests/megatron/log"
+    log_dir = os.environ.get("PSRL_WORKSPACE") + "/psrl/tests/megatron/log"
     os.makedirs(log_dir, exist_ok=True)
     ray.init(ignore_reinit_error=True)
 

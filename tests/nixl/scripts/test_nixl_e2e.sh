@@ -10,7 +10,7 @@ cd ${PSRL_PATH}/tests/nixl
 # Default is the original Qwen2.5-3B HSDP smoke case.
 CASE=${CASE:-0}
 
-# NOTE(lhy): This unit test uses FSDP1, so HSDP/FSDP precision differs from Megatron.
+# NOTE(lhy): This unit test uses FSDP2, so HSDP/FSDP precision differs from Megatron.
 # The all-ones initialization and pull-equality verification are precision-independent.
 
 # CASE 0: Qwen2.5-3B-Instruct, HSDP train (1×8) and vLLM gen (TP=2 PP=2), 16 GPUs.

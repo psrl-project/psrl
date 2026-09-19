@@ -6,7 +6,7 @@ from functools import wraps
 import ray
 from omegaconf import DictConfig
 
-from psrl.utils.logger import DualOutputHandler, deprecated, get_ps_logger
+from psrl.utils.logger import DualOutputHandler, get_ps_logger
 from psrl.utils.server.command import Command, CommandType
 from psrl.utils.transferqueue_utils import PayloadState, clear_payload, request_payload_keys
 from psrl.workers.gen.utils import INVALID_ROLLOUT_INSTANCE_ID, RolloutInstanceId
@@ -86,8 +86,6 @@ class RequestStatusTracker:
             self.rollout_n = self.psrl_config.rollout_n
             self.alg_rollout_n = self.rollout_n
         self.val_rollout_n = self.psrl_config.val_rollout_n
-
-        self.rollout_request_buffer = {}
 
         self.rollout_coordinator: ray.actor.ActorHandle | None = None
 
@@ -666,74 +664,3 @@ class RequestStatusTracker:
                 self._request_infos[req_id].instance = new_instance
             else:
                 raise KeyError(f"Request ID {req_id} not found.")
-
-    # --- Deprecated methods ---
-
-    @deprecated(
-        "This method is not used anymore, "
-        "we should try to keep the ps_manager/request_status tracker "
-        "only store the meta data!"
-    )
-    def add_request_data_to_buffer(self, request_data: dict):
-        """
-        Add request data to the rollout request buffer.
-
-        Args:
-            request_data (dict): A dictionary mapping request IDs to their corresponding data.
-        """
-        for req_id, data in request_data.items():
-            self.rollout_request_buffer[req_id] = data
-
-    @deprecated(
-        "This method is not used anymore, "
-        "we should try to keep the ps_manager/request_status tracker "
-        "only store the meta data!"
-    )
-    def get_request_data_from_buffer(self, request_id: int) -> dict | None:
-        """
-        Get request data from the rollout request buffer.
-
-        Args:
-            request_id (int): The unique identifier of the request.
-
-        Returns:
-            dict: The data associated with the request ID, or None if not found.
-        """
-        return self.rollout_request_buffer.get(request_id, None)
-
-    @deprecated(
-        "This method is not used anymore, "
-        "we should try to keep the ps_manager/request_status tracker "
-        "only store the meta data!"
-    )
-    def pop_request_data_from_buffer(self, request_id: int) -> dict | None:
-        """
-        Pop request data from the rollout request buffer.
-
-        Args:
-            request_id (int): The unique identifier of the request.
-
-        Returns:
-            dict: The data associated with the request ID, or None if not found.
-        """
-        assert request_id in self.rollout_request_buffer, (
-            f"Request not found in rollout request buffer. ID: {request_id}."
-        )
-        return self.rollout_request_buffer.pop(request_id, None)
-
-    @deprecated(
-        "This method is not used anymore, "
-        "we should try to keep the ps_manager/request_status tracker "
-        "only store the meta data!"
-    )
-    def remove_request_data_from_buffer(self, request_id: int):
-        """
-        Remove request data from the rollout request buffer.
-
-        Args:
-            request_id (int): The unique identifier of the request.
-        """
-        if request_id in self.rollout_request_buffer:
-            del self.rollout_request_buffer[request_id]
-        else:
-            raise KeyError(f"Request ID {request_id} not found in rollout request buffer.")
