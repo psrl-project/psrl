@@ -6,8 +6,8 @@ tests pin the distinction between an epoch boundary, which is recoverable becaus
 `_get_train_next` rebuilds its iterators before re-raising, and a genuinely empty
 dataset, which is not.
 
-`DataProcessor` is decorated with `@ray.remote`, so the tests reach the undecorated
-class through `__ray_metadata__.modified_class` and build instances with
+The behavior lives in `DataProcessorBase`, which the tests drive directly because
+the `DataProcessor` leaf is a Ray actor class. Instances are built with
 `object.__new__` to skip the heavy dataset and tokenizer setup in `__init__`.
 """
 
@@ -22,7 +22,7 @@ from psrl.utils.dataset import data_processor as data_processor_module
 pytestmark = pytest.mark.cpu_test
 
 
-_RAW_DATA_PROCESSOR = data_processor_module.DataProcessor.__ray_metadata__.modified_class
+_RAW_DATA_PROCESSOR = data_processor_module.DataProcessorBase
 
 
 class _EpochDataLoader:

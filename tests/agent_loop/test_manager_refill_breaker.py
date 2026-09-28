@@ -23,7 +23,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from omegaconf import OmegaConf
 from psrl.workers.agent_loop.loops.utils import TerminateReason
-from psrl.workers.agent_loop.manager import BoundedIdSet, PSRL_AgentLoopManager
+from psrl.workers.agent_loop.psrl_manager import BoundedIdSet, PSRL_AgentLoopManager
 
 pytestmark = pytest.mark.cpu_test
 

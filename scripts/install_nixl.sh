@@ -14,11 +14,17 @@ PSRL_PATH="$(dirname "$SCRIPT_DIR")"
 THIRD_PARTY_PATH="$PSRL_PATH/third_party"
 mkdir -p $THIRD_PARTY_PATH
 
+# Prefer the UCX installed by this repository when it exists.
+if [ -x "$THIRD_PARTY_PATH/ucx/bin/ucx_info" ]; then
+    PATH="$THIRD_PARTY_PATH/ucx/bin:$PATH"
+    export PATH
+fi
+
 if command -v ucx_info >/dev/null 2>&1; then
     echo "Detected existing UCX installation via ucx_info"
     UCX_INFO_OUTPUT=$(ucx_info -v 2>/dev/null || true)
     DETECTED_VERSION=$(echo "$UCX_INFO_OUTPUT" | grep -Eo '([0-9]+\.){2}[0-9]+' | head -n1)
-    DETECTED_PREFIX=$(echo "$UCX_INFO_OUTPUT" | grep -i -- '--prefix=' | sed -E 's/.*--prefix=([^ ]+).*/\1/' | head -n1)
+    DETECTED_PREFIX=$(dirname "$(dirname "$(readlink -f "$(command -v ucx_info)")")")
 
     if [ -n "$DETECTED_PREFIX" ]; then
         UCX_PREFIX="$DETECTED_PREFIX"
@@ -39,7 +45,9 @@ if $INSTALL_UCX; then
     UCX_PREFIX="$THIRD_PARTY_PATH/ucx"
     mkdir -p $THIRD_PARTY_PATH/ucx_src
     pushd $THIRD_PARTY_PATH/ucx_src
-    git clone -b $REQUIRED_UCX_VERSION https://github.com/openucx/ucx.git
+    if [ ! -d ucx/.git ]; then
+        git clone -b "v$REQUIRED_UCX_VERSION" https://github.com/openucx/ucx.git
+    fi
     cd ucx
 
     # Checking Mellanox NICs
@@ -78,7 +86,9 @@ fi
 echo "2. Install nixl"
 mkdir -p $THIRD_PARTY_PATH/nixl_src
 pushd $THIRD_PARTY_PATH/nixl_src
-git clone -b v1.2.0 https://github.com/ai-dynamo/nixl.git
+if [ ! -d nixl/.git ]; then
+    git clone -b v1.2.0 https://github.com/ai-dynamo/nixl.git
+fi
 cd nixl
 mkdir -p build
 # Disable obj backend
@@ -95,8 +105,10 @@ cd build
 ninja -j $MAX_JOBS
 ninja install -j $MAX_JOBS
 cd ..
-python -m pip install .
-python -m pip install build/src/bindings/python/nixl-meta/nixl-*-py3-none-any.whl
+NIXL_PYTHON_SITE="$THIRD_PARTY_PATH/nixl/lib/python$(python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')/site-packages"
+PYTHON_SITE=$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
+printf '%s\n' "$NIXL_PYTHON_SITE" > "$PYTHON_SITE/nixl-local.pth"
+python -m pip install --no-deps build/src/bindings/python/nixl-meta/nixl-*-py3-none-any.whl
 popd
 rm -rf $THIRD_PARTY_PATH/nixl_src
 

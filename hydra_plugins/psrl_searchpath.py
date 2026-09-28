@@ -26,3 +26,10 @@ class PSRLSearchPathPlugin(SearchPathPlugin):
             provider="verl-base",
             path="pkg://verl.trainer.config",
         )
+
+        # PSRL's own trainer config dir, so an entry point outside it (batch
+        # rollout) can still compose the shared `psrl/` and `rollout/` groups.
+        search_path.append(
+            provider="psrl-base",
+            path="pkg://psrl.trainer.config",
+        )

@@ -205,7 +205,12 @@ def build_training_data(
     )
 
     if not all_response_ids and records:
-        psrl_logger.error(
+        # NOTE(claude): An empty accumulated stream is the expected shape for a
+        # text-native session, not a merge fault. A real TITO session always carries
+        # tokens, so an empty response with tokens present stays an error.
+        level = logging.DEBUG if total_acc_len == 0 else logging.ERROR
+        psrl_logger.log(
+            level,
             "[TITO] build_training_data: response_ids empty but num_turns=%d! "
             "records=%s, accumulated_len=%d, prompt_len=%d",
             len(records),

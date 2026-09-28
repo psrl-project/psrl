@@ -1,0 +1,26 @@
+# @package batch_rollout.serving
+# An OpenAI endpoint PSRL does not own, fronted by a session proxy (text only).
+
+name: openai_api
+
+# OpenAI-compatible base URL, ending in /v1. Mutually exclusive with endpoints_file.
+api_base_url: ""
+
+# An endpoints.json written by `psrl.eval.serve`. The first healthy URL is used.
+endpoints_file: ""
+
+# Model name the agent sends. Empty falls back to the checkpoint path.
+model_name: ""
+
+# Name of an env var holding the bearer token. Preferred over `api_key`, because a
+# Hydra override lands in shell history, the Ray dashboard, and the run log.
+api_key_env: ""
+
+# Literal bearer token. Only for a local server that ignores it.
+api_key: EMPTY
+
+# Upstream connection pool size for the session proxy.
+client_concurrency: 256
+
+# Per-request upstream timeout, generous because a long transcript is slow.
+request_timeout_s: 1800.0

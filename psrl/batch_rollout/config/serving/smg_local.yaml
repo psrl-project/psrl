@@ -1,0 +1,16 @@
+# @package batch_rollout.serving
+# A local SMG gateway over PSRL vLLM replicas, PS-free. TITO captures real tokens.
+
+name: smg_local
+
+# Replicas to launch. Each takes `tensor_model_parallel_size` GPUs.
+n_instances: 1
+
+# GPUs per node allocated to one replica. Must equal tp * pp.
+ngpus_per_node_per_instance: 2
+
+# Nodes per replica. Cross-node replicas need a managed Ray placement group.
+nnodes_per_instance: 1
+
+# Model name the agent sends. Empty falls back to the checkpoint path.
+model_name: ""

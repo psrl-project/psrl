@@ -61,6 +61,19 @@ psrl/
 ├── grpc/                         # ★ NEW: gRPC service surface for PSManager
 │   └── ps_manager_service.py     # Serves admission/reserve/status over gRPC (used by SMG router)
 │
+├── batch_rollout/                # ★ NEW: offline agentic rollout collection (no train/reward/eval)
+│   ├── main_batch_rollout.py     # Hydra entry + BatchRolloutTaskRunner (third entry point)
+│   ├── worker.py                 # BatchRolloutAgentLoopWorker(AgentLoopWorkerBase)
+│   ├── manager.py                # BatchRolloutAgentLoopManager(AgentLoopManagerBase)
+│   ├── data.py                   # BatchRolloutDataProcessor(DataProcessorBase)
+│   ├── output_writer.py          # RolloutOutputWriter: streaming rollout.jsonl + resume by uid
+│   ├── record.py                 # One JSON record per trajectory (extra_fields passed verbatim)
+│   ├── serving/                  # ServingBackend ABC + build_serving_backend
+│   │   ├── openai_api.py         # External OpenAI endpoint (CLIProxyAPI, or psrl.eval.serve fleet)
+│   │   ├── session_proxy.py      # Session API over an endpoint with none, text-native (no retokenize)
+│   │   └── smg_local.py          # Local SMG + PSRL vLLM replicas, PS-free (token-level dump)
+│   └── config/                   # Thin Hydra root: batch_rollout.yaml + serving/
+│
 ├── trainer/                      # ★ Orchestration layer
 │   ├── main_ppo.py               # Hydra entry: TransferQueue init → TaskRunner → trainer.fit()
 │   ├── constants_ppo.py          # Env vars, Ray runtime config, resource names
@@ -149,9 +162,11 @@ psrl/
 │   │       └── gateway.py        # RM gateway wiring
 │   │
 │   ├── agent_loop/               # --- Multi-Turn / Session Agent Loop ---
-│   │   ├── manager.py            # PSRL_AgentLoopManager (~1708): dispatch, chunk emission for
-│   │   │                         #   fine-grain overlap, distributed HTTP POST actor pool
-│   │   ├── worker.py             # AgentLoopWorker: single worker process
+│   │   ├── manager_base.py       # ★ NEW AgentLoopManagerBase: dispatch, bounded queue, POST pool
+│   │   ├── manager.py            # PSRL_AgentLoopManager(AgentLoopManagerBase): staleness buffers,
+│   │   │                         #   occupy/refill, chunk emission for fine-grain overlap
+│   │   ├── worker_base.py        # ★ NEW AgentLoopWorkerBase: reaper, registry, retry loop, hooks
+│   │   ├── worker.py             # PSRL_AgentLoopWorker(AgentLoopWorkerBase): PS status + TQ commit
 │   │   ├── gateway_client.py     # Client for SMG rollout gateway
 │   │   ├── sticky_session.py     # Session affinity for multi-turn
 │   │   ├── prometheus_utils.py   # Monitoring metrics
@@ -376,7 +391,7 @@ Templates: `ppo_trainer.yaml` (FSDP) / `ppo_megatron_trainer.yaml` (Megatron).
 | `GenRewardManager` | `workers/reward/reward_loop/gen.py` | Routes reward requests to SMG reward-model gateway |
 | `KVCacheManager` | `utils/kv_cache/manager.py` | LMCache offload / prefix retrieval / cross-instance transfer |
 | `ElasticExecutor` | `utils/elastic_rm/elastic_executor.py` | Pause/resume workloads for GPU re-sharing |
-| `PSRL_AgentLoopManager` | `workers/agent_loop/manager.py` | Multi-turn / session tool-use orchestration; also yields training chunks (`wait_for_training_chunk`) for fine-grain overlap and owns the distributed POST actor pool |
+| `PSRL_AgentLoopManager` | `workers/agent_loop/psrl_manager.py` | Multi-turn / session tool-use orchestration; also yields training chunks (`wait_for_training_chunk`) for fine-grain overlap and owns the distributed POST actor pool |
 
 ### mini-SWE Agent Layer
 
@@ -599,7 +614,7 @@ CPU-only tests are marked `pytest.mark.cpu_test`. Run with pytest under the psrl
 | File | Lines | Why it matters |
 |------|-------|---------------|
 | `trainer/ppo/ray_trainer.py` | ~3337 | THE main training loop — start here for any training question |
-| `workers/agent_loop/manager.py` | ~1708 | Request dispatch, chunk emission for fine-grain overlap (`_emit_pending_chunks`, `wait_for_training_chunk`), distributed POST actor pool |
+| `workers/agent_loop/psrl_manager.py` | ~1708 | Request dispatch, chunk emission for fine-grain overlap (`_emit_pending_chunks`, `wait_for_training_chunk`), distributed POST actor pool |
 | `workers/ps/ps_manager.py` | ~1373 | Central coordination point for all workers (also gRPC-served) |
 | `workers/ps/staleness_controller.py` | ~1365 | THE staleness system — core async innovation |
 | `workers/reward/reward_manager.py` | ~1138 | Reward pipeline over TransferQueue |
@@ -624,7 +639,7 @@ main_ppo.py (TaskRunner, TransferQueue init)
     → workers/ps/ps_manager.py → staleness_controller.py, request_status_tracker.py
         → grpc/ps_manager_service.py (gRPC surface)
     → workers/reward/reward_manager.py → reward_loop/*, reward_model/manager.py
-    → workers/agent_loop/manager.py → loops/* (incl. session_agent_loop, mini_swe_*)
+    → workers/agent_loop/psrl_manager.py → loops/* (incl. session_agent_loop, mini_swe_*)
         → tools/*, environments/*
     → utils/dataset/data_processor.py, utils/transferqueue_utils.py
     → utils/kv_cache/manager.py, utils/elastic_rm/elastic_executor.py
@@ -659,6 +674,9 @@ main_ppo.py (TaskRunner, TransferQueue init)
 | Add model arch / weight layout | `utils/converter/` (converter + `weight_layout_*`, `modeling/`) |
 | Save/restore Megatron ckpt | `utils/checkpoint/megatron_saver.py`, `scripts/convert_perrank_to_dcp.py` |
 | Build TITO training arrays | `utils/tito/training_data.py` |
+| Collect rollouts offline (no training) | `psrl/batch_rollout/` (`main_batch_rollout.py`, see its README) |
+| Add a batch-rollout serving backend | `psrl/batch_rollout/serving/` (`base.py::build_serving_backend`) |
+| Reuse the agent loop host outside RL | `workers/agent_loop/worker_base.py` + `manager_base.py` |
 | Train on SWE-bench | `examples/mini_swe/` (launch scripts, `runner.py`, `config.py`) |
 | Debug SWE agent rollouts | `workers/agent_loop/loops/mini_swe_agent_loop_v1.py` |
 | Change SWE grading | `examples/mini_swe/swebench_grader.py` |

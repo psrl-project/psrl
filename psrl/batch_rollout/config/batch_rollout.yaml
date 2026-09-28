@@ -1,0 +1,74 @@
+# Offline agentic rollout collection. A thin root, per the `psrl.yaml` convention.
+# The actor, critic, ref, algorithm, reward, and staleness groups are absent by design.
+
+defaults:
+
+  # Rollout sampling and agent settings. The same group the RL recipe uses, because
+  # the agent loops read it by these exact paths.
+  - rollout@gen_actor_rollout_ref.rollout: psrl_rollout
+
+  # Model and tokenizer.
+  - model@gen_actor_rollout_ref.model: hf_model
+
+  # Dataset loading, from veRL.
+  - data@data: data
+
+  # Serving backend. Override with `serving=smg_local`.
+  - serving: openai_api
+
+  # PSRL settings the reused components read. Trimmed to the subset collection needs.
+  - psrl@psrl: psrl_batch_rollout
+
+  - _self_
+
+batch_rollout:
+
+  # Worker actors. One per node, because each worker's episodes share that node's
+  # Docker daemon. Placement round-robins over `agent.node_ips` when it is set.
+  num_workers: 1
+
+  # Concurrent episodes per worker, and the flow control: the prompt queue is sized
+  # from it and the feed blocks when full. Keep it <= `max_concurrent_episodes`.
+  max_in_flight_per_worker: 8
+
+  # Where `rollout.jsonl` and `summary.json` land.
+  output_dir: outputs/batch_rollout
+
+  # Skip uids already in `rollout.jsonl`. Keyed on uid, which follows dataloader
+  # order, so it needs the same files, `data.seed`, and `data.shuffle`.
+  resume: True
+
+  # Include the token payload. Inert on `openai_api`, which cannot measure tokens.
+  dump_tokens: False
+
+  # Seconds between progress logs.
+  progress_interval_s: 60.0
+
+  # Give up when no record lands for this long with episodes still in flight.
+  # Sized for a wedged container, not a slow one.
+  drain_timeout_s: 3600.0
+
+ray_kwargs:
+  ray_init:
+    num_cpus: null
+
+# Off, but the group must exist: veRL's rollout config interpolates
+# `global_profiler.*` and an absent key breaks eager resolution.
+global_profiler:
+  _target_: verl.utils.profiler.ProfilerConfig
+  tool: null
+  steps: null
+  profile_continuous_steps: False
+  save_path: ${batch_rollout.output_dir}/profile
+  global_tool_config: {}
+
+# Read by veRL's rollout config and `RolloutTraceConfig`. Only names the log dir.
+trainer:
+  project_name: batch_rollout
+  experiment_name: default
+  nnodes: 1
+  n_gpus_per_node: 8
+
+hydra:
+  run:
+    dir: ${batch_rollout.output_dir}/hydra

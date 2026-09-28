@@ -1,0 +1,27 @@
+{
+  "outputs": [
+    "/logs/artifacts/results.json"
+  ],
+  "imports": [
+    "json",
+    "csv"
+  ],
+  "cases": [
+    {
+      "name": "primary",
+      "env": {}
+    }
+  ],
+  "good_solutions": [
+    "validation/good.sh"
+  ],
+  "bad_solutions": [
+    "validation/wrong_numeric.sh",
+    "validation/canned.sh"
+  ],
+  "timeouts": {
+    "reference": 1800,
+    "verifier": 600,
+    "probe": 300
+  }
+}

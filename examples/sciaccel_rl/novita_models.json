@@ -1,0 +1,47 @@
+{
+  "note": "Probed with a 1-token request. Prices are 1e-6 USD per million tokens.",
+  "accessible": [
+    {
+      "id": "openai/gpt-oss-20b",
+      "context": 131072,
+      "in_per_m": 400,
+      "out_per_m": 1500
+    },
+    {
+      "id": "openai/gpt-oss-120b",
+      "context": 131072,
+      "in_per_m": 500,
+      "out_per_m": 2500
+    },
+    {
+      "id": "pa/gpt-4.1-nano",
+      "context": 1047576,
+      "in_per_m": 1000,
+      "out_per_m": 4000
+    },
+    {
+      "id": "pa/gpt-4o-mini",
+      "context": 128000,
+      "in_per_m": 1500,
+      "out_per_m": 6000
+    },
+    {
+      "id": "pa/gpt-4.1-mini",
+      "context": 1047576,
+      "in_per_m": 4000,
+      "out_per_m": 16000
+    },
+    {
+      "id": "pa/gpt-4.1",
+      "context": 1047576,
+      "in_per_m": 20000,
+      "out_per_m": 80000
+    },
+    {
+      "id": "pa/gpt-4o",
+      "context": 128000,
+      "in_per_m": 25000,
+      "out_per_m": 100000
+    }
+  ]
+}

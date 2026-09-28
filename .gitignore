@@ -48,6 +48,12 @@ tensorflow/my_graph/*
 **/outputs
 **/outputs/
 
+# SciBuddy rollout generated datasets (built locally from packages; not source).
+examples/scibuddy_rollout/data_variants/
+examples/scibuddy_rollout/data_synth/
+examples/scibuddy_rollout/real_data/
+examples/scibuddy_rollout/synthetic_data/variants/
+
 # Talk material. Cites cluster-side measurements that stay out of published docs.
 examples/sciaccel_rl/slides/
 **/output/

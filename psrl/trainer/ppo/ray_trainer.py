@@ -78,6 +78,7 @@ from psrl.trainer.ppo.utils import (
     compute_advantage_for_multi_trajectories,
 )
 from psrl.utils.common.nixl_names import NIXL_META_SERVER_NAME
+from psrl.utils.common.serialization import json_encode_default
 from psrl.utils.common.worker_naming import WorkerKey, ps_agent_name, train_client_name
 from psrl.utils.dataset import DataProcessor
 from psrl.utils.elastic_rm.cluster_topology import ClusterTopology
@@ -93,9 +94,9 @@ from psrl.utils.post_processor import (
 )
 from psrl.utils.server.command import Command, CommandType
 from psrl.utils.transferqueue_utils import PayloadState, clear_payload
-from psrl.workers.agent_loop.manager import PSRL_AgentLoopManager
 from psrl.workers.agent_loop.prometheus_utils import update_prometheus_config
-from psrl.workers.agent_loop.worker import PSRL_AgentLoopWorker
+from psrl.workers.agent_loop.psrl_manager import PSRL_AgentLoopManager
+from psrl.workers.agent_loop.psrl_worker import PSRL_AgentLoopWorker
 from psrl.workers.config.reward_model import resolve_active_managers
 from psrl.workers.gen.rollout_coordination import RolloutCoordinator
 from psrl.workers.gen.rollout_gateway import RolloutGateway
@@ -1278,17 +1279,6 @@ class PSRL_RayPPOTrainer(RayPPOTrainer):
         for k, v in reward_extra_infos_dict.items():
             if len(v) == n:
                 base_data[k] = v
-
-        def json_encode_default(obj):
-            if isinstance(obj, np.integer):
-                return int(obj)
-            elif isinstance(obj, np.floating):
-                return float(obj)
-            elif isinstance(obj, np.bool_):
-                return bool(obj)
-            elif hasattr(obj, "tolist"):
-                return obj.tolist()
-            raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
         with open(filename, "w") as f:
             for i in range(n):

@@ -1,0 +1,20 @@
+# Agent loop config for the SciBuddy research task families.
+- name: scibuddy
+  _target_: examples.scibuddy_rollout.agent_loop.SciBuddyAgentLoop
+  harbor:
+    # Store per-episode Harbor artifacts on local disk to avoid shared filesystem
+    # inode accounting failures.
+    jobs_dir: /tmp/scibuddy_jobs
+    agent_name: terminus-2
+    # 8000 bytes per observation. A research task output can be large.
+    # The agent should ask for specific excerpts rather than full files.
+    max_observation_bytes: 8000
+    memory_mb_override: 0
+    # Sixteen concurrent episodes per worker is conservative for long-running
+    # CPU analysis tasks (hours each). Raise if workers have many cores.
+    max_concurrent_episodes: 16
+  # Budget is large because CPU analysis tasks can run for hours. Harbor enforces
+  # this externally. PSRL wait_for is only a longer backstop.
+  task_timeout_sec: 28800.0
+  # Must be >= the task's own [verifier] timeout_sec (1800 for scibuddy).
+  verifier_timeout_sec: 1800.0

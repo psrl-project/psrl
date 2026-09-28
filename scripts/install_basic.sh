@@ -36,22 +36,39 @@ python -m uv pip install --no-cache-dir "nvidia-ml-py>=12.560.30" "fastapi[stand
 python -m uv pip install --no-cache-dir "grpcio-tools>=1.81.1" "protobuf>=7.35.1,<8"
 
 echo "4. Install FlashAttention and FlashInfer"
-# Install FlashAttention 2 for packages that import `flash_attn`.
-FLASH_ATTN_CUDA_ARCHS=90 \
-FLASH_ATTENTION_FORCE_BUILD="TRUE" \
-FLASH_ATTENTION_FORCE_CXX11_ABI="FALSE" \
-FLASH_ATTENTION_SKIP_CUDA_BUILD="FALSE" \
-python -m uv pip install -U "flash-attn==2.8.1" --no-build-isolation --no-deps
+# Auto-detect the GPU compute capability so we build for the right arch and
+# only attempt FlashAttention 3 (Hopper+) where it is actually supported.
+# Example: A800 -> 8.0 -> ARCH=80 ; H100 -> 9.0 -> ARCH=90.
+if [ -n "${FLASH_ATTN_CUDA_ARCHS:-}" ]; then
+    echo "  Using pre-set FLASH_ATTN_CUDA_ARCHS=${FLASH_ATTN_CUDA_ARCHS}"
+else
+    CC=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -n1 | tr -d '[:space:]')
+    if [ -z "$CC" ]; then
+        echo "[ERROR] Could not detect GPU compute capability via nvidia-smi." >&2
+        echo "        Set FLASH_ATTN_CUDA_ARCHS manually (e.g. 80 for A100/A800, 90 for H100) and re-run." >&2
+        exit 1
+    fi
+    FLASH_ATTN_CUDA_ARCHS="${CC%.*}${CC#*.}"   # "8.0" -> "80", "9.0" -> "90"
+    echo "  Detected compute_cap=${CC} -> FLASH_ATTN_CUDA_ARCHS=${FLASH_ATTN_CUDA_ARCHS}"
+fi
 
-# Install FlashAttention 3 beta from the Hopper source tree.
-git clone --depth 1 --branch v2.8.1 https://github.com/Dao-AILab/flash-attention.git flash_attn_src
-pushd flash_attn_src/hopper
-python setup.py install
-python_path=`python -c "import site; print(site.getsitepackages()[0])"`
-mkdir -p $python_path/flash_attn_3
-wget -P $python_path/flash_attn_3 https://raw.githubusercontent.com/Dao-AILab/flash-attention/7b0bfcc3d1f69786f0c4277c582ad58acdfb297d/hopper/flash_attn_interface.py
-popd
-rm -rf flash_attn_src
+# Install FlashAttention 2 for packages that import `flash_attn`.
+FLASH_ATTN_CUDA_ARCHS="${FLASH_ATTN_CUDA_ARCHS}" FLASH_ATTENTION_FORCE_BUILD="TRUE" FLASH_ATTENTION_FORCE_CXX11_ABI="FALSE" FLASH_ATTENTION_SKIP_CUDA_BUILD="FALSE" python -m uv pip install -U "flash-attn==2.8.1" --no-build-isolation --no-deps
+
+# FlashAttention 3 only supports Hopper+ (sm90 and newer). Build it only there.
+if [ "${FLASH_ATTN_CUDA_ARCHS}" -ge 90 ] 2>/dev/null; then
+    echo "  Arch ${FLASH_ATTN_CUDA_ARCHS} supports FlashAttention 3, installing FA3 beta..."
+    git clone --depth 1 --branch v2.8.1 https://github.com/Dao-AILab/flash-attention.git flash_attn_src
+    pushd flash_attn_src/hopper
+    python setup.py install
+    python_path=`python -c "import site; print(site.getsitepackages()[0])"`
+    mkdir -p $python_path/flash_attn_3
+    wget -P $python_path/flash_attn_3 https://raw.githubusercontent.com/Dao-AILab/flash-attention/7b0bfcc3d1f69786f0c4277c582ad58acdfb297d/hopper/flash_attn_interface.py
+    popd
+    rm -rf flash_attn_src
+else
+    echo "  Arch ${FLASH_ATTN_CUDA_ARCHS} < 90 (not Hopper), skipping FlashAttention 3 install."
+fi
 
 echo "5. Install apex"
 mkdir -p apex_src

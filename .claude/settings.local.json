@@ -15,7 +15,9 @@
       "WebSearch",
       "WebFetch",
       "Bash(cd *)",
-      "Workflow(deep-research)"
+      "Workflow(deep-research)",
+      "Bash(chmod 600 *)",
+      "Bash(bash /tmp/verify_clean.sh > /tmp/verify_clean.log 2>&1; echo \"EXIT=$?\")"
     ],
     "deny": [
       "Bash(git reset --hard:*)"

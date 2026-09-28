@@ -33,10 +33,18 @@ class DatasetType:
     test: str = "test"
 
 
-# NOTE(lhy): Keep `ray.remote` here to avoid NCCL hangs and intermittent crashes
-# during vLLM generation.
-@ray.remote
-class DataProcessor:
+class DataProcessorBase:
+    """Stream a dataset into an agent loop manager, one batch at a time.
+
+    Owns dataset and dataloader construction, uid allocation, group expansion, and
+    the feed loop. The feed provides backpressure by blocking on the manager's
+    bounded queue, which is what bounds work in flight.
+
+    Ray cannot subclass an actor class, so this base is plain and each consumer
+    decorates its own leaf. `_init_data_plane` and `_register_requests` are the
+    seams for consumers with no TransferQueue and no parameter server.
+    """
+
     def __init__(
         self,
         config,
@@ -58,8 +66,7 @@ class DataProcessor:
 
         self.config = config
 
-        # TransferQueue bootstrap.
-        tq.init()
+        self._init_data_plane()
 
         # Dataset and dataloader attributes
         self.tokenizer = tokenizer
@@ -90,7 +97,7 @@ class DataProcessor:
         assert self.rollout_n >= self.alg_rollout_n, (
             f"Rollout n={self.rollout_n} must be greater than or equal to alg_rollout_n={self.alg_rollout_n}."
         )
-        self.val_rollout_n = self.config.train_actor_rollout_ref.rollout.val_kwargs.n
+        self.val_rollout_n = self._resolve_val_rollout_n()
 
         # Reserve disjoint train and validation ID ranges without overflowing `sys.maxsize`.
         self.MAX_TRAIN_ID = sys.maxsize // (2 * self.rollout_n)
@@ -111,6 +118,37 @@ class DataProcessor:
         # Create the initial datasets and dataloaders
         self.total_training_steps = None
         self._create_dataloader()
+
+    def _init_data_plane(self) -> None:
+        """Bootstrap the transport that carries sample payloads.
+
+        Overridden by consumers that do not move payloads over TransferQueue.
+        """
+        tq.init()
+
+    def _resolve_val_rollout_n(self) -> int:
+        """Return the validation sibling count, defaulting to 1 without a val split.
+
+        Only the training config declares `val_kwargs`, so a consumer with no
+        validation round (offline collection) has no such key. The value is still
+        needed here, because it sizes the validation half of the uid namespace.
+        """
+        train_cfg = self.config.get("train_actor_rollout_ref", None)
+        if train_cfg is None:
+            return 1
+        return train_cfg.rollout.val_kwargs.n
+
+    def _register_requests(self, request_ids: list, is_validate: bool = False) -> None:
+        """Announce a batch of request ids to whoever tracks their lifecycle.
+
+        RL registers them with the parameter server so the staleness inventory can
+        reserve an entry per request. Consumers with no such inventory override this.
+
+        Args:
+            request_ids (list): Child request ids about to be dispatched.
+            is_validate (bool): Whether the batch belongs to a validation round.
+        """
+        ray.get(self.ps_manager_handle.add_request.remote(request_ids, is_validate=is_validate))
 
     def _validate_data_config(self) -> None:
         """Validate the data configuration for consistency.
@@ -205,15 +243,18 @@ class DataProcessor:
                     max_samples=self.config.data.get("train_max_samples", -1),
                 )
             ]
-            self.val_datasets = [
-                create_rl_dataset(
-                    data_paths=self.config.data.val_files,
-                    data_config=self.with_rollout_tool_paths(self.config.data),
-                    tokenizer=self.tokenizer,
-                    processor=self.processor,
-                    max_samples=self.config.data.get("val_max_samples", -1),
-                )
-            ]
+            if self.needs_validation_data:
+                self.val_datasets = [
+                    create_rl_dataset(
+                        data_paths=self.config.data.val_files,
+                        data_config=self.with_rollout_tool_paths(self.config.data),
+                        tokenizer=self.tokenizer,
+                        processor=self.processor,
+                        max_samples=self.config.data.get("val_max_samples", -1),
+                    )
+                ]
+            else:
+                self.val_datasets = []
             self.train_datasets_ratios = [1.0]
 
     def build_train_sampler(self) -> None:
@@ -318,12 +359,27 @@ class DataProcessor:
         self.build_train_and_val_dataset()
         self.build_train_sampler()
         self.build_train_dataloader()
-        self.build_val_dataloader()
+        if self.needs_validation_data:
+            self.build_val_dataloader()
 
+        self.total_training_steps = self._resolve_total_training_steps()
+
+    @property
+    def needs_validation_data(self) -> bool:
+        """Report whether this consumer runs validation rounds.
+
+        A consumer with no validation split must not build its dataloader, because
+        `data.val_files` then still holds veRL's placeholder path and loading it
+        fails on a file that was never meant to exist.
+        """
+        return True
+
+    def _resolve_total_training_steps(self) -> int | None:
+        """Compute the step budget from epochs, or `None` when there is no budget."""
         total_training_steps = min(self.train_dataloader_sizes) * self.config.trainer.total_epochs
         if self.config.trainer.total_training_steps is not None:
             total_training_steps = min(total_training_steps, self.config.trainer.total_training_steps)
-        self.total_training_steps = total_training_steps
+        return total_training_steps
 
     def get_val_data_size(self):
         """Get the size of the validation dataset."""
@@ -668,7 +724,7 @@ class DataProcessor:
         else:
             request_ids = sample_ids
 
-        ray.get(self.ps_manager_handle.add_request.remote(request_ids))
+        self._register_requests(request_ids)
 
         psrl_logger.debug(
             f"sample_train_prompts: produced prompts={actual_n_prompts}, child requests={len(request_ids)} for retry."
@@ -772,7 +828,7 @@ class DataProcessor:
             values = [
                 batch_dict[key]
                 if key in batch_dict
-                else DataProcessor._create_placeholder_like(sample_value, batch_size)
+                else DataProcessorBase._create_placeholder_like(sample_value, batch_size)
                 for batch_dict, batch_size in zip(shuffled_dicts, batch_sizes)
             ]
             if isinstance(sample_value, torch.Tensor):
@@ -830,7 +886,7 @@ class DataProcessor:
                     all_request_ids = [tag["uid"] for tag in batch.tags]
                 else:
                     all_request_ids = tu.get(batch, "uid")
-                ray.get(self.ps_manager_handle.add_request.remote(all_request_ids))
+                self._register_requests(all_request_ids)
                 ray.get(self.agent_loop_manager_handle.put_data.remote(batch))
 
                 self.global_steps += 1
@@ -851,3 +907,10 @@ class DataProcessor:
 
         psrl_logger.info("Data processing stopped, sending shutdown signal.")
         self.agent_loop_manager_handle.put_data.remote(None)
+
+
+# NOTE(lhy): Keep `ray.remote` here to avoid NCCL hangs and intermittent crashes
+# during vLLM generation.
+@ray.remote
+class DataProcessor(DataProcessorBase):
+    """The RL prompt feed: registers requests with the PS and moves payloads over TQ."""

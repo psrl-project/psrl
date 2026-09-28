@@ -42,7 +42,7 @@ class FakeManager:
     """
 
     def __init__(self, chunk_size: int | None, ready_total: int, rollout_n: int = 1) -> None:
-        from psrl.workers.agent_loop.manager import PSRL_AgentLoopManager
+        from psrl.workers.agent_loop.psrl_manager import PSRL_AgentLoopManager
 
         self.train_chunk_size = chunk_size
         self._train_chunk_consumed: dict[int, int] = {}

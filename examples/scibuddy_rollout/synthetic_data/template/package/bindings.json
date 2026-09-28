@@ -1,0 +1,7 @@
+[
+  {
+    "source": "synthetic_data/template/package/environment/series.csv",
+    "target": "/data/series.csv",
+    "note": "Declared for shape parity with real packages. Harbor does not read this file, so the input is baked into environment/Dockerfile instead."
+  }
+]

@@ -1,0 +1,25 @@
+schema_version = "1.4"
+
+[task]
+name = "scibuddy/synthetic-tempstats-smoke"
+description = "Synthetic SciBuddy-shaped analysis task used to exercise the batch-rollout integration."
+
+[environment]
+cpus = 2
+memory_mb = 4096
+build_timeout_sec = 1800.0
+network_mode = "no-network"
+
+[agent]
+timeout_sec = 1800.0
+network_mode = "no-network"
+
+[verifier]
+timeout_sec = 600.0
+environment_mode = "separate"
+
+[verifier.environment]
+cpus = 2
+memory_mb = 4096
+build_timeout_sec = 1800.0
+network_mode = "no-network"

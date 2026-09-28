@@ -216,6 +216,13 @@ class AgentLoopBase(ABC):
         """
         if not isinstance(outputs, list):
             outputs = [outputs]
+
+        # NOTE(claude): No reward manager means nothing consumes a reward, as in
+        # offline collection. Return the outputs unscored, because `None` reads as
+        # an abort. Verifier output already in `extra_fields` is left untouched.
+        if self.reward_manager is None:
+            return outputs[0] if len(outputs) == 1 else outputs
+
         # NOTE(linsh): Only compute reward for the last trajectory.
         final_output = outputs[-1]
 

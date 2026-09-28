@@ -46,6 +46,9 @@ _gen_utils = _fake_module(
     INVALID_ROLLOUT_INSTANCE_ID=("", -1),
     TokenInput=MagicMock,
     TokenOutput=MagicMock,
+    # Also imported by `vllm_async_server`, which a serving-backend test reaches.
+    DEFAULT_TIMEOUT=60.0,
+    DEFAULT_MAX_CONNECTIONS=2000,
 )
 RolloutInstanceId = _gen_utils.RolloutInstanceId
 

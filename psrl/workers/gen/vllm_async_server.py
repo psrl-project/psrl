@@ -113,8 +113,12 @@ class PSRL_vLLMHttpServer(vLLMHttpServer):
             cuda_visible_devices,
         )
 
-        # model weights will be loaded by pulling from ps
-        self.config.load_format = "dummy"
+        # NOTE(claude): With a PS the engine starts on dummy weights and pulls them.
+        # Without one there is nothing to pull, so it must read the checkpoint.
+        if gen_interface.ps_manager_handle is not None:
+            self.config.load_format = "dummy"
+        elif self.config.load_format == "dummy":
+            self.config.load_format = "auto"
 
         self.psrl_config = psrl_config
         self.gen_interface = gen_interface
@@ -531,7 +535,13 @@ class PSRL_vLLMHttpServer(vLLMHttpServer):
             engine_index=0,
             preemption_queue=self.preemption_queue,
         )
-        if not self.config.disable_log_stats and self.psrl_config.status_collection.enable:
+        # NOTE(claude): `GenInterface.status_endpoint` documents None as "no status
+        # reporting". Honor it, because `ZMQPushQueue("")` raises on connect.
+        if (
+            not self.config.disable_log_stats
+            and self.psrl_config.status_collection.enable
+            and self.gen_interface.status_endpoint
+        ):
             self.stat_collector = DPLBStatCollector(
                 vllm_config,
                 self.psrl_config,
@@ -539,8 +549,7 @@ class PSRL_vLLMHttpServer(vLLMHttpServer):
                 self.gen_interface.role,
             )
             self.stat_collector.begin_record()
-            _endpoint = self.gen_interface.status_endpoint or ""
-            self.status_queue = ZMQPushQueue(_endpoint)
+            self.status_queue = ZMQPushQueue(self.gen_interface.status_endpoint)
             self.stat_collector.init_output_queue(self.status_queue)
             for data_parallel_rank in range(self.config.data_parallel_size):
                 self.stat_collector.record_model_version_update(0, data_parallel_rank)
@@ -713,18 +722,33 @@ class PSRL_vLLMHttpServer(vLLMHttpServer):
     # AGENT(VERL): PSRL-specific async methods for server control and coordination.
     # We add `data_parallel_rank` parameters to these methods to support DP-aware control in PSRL.
 
+    def _psrl_opt(self, group: str, field: str, default=None):
+        """Read an optional `psrl.<group>.<field>`, defaulting when absent.
+
+        The RL subsystems (TMS, NIXL, LMCache, the parameter server) each own a
+        config group that a rollout-only consumer has no reason to define. This
+        keeps their absence from forcing every such consumer to declare inert
+        groups just so attribute access resolves, matching how `lmcache` is
+        already read with a default.
+        """
+        node = self.psrl_config.get(group, None) if hasattr(self.psrl_config, "get") else None
+        if node is None:
+            return default
+        value = node.get(field, default) if hasattr(node, "get") else getattr(node, field, default)
+        return default if value is None else value
+
     async def is_sleeping(self) -> bool:
         return await self.engine.is_sleeping()
 
     async def sleep(self, level: int):
         await self.engine.sleep(level)
-        if self.psrl_config.tms.range in ["rollout", "all"]:
+        if self._psrl_opt("tms", "range") in ["rollout", "all"]:
             # NOTE(linsh): TMS requires an explicit aggressive cache clear.
             aggressive_empty_cache(force_sync=True)
 
     async def wake_up(self):
         wake_up_tags = ["weights", "kv_cache"]
-        if self.psrl_config.tms.enable_cuda_graph:
+        if self._psrl_opt("tms", "enable_cuda_graph", False):
             wake_up_tags.append("graph")
         await self.engine.wake_up(tags=wake_up_tags)
 
@@ -1574,7 +1598,10 @@ class PSRL_vLLMReplica(vLLMReplica):
                 "NCCL_CUMEM_ENABLE": "0",
                 "VLLM_DISABLE_ATTN": "1" if self.config.disable_attn else "0",
             }
-            if self.psrl_config.tms.range == "all" or self.psrl_config.tms.enable_nixl:
+            tms_cfg = self.psrl_config.get("tms", None) if hasattr(self.psrl_config, "get") else None
+            tms_range = (tms_cfg.get("range", None) if tms_cfg is not None else None) or None
+            tms_enable_nixl = bool(tms_cfg.get("enable_nixl", False)) if tms_cfg is not None else False
+            if tms_range == "all" or tms_enable_nixl:
                 # add tms config to rollout workers
                 import torch_memory_saver  # noqa: F401
 
@@ -1585,9 +1612,9 @@ class PSRL_vLLMReplica(vLLMReplica):
                 assert os.path.exists(dynlib_path), f"Missing LD_PRELOAD shared object: path={dynlib_path!r}."
 
                 vllm_patch_env = ""
-                if self.psrl_config.tms.enable_cuda_graph:
+                if bool(tms_cfg.get("enable_cuda_graph", False)):
                     vllm_patch_env = "TMS:GRAPH"
-                elif self.psrl_config.tms.range == "all":
+                elif tms_range == "all":
                     vllm_patch_env = "TMS"
 
                 env_vars.update(

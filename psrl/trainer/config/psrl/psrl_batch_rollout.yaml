@@ -1,0 +1,42 @@
+# PSRL settings for offline rollout collection.
+#
+# The training root `psrl.yaml` composes 24 groups. Collection reads far fewer,
+# so this root leaves the rest undeclared rather than declaring them inert.
+#
+# Absent on purpose: staleness, nixl, tms, lmcache, checkpoint, broadcast_init,
+# fine_grain_overlap, the post-process groups, and every `deployment.train_*`.
+#
+# rollout_coordination and rollout_gateway are present because the SMG gateway
+# reads them under `serving=smg_local`. Both are inert on the `openai_api` path.
+
+defaults:
+  - rollout_coordination/routing_strategy@rollout_coordination.routing_strategy
+  - rollout_coordination/redundant_rollout@rollout_coordination.redundant_rollout
+  - rollout_coordination/session_strategy@rollout_coordination.session_strategy
+  - deployment@deployment
+  - agentic_rl@agentic_rl
+  - rollout_gateway@rollout_gateway
+  - status_collection@status_collection
+  - profile@profile
+  - log_prob@log_prob
+  - _self_
+
+# Where per-worker logs, trajectory text, and session turns land.
+logging_path: ~/psrl_logs
+
+# Trajectories sampled per prompt. Read as `gen_actor_rollout_ref.rollout.n`
+# and by the dispatcher for sibling grouping.
+rollout_n: 1
+
+# Prompts handed to the dispatcher at once. Collection has no optimizer step.
+# Named for the training key because `data.yaml` interpolates it.
+staleness_buffer_entries: ${data.train_batch_size}
+
+# One fixed checkpoint, so there is no validation split to colocate.
+# Read by the agent loop worker when sizing its HTTP client.
+colocate_validate_and_train: False
+
+rollout_gateway:
+  # `auto` chains a session's turns into one trajectory by prefix. Under
+  # `manual` a caller that omits the trajectory header keeps only the last turn.
+  trajectory_id_strategy: auto

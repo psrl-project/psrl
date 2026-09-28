@@ -9,13 +9,9 @@ from omegaconf import DictConfig
 from tensordict import TensorDict
 from transfer_queue import KVBatchMeta
 from verl.utils import tensordict_utils as tu
-from verl.utils.config import omega_conf_to_dataclass
-from verl.workers.config import HFModelConfig
 
-from psrl.utils.common.http_utils import init_distributed_post_pool
 from psrl.utils.dataset import DatasetType
 from psrl.utils.logger import (
-    DualOutputHandler,
     EventType,
     log_dual_events,
     log_single_event,
@@ -29,6 +25,7 @@ from psrl.utils.transferqueue_utils import (
     validate_ready_payload,
 )
 from psrl.workers.agent_loop.loops.utils import TerminateReason
+from psrl.workers.agent_loop.manager_base import AgentLoopManagerBase
 from psrl.workers.gen.utils import RolloutInstanceId
 from psrl.workers.ps.request_status_tracker import PSRL_RequestStatus
 from psrl.workers.ps.staleness_controller import EntryInfo
@@ -77,7 +74,7 @@ class BoundedIdSet:
         return len(self._ids)
 
 
-class PSRL_AgentLoopManager:
+class PSRL_AgentLoopManager(AgentLoopManagerBase):
     def __init__(
         self,
         config: DictConfig,
@@ -103,14 +100,11 @@ class PSRL_AgentLoopManager:
             buffer_post_process_fn (Optional[callable]): Optional function to post-process
                 ready buffer data
         """
-        self.config = config
-        model_config = config.gen_actor_rollout_ref.model
-        self.model_config: HFModelConfig = omega_conf_to_dataclass(model_config)
-        self.tokenizer = self.model_config.tokenizer
-        self.processor = self.model_config.processor
-
-        # TransferQueue bootstrap.
-        tq.init()
+        super().__init__(
+            config=config,
+            data_queue_size=data_queue_size,
+            agent_loop_workers=agent_loop_workers,
+        )
 
         self.staleness = self.config.psrl.staleness
         self.group_post_process_fn = group_post_process_fn
@@ -134,22 +128,15 @@ class PSRL_AgentLoopManager:
             self.entries_per_buffer = self.config.psrl.staleness_buffer_entries
             self.ready_entries_per_buffer = self.config.psrl.staleness_buffer_entries
 
-        self.train_data_queue: asyncio.Queue = asyncio.Queue(maxsize=data_queue_size)
         self.val_data_queue: asyncio.Queue = asyncio.Queue(maxsize=data_queue_size)
         self.result_queue = asyncio.Queue()
-        self.agent_loop_workers = agent_loop_workers
         self.ps_manager_handle = ps_manager_handle
         self.data_processor = data_processor
         self.reward_manager = None
-        self.distributed_post_actors: list[ray.actor.ActorHandle] = []
 
-        self._request_counter = 0
-        self._dispatch_idx = 0
         self._val_buffer_id = 0
-        self.running_loop: asyncio.AbstractEventLoop | None = None
-        self.train_dispatch_task: asyncio.Task | None = None
         self.val_dispatch_task: asyncio.Task | None = None
-        self.stop_train_dispatch_task = False
+        self.collect_task: asyncio.Task | None = None
         self.stop_val_dispatch_task = False
         self.stop_collect_task = False
 
@@ -232,12 +219,16 @@ class PSRL_AgentLoopManager:
         # exception that ends the run.
         self._refill_breaker_diagnosis: str | None = None
 
-        # Build logger
-        self.log_prefix = "AgentLoopManager"
-        psrl_logger.addHandler(DualOutputHandler(self.config.psrl.logging_path, self.log_prefix))
-
     # AGENT(VERL): `generate_sequences`, `_run_agent_loop` are moved to agent loop workers.
     # The manager only handles data distribution and coordination.
+
+    def _init_data_plane(self) -> None:
+        """Connect to the TransferQueue controller/storage spun up by the driver."""
+        tq.init()
+
+    def dispatch_rollout_n(self, is_validate: bool = False) -> int:
+        """Return the sibling count, which differs between training and validation."""
+        return self.val_rollout_n if is_validate else self.rollout_n
 
     def set_chunk_size(self, chunk_size: int | None) -> None:
         """Set the number of prompt-groups per chunk for fine_grain_overlap.
@@ -247,55 +238,6 @@ class PSRL_AgentLoopManager:
         """
         self.train_chunk_size = chunk_size
         psrl_logger.info("AgentLoopManager: train_chunk_size set to %s", chunk_size)
-
-    async def _init_distributed_post_pool(self) -> None:
-        if not self.config.psrl.rollout_gateway.use_distributed_post or self.distributed_post_actors:
-            return
-
-        n_rollout_instances = self.config.psrl.deployment.n_rollout_instances
-        n_validate_instances = (
-            self.config.psrl.deployment.n_validate_instances if self.config.psrl.colocate_validate_and_train else 0
-        )
-        n_active_instance = n_rollout_instances + n_validate_instances
-
-        total_concurrency = self.config.psrl.rollout_gateway.server_max_concurrency * n_active_instance
-        post_actor_num_per_node = self.config.psrl.rollout_gateway.get("post_actor_num_per_node", 1)
-        self.distributed_post_actors = init_distributed_post_pool(
-            total_concurrency=total_concurrency,
-            post_actor_num_per_node=post_actor_num_per_node,
-        )
-        await asyncio.gather(
-            *[
-                worker.set_distributed_post_actors.remote(
-                    self.distributed_post_actors,
-                    True,
-                    worker_index,
-                )
-                for worker_index, worker in enumerate(self.agent_loop_workers)
-            ]
-        )
-        psrl_logger.info(
-            "Distributed POST pool started: actors=%d actors_per_node=%d total_concurrency=%d "
-            "server_max_concurrency=%d engines=%d.",
-            len(self.distributed_post_actors),
-            post_actor_num_per_node,
-            total_concurrency,
-            self.config.psrl.rollout_gateway.server_max_concurrency,
-            n_active_instance,
-        )
-
-    async def _shutdown_distributed_post_pool(self) -> None:
-        if not self.distributed_post_actors:
-            return
-        await asyncio.gather(
-            *[worker.set_distributed_post_actors.remote(None, False, 0) for worker in self.agent_loop_workers],
-            return_exceptions=True,
-        )
-        await asyncio.gather(
-            *[actor.aclose.remote() for actor in self.distributed_post_actors],
-            return_exceptions=True,
-        )
-        self.distributed_post_actors = []
 
     def set_val_buffer_size(self, val_buffer_size: int):
         """Set the validation buffer size and reset per-round validation state.
@@ -313,50 +255,36 @@ class PSRL_AgentLoopManager:
         """Set the reward manager for awaiting async reward completion."""
         self.reward_manager = reward_manager
 
-    async def start_busy_loop(self):
-        """Start the busy loop for continuous data processing from the queue."""
-        if (
+    def _has_running_tasks(self) -> bool:
+        """Report whether train dispatch, validation dispatch, or collection is live."""
+        return (
             self.train_dispatch_task is not None
             and not self.train_dispatch_task.done()
             or self.val_dispatch_task is not None
             and not self.val_dispatch_task.done()
-        ):
-            return
+            or self.collect_task is not None
+            and not self.collect_task.done()
+        )
 
-        # Start the busy loop of agent loop workers.
-        await self._init_distributed_post_pool()
-        await asyncio.gather(*[worker.start_busy_loop.remote() for worker in self.agent_loop_workers])
-
-        # Start the background task to process data
-        self.running_loop = asyncio.get_running_loop()
-        self.train_dispatch_task = self.running_loop.create_task(self._train_dispatch_data())
-        self.train_dispatch_task.add_done_callback(lambda f: f.result())
+    def _spawn_extra_tasks(self) -> list[asyncio.Task]:
+        """Spawn the validation dispatch and result collection loops."""
         self.val_dispatch_task = self.running_loop.create_task(self._val_dispatch_data())
         self.val_dispatch_task.add_done_callback(lambda f: f.result())
         self.collect_task = self.running_loop.create_task(self._collect_results())
         self.collect_task.add_done_callback(lambda f: f.result())
+        return [self.val_dispatch_task, self.collect_task]
 
-    async def stop_busy_loop(self):
-        """Stop the busy loop and wait for all tasks to complete."""
-        if (
-            (not self.train_dispatch_task or self.train_dispatch_task.done())
-            and (not self.val_dispatch_task or self.val_dispatch_task.done())
-            and (not self.collect_task or self.collect_task.done())
-        ):
-            return
-
-        self.stop_train_dispatch_task = True
+    def _request_extra_task_stop(self) -> None:
+        """Signal the validation dispatch and result collection loops to finish."""
         self.stop_val_dispatch_task = True
         self.stop_collect_task = True
-        await asyncio.gather(self.train_dispatch_task, self.val_dispatch_task, self.collect_task)
-
-        await asyncio.gather(*[worker.stop_busy_loop.remote() for worker in self.agent_loop_workers])
-        await self._shutdown_distributed_post_pool()
 
     async def put_data(self, batch: TensorDict, is_validate: bool = False):
         """Put objectref of data into the manager's data queue."""
-        queue = self.val_data_queue if is_validate else self.train_data_queue
-        await queue.put(batch)
+        if is_validate:
+            await self.val_data_queue.put(batch)
+            return
+        await super().put_data(batch)
 
     async def put_result(self, result: dict):
         """Put result data into the manager's result queue."""
@@ -408,47 +336,38 @@ class PSRL_AgentLoopManager:
                 await asyncio.sleep(0)  # Yield control to the event loop only when idle
         psrl_logger.info("Stop collecting results.")
 
-    async def _train_dispatch_data(self):
-        """Main dispatch loop that processes data from the queue and routes to workers."""
-        while not self.stop_train_dispatch_task:
-            if not self.train_data_queue.empty():
-                data: TensorDict | None = self.train_data_queue.get_nowait()
-            else:
-                await asyncio.sleep(0)
-                continue
+    async def _before_dispatch(self, data: TensorDict) -> None:
+        """Throttle dispatch on the PS model version, then mark requests unversioned."""
+        # Wait for version update in ps
+        # NOTE(lhy): we restrict the extra dispatched data to be no more than (staleness + 1) * buffer_size
+        expected_ps_version = self._get_expected_ps_version()
+        if expected_ps_version > self.curr_ps_version_tag:
+            psrl_logger.debug(f"Waiting for ps model version: {expected_ps_version}")
+            # Busy polling until the PS worker has the needed model version
+            while (
+                await self.ps_manager_handle.get_ps_model_version.remote(debug_info="agent_loop_manager")
+            ) < expected_ps_version:
+                await asyncio.sleep(0.1)
+            self.curr_ps_version_tag = expected_ps_version
+            psrl_logger.info(f"ps model version updated to {self.curr_ps_version_tag}, continue to dispatch")
 
-            # Receive END signal to stop processing data queue
-            if data is None:
-                psrl_logger.info(
-                    "Received END signal, stopping train dispatch. request_counter=%d, result_queue=%d.",
-                    self._request_counter,
-                    self.result_queue.qsize(),
-                )
-                self.stop_train_dispatch_task = True
-                continue
+        # Initialize the version tag to -1 for all requests
+        tu.assign_non_tensor_stack(data, "version_tag", [-1] * len(data))
 
-            # Wait for version update in ps
-            # NOTE(lhy): we restrict the extra dispatched data to be no more than (staleness + 1) * buffer_size
-            expected_ps_version = self._get_expected_ps_version()
-            if expected_ps_version > self.curr_ps_version_tag:
-                psrl_logger.debug(f"Waiting for ps model version: {expected_ps_version}")
-                # Busy polling until the PS worker has the needed model version
-                while (
-                    await self.ps_manager_handle.get_ps_model_version.remote(debug_info="agent_loop_manager")
-                ) < expected_ps_version:
-                    await asyncio.sleep(0.1)
-                self.curr_ps_version_tag = expected_ps_version
-                psrl_logger.info(f"ps model version updated to {self.curr_ps_version_tag}, continue to dispatch")
+    async def _on_dispatch(self, data: TensorDict, is_validate: bool = False) -> bool:
+        """Advance every request in the batch from PENDING to RUNNING in PSManager."""
+        # Rows are ordered as contiguous groups of `rollout_n` children per parent.
+        uids = tu.get(data, "uid")
+        versions = tu.get(data, "version_tag")
 
-            # Initialize the version tag to -1 for all requests
-            tu.assign_non_tensor_stack(data, "version_tag", [-1] * len(data))
-
-            # Dispatch data to agent loop workers
-            await self._inner_dispatch_data(data, is_validate=False)
-            # Increment counter after dispatch so _get_expected_ps_version reflects the number
-            # of requests that have actually been sent out.
-            self._request_counter += len(data)
-            await asyncio.sleep(0)  # Yield control to the event loop
+        return bool(
+            await self.ps_manager_handle.update_request_status.remote(
+                uids,
+                PSRL_RequestStatus.RUNNING,
+                model_version=versions,
+                is_validate=is_validate,
+            )
+        )
 
     async def _val_dispatch_data(self):
         """Main dispatch loop that processes data from the queue and routes to workers."""
@@ -863,48 +782,6 @@ class PSRL_AgentLoopManager:
         self.initial_ps_version = version
         self.curr_ps_version_tag = version
         psrl_logger.info(f"Initialized resume PS version: version={version}.")
-
-    async def _inner_dispatch_data(self, data: TensorDict, is_validate: bool = False):
-        """Update request status to RUNNING in PSManager, then fan out to workers."""
-        # Rows are ordered as contiguous groups of `rollout_n` children per parent.
-        uids = tu.get(data, "uid")
-        versions = tu.get(data, "version_tag")
-
-        # Update request status from PENDING to RUNNING
-        update_status_success = await self.ps_manager_handle.update_request_status.remote(
-            uids,
-            PSRL_RequestStatus.RUNNING,
-            model_version=versions,
-            is_validate=is_validate,
-        )
-        if not update_status_success:
-            return
-
-        dispatch_plan = self.get_dispatch_plan(data, is_validate=is_validate)
-        for worker_index, batch in dispatch_plan.items():
-            self.agent_loop_workers[worker_index].add_agent_program.remote(batch)
-
-    def get_dispatch_plan(self, data: TensorDict, is_validate: bool = False) -> dict[int, TensorDict]:
-        """Round-robin dispatch plan keyed by worker index, co-locating siblings.
-
-        Children sharing a ``parent_id`` (group sampling) land on the same worker.
-        """
-        keys_by_worker: dict[int, list[str]] = {}
-        prompt_to_worker: dict[int, int] = {}
-        rollout_n = self.val_rollout_n if is_validate else self.rollout_n
-        prompt_ids = tu.get(data, "parent_id") if rollout_n > 1 else tu.get(data, "uid")
-
-        # Round-robin dispatching
-        for i, prompt_id in enumerate(prompt_ids):
-            if prompt_id in prompt_to_worker:
-                worker_index = prompt_to_worker[prompt_id]
-            else:
-                worker_index = (self._dispatch_idx + len(prompt_to_worker)) % len(self.agent_loop_workers)
-                prompt_to_worker[prompt_id] = worker_index
-            keys_by_worker.setdefault(worker_index, []).append(i)
-
-        self._dispatch_idx = (self._dispatch_idx + len(prompt_to_worker)) % len(self.agent_loop_workers)
-        return {worker_index: data[keys] if keys else None for worker_index, keys in keys_by_worker.items()}
 
     async def occupy_requests(
         self,
