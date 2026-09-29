@@ -3,13 +3,19 @@
 - name: mini_swe_agent
   _target_: psrl.workers.agent_loop.loops.mini_swe_agent_loop_v1.MiniSWEAgentLoopV1
   sandbox_config:
-    max_parallel_tasks_per_worker: 0
+    # Cross-process file-lock slots cap all AgentLoopWorkers on one node.
+    sandbox_cpu_count: 2
+    collect_resource_metrics: ${oc.decode:${oc.env:PSRL_SANDBOX_COLLECT_RESOURCE_METRICS,false}}
     rollout_turn_timeout: 1800
     environment:
       image: "swebench-sentinel-override-per-instance"
       cwd: "/testbed"
       container_timeout: "45m"
-      grader_memory: "30g"
+    rollout_environment:
+      memory: "8g"
+    grader_environment:
+      memory: "30g"
+      timeout: 900
   agent:
     # XML function calling system template.
     system_template: |

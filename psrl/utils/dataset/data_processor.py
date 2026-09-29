@@ -610,10 +610,8 @@ class DataProcessor:
 
         chunks: list[dict] = []
         remaining = n_prompts
-        # `_get_train_next` rebuilds its iterators before re-raising, so the first
-        # `StopIteration` means this epoch ended rather than the dataset being finished.
-        # One rollover per call is allowed. A second consecutive raise means the
-        # dataloader yields nothing at all, and looping on that would spin forever.
+        # `_get_train_next` re-raises `StopIteration` only after rebuilding its iterators, so a
+        # second consecutive raise means the dataloader is exhausted and looping would spin.
         rollover_used = False
         with self.dataloader_lock:
             while remaining > 0:

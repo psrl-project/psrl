@@ -37,6 +37,7 @@ class SessionAgentLoop(AgentLoopBase):
         self.session_router_url = context.session_router_url.rstrip("/")
         self.trajectory_id_strategy = get_trajectory_id_strategy(context.config)
         self.max_turns = context.config.gen_actor_rollout_ref.rollout.multi_turn.max_turns
+        self.session_snapshot = None  # TITO session snapshot for offline analysis
 
     def get_generate_fields(self) -> list[str]:
         fields = super().get_generate_fields()
@@ -63,10 +64,16 @@ class SessionAgentLoop(AgentLoopBase):
 
     async def create_session(self, request: dict) -> str:
         """Create one TITO session and bind its routing metadata."""
+        headers = self.build_session_headers(request)
+        # Optional session-scoped prompt-too-long budget. SMG returns an Anthropic
+        # `prompt_too_long` error so Claude Code reactively compacts within the budget.
+        limit = getattr(self, "prompt_too_long_limit", None)
+        if limit is not None:
+            headers["x-smg-prompt-too-long-limit"] = str(limit)
         response = await post(
             f"{self.session_router_url}/sessions",
             payload={},
-            headers=self.build_session_headers(request),
+            headers=headers,
         )
         session_id = response["session_id"]
         psrl_logger.debug("Created TITO session %r.", session_id)
@@ -92,7 +99,44 @@ class SessionAgentLoop(AgentLoopBase):
 
     def session_api_url(self, session_id: str) -> str:
         """Return the OpenAI-compatible API base for one session."""
-        return f"{self.session_router_url}/sessions/{session_id}/v1"
+        return f"{self.session_root_url(session_id)}/v1"
+
+    def session_root_url(self, session_id: str, base_url: str | None = None) -> str:
+        """Return the protocol-neutral root for one session."""
+        root = (base_url or self.session_router_url).rstrip("/")
+        return f"{root}/sessions/{session_id}"
+
+    def attach_tito_tree_metadata(self, training_data: list[dict], outputs: list["TokenOutput"]) -> None:
+        """Attach SMG TITO tree/leaf metadata to each generated output.
+
+        Reads the snapshot cached by :meth:`get_training_data`. When the SMG
+        gateway exports the ``tree`` block, each ``TokenOutput`` gets:
+
+        - ``tito_tree``: the full session prefix-tree (nodes with id/hash/parent/
+          finish_reason/truncated/num_tokens/trajectory_ids, leaves with a
+          root-to-leaf path of node ids).
+        - ``tito_leaf``: the leaf descriptor of this trajectory (node_id, parent,
+          path_node_ids) enriched with the leaf node's finish_reason/truncated.
+
+        The generic trajectory dumper then persists ``{uid}.tree.json`` next to the
+        per-trajectory ``{uid}_{idx}.txt`` files for offline lineage analysis.
+        """
+        payload = self.session_snapshot or {}
+        tree = payload.get("tree") if isinstance(payload, dict) else None
+        if not tree:
+            return
+        nodes = {str(n.get("id")): n for n in tree.get("nodes", []) or []}
+        leaves = {str(leaf.get("trajectory_id")): leaf for leaf in tree.get("leaves", []) or []}
+        for item, output in zip(training_data, outputs):
+            leaf = leaves.get(str(item.get("trajectory_id")))
+            if leaf:
+                leaf = dict(leaf)
+                node = nodes.get(str(leaf.get("node_id"))) or {}
+                leaf.setdefault("finish_reason", node.get("finish_reason"))
+                leaf.setdefault("truncated", bool(node.get("truncated")))
+                leaf.setdefault("num_tokens", node.get("num_tokens"))
+            output.extra_fields.setdefault("tito_leaf", leaf)
+            output.extra_fields.setdefault("tito_tree", tree)
 
     async def run_session(
         self,
@@ -115,6 +159,7 @@ class SessionAgentLoop(AgentLoopBase):
 
             outputs = [self.build_token_output(item, extra_fields=result.extra_fields) for item in training_data]
             output: TokenOutput | list[TokenOutput] = outputs[0] if len(outputs) == 1 else outputs
+            self.attach_tito_tree_metadata(training_data, outputs)
             scored_output = await self.compute_reward_score(output, **request)
             if scored_output is None:
                 return None, TerminateReason.ABORTED
@@ -183,6 +228,7 @@ class SessionAgentLoop(AgentLoopBase):
     async def get_training_data(self, session_id: str) -> list[dict]:
         """Fetch and convert every trajectory in a TITO session snapshot."""
         session_data = await self.get_session_data(session_id)
+        self.session_snapshot = session_data
         trajectories = session_data.get("trajectories")
         if not isinstance(trajectories, list):
             raise RuntimeError(
@@ -207,7 +253,8 @@ class SessionAgentLoop(AgentLoopBase):
     ) -> dict:
         """Convert one trajectory from an already-fetched session snapshot."""
         records = trajectory.get("records", [])
-        self._validate_records(records)
+        if self.config.psrl.rollout_gateway.tito_debug:
+            self._validate_records(records)
         training_data = build_training_data(
             trajectory.get("accumulated_token_ids", []),
             records,
@@ -285,5 +332,6 @@ class SessionAgentLoop(AgentLoopBase):
     def _validate_records(records: list[dict]) -> None:
         for turn, record in enumerate(records):
             for mismatch in record.get("mismatch_report", []):
-                if mismatch.get("mismatch_type") != "assistant_text":
-                    raise RuntimeError(f"TITO token ID mismatch at turn {turn}: {mismatch!r}.")
+                # The TITO re-tokenization comparator is a DEBUG diagnostic. Its mismatches fire on
+                # truncated generations and mid-stream special tokens, so warn without aborting.
+                psrl_logger.warning("TITO token mismatch at turn %d: %r", turn, mismatch)

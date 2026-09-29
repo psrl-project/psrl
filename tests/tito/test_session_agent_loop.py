@@ -16,13 +16,23 @@ def _bare_loop(trajectory_id_strategy: str = "manual") -> SessionAgentLoop:
     loop.trajectory_id_strategy = trajectory_id_strategy
     loop.config = SimpleNamespace(
         psrl=SimpleNamespace(
-            rollout_coordination=SimpleNamespace(routing_strategy=SimpleNamespace(enable_trajectory_sticky=True))
+            rollout_coordination=SimpleNamespace(routing_strategy=SimpleNamespace(enable_trajectory_sticky=True)),
+            rollout_gateway=SimpleNamespace(tito_debug=False),
         )
     )
     loop.timer = SimpleNamespace(generation=nullcontext)
     loop.model_config = SimpleNamespace(path="model")
 
     return loop
+
+
+def test_session_urls_share_one_protocol_neutral_root() -> None:
+    loop = _bare_loop()
+    loop.session_router_url = "http://router:8080"
+
+    assert loop.session_root_url("session-1") == "http://router:8080/sessions/session-1"
+    assert loop.session_api_url("session-1") == "http://router:8080/sessions/session-1/v1"
+    assert loop.session_root_url("session-1", "https://public-router/") == ("https://public-router/sessions/session-1")
 
 
 def test_mini_swe_model_headers_follow_trajectory_strategy():

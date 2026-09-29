@@ -1,5 +1,6 @@
 """Length invariants across the TITO training-data flow."""
 
+import pytest
 import torch
 from psrl.utils.tito.training_data import build_training_data
 
@@ -53,17 +54,14 @@ class TestTitoLengthInvariant:
         )
         assert data["num_turns"] == 2
 
-    def test_missing_logprobs_still_aligns(self):
-        """A turn with no logprobs is recovered from accumulated ids, keeping lengths equal."""
+    def test_missing_logprobs_fails_instead_of_zero_filling(self):
+        """A turn with tokens but no logprobs must not be trained on fabricated logprobs."""
         prompt = [1, 2]
         output = [10, 11, 12]
         records = [{"prompt_token_count": len(prompt), "output_logprobs": None, "finish_reason": "stop"}]
-        data = build_training_data(accumulated_token_ids=prompt + output, records=records)
 
-        assert len(data["response_ids"]) == len(data["response_mask"])
-        assert len(data["logprobs"]) == len(data["response_ids"]), (
-            "recovered turns must still emit one logprob per response token"
-        )
+        with pytest.raises(ValueError, match="carries no output_logprobs"):
+            build_training_data(accumulated_token_ids=prompt + output, records=records)
 
     def test_twenty_five_turns_stays_aligned(self):
         """The real configuration runs 25 turns, where a per-turn drift would compound."""

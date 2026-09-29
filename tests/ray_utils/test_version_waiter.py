@@ -61,13 +61,15 @@ def test_version_waiter_blocks_until_set(ray_cluster):
         version_waiter.remote(versioned, 1, worker_id=1),
         version_waiter.remote(versioned, 2, worker_id=2),
     ]
+    # Let both waiters register before any version is set so the test exercises
+    # the blocking path rather than the "already satisfied" shortcut.
+    time.sleep(1.0)
 
-    setter_futures = [
-        version_setter.remote(versioned, 1, delay_s=0.1),
-        version_setter.remote(versioned, 2, delay_s=0.2),
-    ]
+    # Apply the versions in order, waiting for each setter, so the final version
+    # is deterministic regardless of cluster scheduling jitter.
+    ray.get(version_setter.remote(versioned, 1, delay_s=0.0))
+    ray.get(version_setter.remote(versioned, 2, delay_s=0.0))
 
-    ray.get(setter_futures)
     waiter_results = ray.get(waiter_futures)
 
     assert any("waiter 1 unblocked at version 1" in r for r in waiter_results)

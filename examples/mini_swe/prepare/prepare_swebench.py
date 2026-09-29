@@ -1,5 +1,46 @@
 """
-Convert SWE-bench and SWE-smith datasets into PSRL parquet files.
+SWE-bench / SWE-smith-py Dataset Converter.
+
+Converts Hugging Face dataset rows into the PSRL parquet format consumed by
+`fsdp_qwen_7b_swe_smith.sh` and related training scripts.
+
+Each output row contains `prompt` (a minimal user message, since the framework
+appends agent templates), `data_source` (`swebench_verified` or `swe_smith_py`),
+`reward_model` (grounding truth for reward computation), `extra_info` (per-problem
+overrides and grading metadata), and `agent_name` (`mini_swe_agent`).
+
+Usage::
+
+    # SWE-smith-py, repo-balanced 1 000 training SWE problems
+    python -m examples.mini_swe.prepare.prepare_swebench \\
+        --dataset smith \\
+        --split train \\
+        --per-repo-k 10 \\
+        --total 1000 \\
+        --output-dir examples/mini_swe/data/swe_smith_py_1k
+
+    # SWE-bench Verified, full 500
+    python -m examples.mini_swe.prepare.prepare_swebench \\
+        --dataset verified \\
+        --split test \\
+        --output-dir examples/mini_swe/data/swe_bench_verified
+
+    # SWE-bench Verified, 80-problem lightweight validation subset
+    python -m examples.mini_swe.prepare.prepare_swebench \\
+        --dataset verified \\
+        --split test \\
+        --total 80 \\
+        --repo-balanced \\
+        --output-dir examples/mini_swe/data/verified_subset_80 \\
+        --output-filename test.parquet
+
+Grading metadata:
+    Verified rows keep the ``eval_script`` / ``log_parser`` shipped by the HF
+    dataset. SWE-smith rows carry neither, so this script freezes an
+    official-shaped ``eval_script`` and the flattened SWE-smith parser name
+    (requires the ``swesmith`` package). See
+    ``examples/mini_swe/grading/freeze.py`` and
+    ``examples/mini_swe/prepare/README.md``.
 """
 
 from __future__ import annotations
@@ -12,6 +53,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+from examples.mini_swe.grading.freeze import freeze_smith_grading, validate_prepared_problem
 from examples.mini_swe.prepare.swebench_subsets import (
     filter_by_spec,
     get_swebench_image_name,
@@ -99,6 +141,11 @@ def _build_row(
     problem_statement: str = swe_problem.get("problem_statement", "") or ""
     image_name: str = get_swebench_image_name(swe_problem)
 
+    swe_problem = dict(swe_problem)
+    if needs_head_minus_one:
+        swe_problem.update(freeze_smith_grading(swe_problem))
+    validate_prepared_problem(swe_problem)
+
     f2p: list[str] = _ensure_list(swe_problem.get("FAIL_TO_PASS", []))
     p2p: list[str] = _ensure_list(swe_problem.get("PASS_TO_PASS", []))
 
@@ -125,8 +172,8 @@ def _build_row(
         },
     }
 
-    # Store the complete SWE problem dict for the grader (make_test_spec needs it).
-    # Convert to plain dict to avoid HF Arrow serialisation issues.
+    # Store the complete SWE problem dict for the grader, freezing an official-shaped
+    # eval script for SWE-smith rows that lack the HF dataset's `eval_script`/`log_parser`.
     swe_problem_plain: dict[str, Any] = {
         k: _ensure_list(v) if k in ("FAIL_TO_PASS", "PASS_TO_PASS") else v for k, v in swe_problem.items()
     }

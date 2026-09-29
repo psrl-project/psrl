@@ -198,16 +198,16 @@ class TestDanglingImagePrune:
     """Test the throttled dangling-image prune that runs after each episode."""
 
     def setup_method(self):
-        import psrl.utils.common.docker_utils as du
+        import psrl.sandbox.utils.docker_utils as du
 
         du._LAST_PRUNE_MONOTONIC = 0.0
 
     def test_prune_is_throttled_after_the_first_call(self):
         # Listing the image store is the expensive operation being defended against,
         # so this must not run once per episode.
-        import psrl.utils.common.docker_utils as du
+        import psrl.sandbox.utils.docker_utils as du
 
-        with patch("psrl.utils.common.docker_utils.subprocess.run") as run:
+        with patch("psrl.sandbox.utils.docker_utils.subprocess.run") as run:
             run.return_value = MagicMock(stdout=b"")
             assert du.prune_dangling_images() is True
             assert du.prune_dangling_images() is False
@@ -216,9 +216,9 @@ class TestDanglingImagePrune:
 
     def test_prune_only_lists_dangling_images(self):
         # Tagged task images must survive so the next episode skips a cold rebuild.
-        import psrl.utils.common.docker_utils as du
+        import psrl.sandbox.utils.docker_utils as du
 
-        with patch("psrl.utils.common.docker_utils.subprocess.run") as run:
+        with patch("psrl.sandbox.utils.docker_utils.subprocess.run") as run:
             run.return_value = MagicMock(stdout=b"")
             du.prune_dangling_images()
             assert run.call_args.args[0] == ["docker", "images", "-f", "dangling=true", "-q"]
@@ -226,7 +226,7 @@ class TestDanglingImagePrune:
     def test_prune_removes_by_id_in_batches(self):
         # `docker image prune -f` was measured removing 0 of 5816 images over 25 minutes
         # on a degraded daemon, while batched `rmi -f` cleared them in under 3 minutes.
-        import psrl.utils.common.docker_utils as du
+        import psrl.sandbox.utils.docker_utils as du
 
         remaining = {f"id{i}" for i in range(450)}
         deleted: set[str] = set()
@@ -240,7 +240,7 @@ class TestDanglingImagePrune:
                     deleted.add(image_id)
             return MagicMock(stdout=b"")
 
-        with patch("psrl.utils.common.docker_utils.subprocess.run", side_effect=fake_run):
+        with patch("psrl.sandbox.utils.docker_utils.subprocess.run", side_effect=fake_run):
             assert du.prune_dangling_images() is True
         # All 450 removed, in batches rather than one oversized argument list.
         assert len(deleted) == 450
@@ -249,30 +249,30 @@ class TestDanglingImagePrune:
     def test_an_undeletable_image_does_not_spin_the_loop(self):
         # An image held by a live container can only be untagged, so it keeps reappearing
         # in the listing. Without tracking attempts this would loop until the deadline.
-        import psrl.utils.common.docker_utils as du
+        import psrl.sandbox.utils.docker_utils as du
 
         def fake_run(cmd, **kwargs):
             if cmd[:2] == ["docker", "images"]:
                 return MagicMock(stdout=b"stuck_id\n")
             return MagicMock(stdout=b"")
 
-        with patch("psrl.utils.common.docker_utils.subprocess.run", side_effect=fake_run) as run:
+        with patch("psrl.sandbox.utils.docker_utils.subprocess.run", side_effect=fake_run) as run:
             assert du.prune_dangling_images() is True
         assert run.call_count <= 4
 
     def test_a_prune_failure_never_propagates(self):
         # A cleanup problem must not take down a rollout.
-        import psrl.utils.common.docker_utils as du
+        import psrl.sandbox.utils.docker_utils as du
 
-        with patch("psrl.utils.common.docker_utils.subprocess.run", side_effect=OSError("boom")):
+        with patch("psrl.sandbox.utils.docker_utils.subprocess.run", side_effect=OSError("boom")):
             assert du.prune_dangling_images() is False
 
     def test_per_episode_images_are_selected_by_compose_project(self):
         # These images are TAGGED, so a dangling sweep never reaches them. They must be
         # matched by the project prefix Compose derives image names from.
-        from psrl.utils.common.docker_utils import force_remove_compose_images
+        from psrl.sandbox.utils.docker_utils import force_remove_compose_images
 
-        with patch("psrl.utils.common.docker_utils.subprocess.run") as run:
+        with patch("psrl.sandbox.utils.docker_utils.subprocess.run") as run:
             run.return_value = MagicMock(stdout=b"sess-abc-main:latest\n")
             assert force_remove_compose_images("sess-ABC") == 1
             listing = run.call_args_list[0].args[0]
@@ -280,7 +280,7 @@ class TestDanglingImagePrune:
             assert run.call_args_list[1].args[0][:3] == ["docker", "rmi", "-f"]
 
     def test_empty_session_id_removes_no_images(self):
-        from psrl.utils.common.docker_utils import force_remove_compose_images
+        from psrl.sandbox.utils.docker_utils import force_remove_compose_images
 
         assert force_remove_compose_images("") == 0
 
@@ -376,13 +376,13 @@ class TestComposeProjectName:
     def test_matches_harbors_own_sanitizer(self):
         # A drifting copy would make cleanup silently target nothing.
         from harbor.environments.docker.docker import _sanitize_docker_compose_project_name as harbor_fn
-        from psrl.utils.common.docker_utils import sanitize_compose_project_name
+        from psrl.sandbox.utils.docker_utils import sanitize_compose_project_name
 
         for name in ("01a056bc-0280-7662-b62f-92edb30e7285", "ABC_def-123", "_leading", "9x", "A.B:C/D", "-dash"):
             assert sanitize_compose_project_name(name) == harbor_fn(name)
 
     def test_empty_session_id_is_a_no_op(self):
-        from psrl.utils.common.docker_utils import force_remove_compose_project
+        from psrl.sandbox.utils.docker_utils import force_remove_compose_project
 
         assert force_remove_compose_project("") == []
 

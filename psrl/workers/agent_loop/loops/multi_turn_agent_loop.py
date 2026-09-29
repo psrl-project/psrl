@@ -60,62 +60,58 @@ class MultiTurnAgentLoop(AgentLoopBase):
             processor=self.processor,
             dataset_cls=self.dataset_cls,
         )
-        self.agent_data = AgentData.get_agent_data(
-            data_class,
-            self.config,
-            self.reward_manager,
-            self.env,
-        )
-        self.agent_data.reset()
-
-        observation, info = await self.env.reset(
-            task=request,
-            seed=request.get("seed", None),
-        )
-
-        self.agent_data.init_trajectory(request)
-
-        overlong_terminate = await self.agent_data.update_from_env(observation, 0, False, info)
-
-        if overlong_terminate:
-            return await self.agent_data.finalize_output(), TerminateReason.MAX_RESPONSE_LENGTH_EXCEEDED
-
-        for _ in range(self.max_turns):
-            # Generation still uses token-in/token-out but may move to chat-completion style.
-            # TODO: remove unnecessary output data_proto fields and redundant single-request padding.
-            output = await self.generate_sequence(
-                self.agent_data.prepare_generation_request(request),
-                is_sticky_session=self.config.psrl.rollout_coordination.routing_strategy.enable_trajectory_sticky,
+        try:
+            self.agent_data = AgentData.get_agent_data(
+                data_class,
+                self.config,
+                self.reward_manager,
+                self.env,
             )
+            self.agent_data.reset()
 
-            if output is None:
-                return None, TerminateReason.ABORTED
-
-            # TODO: we may implement `update_from_model_chat_completion` in the future.
-            action, overlong_terminate = await self.agent_data.update_from_model_token_ids(output)
-
+            observation, info = await self.env.reset(
+                task=request,
+                seed=request.get("seed", None),
+            )
+            self.agent_data.init_trajectory(request)
+            overlong_terminate = await self.agent_data.update_from_env(observation, 0, False, info)
             if overlong_terminate:
                 return await self.agent_data.finalize_output(), TerminateReason.MAX_RESPONSE_LENGTH_EXCEEDED
 
-            try:
-                with self.timer.env():
-                    env_step_output = await asyncio.wait_for(
-                        self.env.step(action),
-                        timeout=self.env_step_timeout,
-                    )
-                observation = env_step_output["observation"]
-                reward = env_step_output["reward"]
-                done = env_step_output["done"]
-                info = env_step_output["info"]
-            except asyncio.TimeoutError:
-                return await self.agent_data.finalize_output(), TerminateReason.ENV_TIMEOUT
+            for _ in range(self.max_turns):
+                # Generation is token-in/token-out today but may move to chat-completion style.
+                # TODO: drop unnecessary DataProto fields and the redundant single-request padding.
+                output = await self.generate_sequence(
+                    self.agent_data.prepare_generation_request(request),
+                    is_sticky_session=self.config.psrl.rollout_coordination.routing_strategy.enable_trajectory_sticky,
+                )
+                if output is None:
+                    return None, TerminateReason.ABORTED
 
-            overlong_terminate = await self.agent_data.update_from_env(observation, reward, done, info)
+                action, overlong_terminate = await self.agent_data.update_from_model_token_ids(output)
+                if overlong_terminate:
+                    return await self.agent_data.finalize_output(), TerminateReason.MAX_RESPONSE_LENGTH_EXCEEDED
 
-            if overlong_terminate:
-                return await self.agent_data.finalize_output(), TerminateReason.MAX_RESPONSE_LENGTH_EXCEEDED
+                try:
+                    with self.timer.env():
+                        env_step_output = await asyncio.wait_for(
+                            self.env.step(action),
+                            timeout=self.env_step_timeout,
+                        )
+                    observation = env_step_output["observation"]
+                    reward = env_step_output["reward"]
+                    done = env_step_output["done"]
+                    info = env_step_output["info"]
+                except asyncio.TimeoutError:
+                    return await self.agent_data.finalize_output(), TerminateReason.ENV_TIMEOUT
 
-            if done:
-                return await self.agent_data.finalize_output(), TerminateReason.FINISHED
+                overlong_terminate = await self.agent_data.update_from_env(observation, reward, done, info)
 
-        return await self.agent_data.finalize_output(), TerminateReason.MAX_TURNS_EXCEEDED
+                if overlong_terminate:
+                    return await self.agent_data.finalize_output(), TerminateReason.MAX_RESPONSE_LENGTH_EXCEEDED
+                if done:
+                    return await self.agent_data.finalize_output(), TerminateReason.FINISHED
+
+            return await self.agent_data.finalize_output(), TerminateReason.MAX_TURNS_EXCEEDED
+        finally:
+            await self.env.close()

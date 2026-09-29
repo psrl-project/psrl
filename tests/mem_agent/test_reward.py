@@ -10,6 +10,7 @@ def test_reward_accepts_any_ground_truth_answer():
         "mem_agent_hotpotqa",
         "The answer is \\boxed{New York City}",
         ["NYC", "new york city"],
+        {"num_turns": 1},
     )
     assert result == {
         "score": 1.0,
@@ -21,4 +22,4 @@ def test_reward_accepts_any_ground_truth_answer():
 
 
 def test_reward_requires_boxed_answer():
-    assert compute_score("mem_agent_hotpotqa", "New York City", ["New York City"])["score"] == 0.0
+    assert compute_score("mem_agent_hotpotqa", "New York City", ["New York City"], {"num_turns": 1})["score"] == 0.0

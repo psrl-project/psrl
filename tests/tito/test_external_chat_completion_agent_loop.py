@@ -29,6 +29,7 @@ async def test_session_agent_loop_owns_external_agent_lifecycle():
         assert session_id == "sid"
         return [
             {
+                "trajectory_id": 0,
                 "prompt_ids": [1],
                 "response_ids": [2],
                 "response_mask": [1],
@@ -76,6 +77,7 @@ async def test_auto_session_agent_loop_returns_all_resolved_trajectories():
         assert session_id == "sid"
         return [
             {
+                "trajectory_id": 0,
                 "prompt_ids": [1],
                 "response_ids": [2],
                 "response_mask": [1],
@@ -85,6 +87,7 @@ async def test_auto_session_agent_loop_returns_all_resolved_trajectories():
                 "num_turns": 1,
             },
             {
+                "trajectory_id": 1,
                 "prompt_ids": [3],
                 "response_ids": [4],
                 "response_mask": [1],

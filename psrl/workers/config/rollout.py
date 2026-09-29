@@ -37,6 +37,8 @@ from verl.workers.config.rollout import (
     RolloutConfig as _VeRLRolloutConfig,
 )
 
+from psrl.sandbox.config import SandboxManagerConfig
+
 
 @dataclass
 class PoolingConfig(BaseConfig):
@@ -81,26 +83,21 @@ class AgentLoopConfig(_VeRLAgentLoopConfig):
     trajectory_timeout: float | None = None
     env: EnvironmentConfig = field(default_factory=EnvironmentConfig)
     data: AgentDataConfig = field(default_factory=AgentDataConfig)
+    sandbox: SandboxManagerConfig = field(default_factory=SandboxManagerConfig)
     retry_limit: int = 1
     raise_on_error: bool = True
     gamma: float = 0.0
     reward_bonus_coeff: float = 0.0
     traj_reward_mode: str = "traj"
     default_agent_loop: str = "generate_only_agent"
-    # Node IPs allowed to host agent loop workers. Empty means every alive node, which is
-    # the default round-robin placement. Naming a subset keeps container-backed rollout
-    # off a node whose Docker daemon has degraded, since such a node still accepts actors
-    # and then hangs every episode it is handed.
+    # Node IPs allowed to host agent loop workers. Empty means every alive node. Naming a
+    # subset keeps rollout off a node whose degraded Docker daemon accepts then hangs actors.
     node_ips: list[str] = field(default_factory=list)
-    # DAPO Overlong Filtering. Zero the loss mask of every trajectory a harness budget
-    # cut off, so its tokens carry no gradient while its reward still moves the GRPO
-    # group baseline. This is the DAPO mechanism verl does NOT ship: its
-    # `overlong_buffer_cfg` is Soft Overlong Punishment, a length-proportional reward
-    # penalty that shapes the score rather than the mask. SkyRL enables the filtering
-    # variant for its Harbor recipes.
+    # DAPO Overlong Filtering. Zero the loss mask of budget-truncated trajectories, so their
+    # tokens carry no gradient while their reward still moves the GRPO group baseline.
     #
-    # Off by default because it discards real rollout tokens, which is the right call
-    # only for a workload whose truncation rate is high enough to distort the gradient.
+    # Unlike verl's length-proportional Soft Overlong Punishment, this shapes the mask.
+    # Off by default because it discards real rollout tokens.
     overlong_filtering: bool = False
 
 
@@ -136,4 +133,5 @@ __all__ = [
     "CheckpointEngineConfig",
     "EnvironmentConfig",
     "AgentDataConfig",
+    "SandboxManagerConfig",
 ]

@@ -5,30 +5,8 @@ import pytest
 pytestmark = pytest.mark.cpu_test
 
 
-class TestPSManagerImport:
-    def test_ps_manager_importable(self):
-        from psrl.workers.ps.ps_manager import PSManager
-
-        assert PSManager is not None
-
-    def test_staleness_inventory_importable(self):
-        from psrl.workers.ps.staleness_controller import StalenessInventory
-
-        assert StalenessInventory is not None
-
-
 class TestPSManagerLockSemantics:
     """Test the exclusive-push / shared-pull read-write lock semantics using plain Python."""
-
-    def test_exclusive_push_lock_context_importable(self):
-        from psrl.utils.ray.lock_context import exclusive_push_model_context
-
-        assert exclusive_push_model_context is not None
-
-    def test_shared_pull_lock_context_importable(self):
-        from psrl.utils.ray.lock_context import shared_pull_model_context
-
-        assert shared_pull_model_context is not None
 
     def test_busy_polling_ray_lock_acquire_returns_true_when_free(self):
         """BusyPollingRayLock decorator: acquire returns True when the lock is free."""

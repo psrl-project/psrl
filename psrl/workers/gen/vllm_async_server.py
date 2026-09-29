@@ -6,7 +6,7 @@ import logging
 import os
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pprint import pprint
 from typing import Any
 
@@ -52,6 +52,7 @@ from vllm.v1.engine import PauseMode
 from vllm.v1.engine.async_llm import AsyncLLM
 
 import grpc
+from psrl.sandbox.config import SandboxManagerConfig
 from psrl.utils.kv_cache import KVCacheManager, LMCacheConfig
 from psrl.utils.logger import (
     DualOutputHandler,
@@ -1511,6 +1512,15 @@ class PSRL_vLLMReplica(vLLMReplica):
 
         self.servers: list[ActorHandle] = []
         self.server_class = ray.remote(PSRL_vLLMHttpServer)
+        # The HTTP server only needs inference settings. Keep worker-local
+        # sandbox configuration out of the Ray actor boundary.
+        self.server_config = replace(
+            self.config,
+            agent=replace(
+                self.config.agent,
+                sandbox=SandboxManagerConfig(),
+            ),
+        )
 
     async def init_model(self, worker_group: RayWorkerGroup):
         """Init model by launching vLLM server in each node.
@@ -1609,7 +1619,7 @@ class PSRL_vLLMReplica(vLLMReplica):
                 max_concurrency=self.max_concurrency,
             ).remote(
                 psrl_config=self.psrl_config,
-                config=self.config,
+                config=self.server_config,
                 model_config=self.model_config,
                 rollout_mode=self.rollout_mode,
                 workers=workers,

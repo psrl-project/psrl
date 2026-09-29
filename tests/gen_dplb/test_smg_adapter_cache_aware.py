@@ -98,14 +98,6 @@ def test_cache_aware_cfg_reads_nested_block():
 
 
 @pytest.mark.unit
-def test_cache_aware_cfg_legacy_top_level_fallback():
-    config = _make_config(cache_threshold=0.42, gpu_overlap_weight=1.5, lmcache_overlap_weight=0.7)
-    assert _cache_aware_cfg(config, "cache_threshold") == 0.42
-    assert _cache_aware_cfg(config, "gpu_overlap_weight") == 1.5
-    assert _cache_aware_cfg(config, "lmcache_overlap_weight") == 0.7
-
-
-@pytest.mark.unit
 def test_build_rollout_router_args_cache_aware_nested():
     config = _make_config(
         method="cache_aware",

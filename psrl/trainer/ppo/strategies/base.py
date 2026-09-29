@@ -9,15 +9,12 @@ from __future__ import annotations
 import logging
 import os
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
 
 from verl.utils.checkpoint.checkpoint_manager import should_save_ckpt_esi
 from verl.utils.debug import marked_timer
 
+from psrl.trainer.ppo.ray_trainer import PSRL_RayPPOTrainer
 from psrl.utils.logger import EventType, log_dual_events
-
-if TYPE_CHECKING:
-    from psrl.trainer.ppo.ray_trainer import PSRL_RayPPOTrainer
 
 psrl_logger = logging.getLogger(__file__)
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
@@ -59,6 +56,18 @@ class StepStrategy(ABC):
         Returns:
             KVBatchMeta: The final full batch (used for metrics and cleanup).
         """
+
+    def maybe_collect_pmr(self, batch, metrics: dict, timing_raw: dict) -> None:
+        """Collect the Prefix Match Rate of the global batch when enabled.
+
+        Strategies call this once the full global batch is available (before
+        advantage/update phases). Gated by ``trainer.enable_pmr_analysis``, and
+        a no-op otherwise so non-PMR runs pay zero cost.
+        """
+        if not self.trainer.config.trainer.get("enable_pmr_analysis", False):
+            return
+        with marked_timer("pmr", timing_raw, color="magenta"):
+            self.trainer.collect_prefix_match_rate(batch, metrics)
 
     def _run_ckpt_and_validate(
         self,

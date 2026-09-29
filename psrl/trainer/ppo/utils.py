@@ -57,10 +57,8 @@ def _compute_termination_metrics(
         metrics[f"termination/{reason}/fraction"] = len(reason_scores) / total
         metrics[f"termination/{reason}/score_mean"] = float(np.mean(reason_scores))
 
-    # The share of the batch that reaches the optimiser. Overlong filtering removes the
-    # truncated episodes, so a collapse here means the batch is nearly all truncation
-    # and the step is learning from very little. `token-mean` divides by exactly this
-    # token count, so it also says how much the surviving tokens are being scaled up.
+    # The share of the batch that reaches the optimiser. A collapse here means the step is
+    # learning from almost nothing, and `token-mean` scales surviving tokens by this count.
     metrics["termination/trained_tokens"] = float(np.sum(trained_tokens))
     metrics["termination/masked_sample_fraction"] = sum(1 for t in trained_tokens if t == 0) / total
 

@@ -3,7 +3,6 @@
 import logging
 import os
 from contextlib import nullcontext
-from typing import TYPE_CHECKING
 
 import ray
 import torch
@@ -56,11 +55,6 @@ from psrl.utils.nixl import (  # noqa: E402
 )
 from psrl.utils.ray import exclusive_push_model_context  # noqa: E402
 from psrl.workers.train.base_train_worker import PSRL_BaseTrainWorker, TrainInterface  # noqa: E402
-
-if TYPE_CHECKING:
-    from torch.distributed.tensor import DTensor
-else:
-    DTensor = None
 
 try:
     from torch_memory_saver import torch_memory_saver

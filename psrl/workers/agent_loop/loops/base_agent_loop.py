@@ -1,8 +1,10 @@
 import asyncio
 import base64
 import io
+import json
 import logging
 import os
+import traceback
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -60,6 +62,7 @@ class AgentLoopBase(ABC):
         self.timer = LoopTimer()
         self.dataset_cls = context.dataset_cls
         self.data_config = context.data_config.config
+        self.sandbox_manager = context.sandbox_manager
         self.apply_chat_template_kwargs = self.data_config.get("apply_chat_template_kwargs", {})
         self.mm_processor_kwargs = dict(self.data_config.get("mm_processor_kwargs", {}))
         self.system_prompt = initialize_system_prompt(self.tokenizer, **self.apply_chat_template_kwargs)
@@ -67,6 +70,10 @@ class AgentLoopBase(ABC):
         self.response_length = self.rollout_config.response_length
         self.prompt_length = self.rollout_config.prompt_length
         self.output_in_tq = False
+        # Retry handling may convert an exception into a TerminateReason, so keep the original
+        # failure for the final worker and manager diagnostics.
+        self.last_error: BaseException | None = None
+        self.last_error_traceback = ""
         gateway_config = self.config.psrl.rollout_gateway
         self.gateway_multimodal = GatewayMultimodalPayloadBuilder(
             gateway_config.get("multimodal_preprocessing", "rust"),
@@ -231,6 +238,7 @@ class AgentLoopBase(ABC):
             "data_source": np.array([kwargs.get("data_source", "unknown")]),
             "reward_model": np.array([kwargs.get("reward_model", {})], dtype=object),
             "extra_info": np.array([kwargs.get("extra_info", {})], dtype=object),
+            "agent_reward_info": np.array([final_output.agent_reward_info], dtype=object),
             "reward_model_dicts": np.array([kwargs.get("reward_model_dicts", [])], dtype=object),
         }
         if kwargs.get("parent_id") is not None:
@@ -675,6 +683,8 @@ class AgentLoopBase(ABC):
                 A tuple containing the output data (if any) and the termination reason.
         """
         request_ids = tu.get(request, "uid", "N/A")
+        self.last_error = None
+        self.last_error_traceback = ""
         try:
             prompt = {}
             for k, v in request.items():
@@ -707,12 +717,14 @@ class AgentLoopBase(ABC):
                         raise RuntimeError(
                             f"Agent loop run for request {request_ids} "
                             f"terminated with error: {terminate_reason.value}."
-                        )
+                        ) from self.last_error
                     psrl_logger.error(
                         "Agent loop run for request %s terminated with "
-                        "error: %s (raise_on_error=False, returning for retry/abort).",
+                        "error: %s (raise_on_error=False, returning for retry/abort).\n"
+                        "Underlying failure:\n%s",
                         request_ids,
                         terminate_reason.value,
+                        self.last_error_traceback or "<no underlying exception was captured>",
                     )
                 return None, terminate_reason
             elif not raise_on_error:
@@ -735,10 +747,14 @@ class AgentLoopBase(ABC):
                 exc_info=True,
             )
             return None, TerminateReason.TRAJECTORY_TIMEOUT
-        except Exception:
+        except Exception as exc:
+            self.last_error = exc
+            self.last_error_traceback = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
             if not raise_on_error:
                 psrl_logger.error(
-                    f"Exception in agent_loop.run for request {request_ids}",
+                    "Exception in agent_loop.run for request %s.\nUnderlying failure:\n%s",
+                    request_ids,
+                    self.last_error_traceback,
                     exc_info=True,
                 )
                 return None, TerminateReason.ROLLOUT_ERROR
@@ -819,7 +835,22 @@ class AgentLoopBase(ABC):
         if runner_timing.get("grading_s"):
             breakdown.append(f"grading: {runner_timing['grading_s']:.1f}s")
         if runner_timing.get("prep_s"):
-            breakdown.append(f"prep: {runner_timing['prep_s']:.1f}s")
+            # Fine-grained prep breakdown to locate bottlenecks in task prep, sandbox cold
+            # start, clean snapshot, sandbox init, git sanitization, and harness preparation.
+            prep_parts = [f"total={runner_timing['prep_s']:.1f}s"]
+            for key, label in (
+                ("task_prepare_s", "task"),
+                ("sandbox_create_s", "sandbox"),
+                ("snapshot_s", "snapshot"),
+                ("sandbox_init_s", "sandbox_init"),
+                ("git_probe_s", "git_probe"),
+                ("git_purge_s", "git_purge"),
+                ("harness_prepare_s", "harness_prepare"),
+            ):
+                value = runner_timing.get(key)
+                if value:
+                    prep_parts.append(f"{label}={value:.1f}s")
+            breakdown.append("prep: " + " | ".join(prep_parts))
 
         text = ""
         if patch:
@@ -832,6 +863,24 @@ class AgentLoopBase(ABC):
             f"env: {n_env} | total: {total_tokens}\n"
             f"[Time Breakdown] {' | '.join(breakdown)}\n"
         )
+        compaction_window = info.get("compaction_context_window_tokens")
+        compaction_limit = info.get("compaction_token_limit")
+        if compaction_window is not None or compaction_limit is not None:
+            text += (
+                "[Compaction] context_window_tokens: "
+                f"{compaction_window if compaction_window is not None else 'disabled'} | "
+                "trigger_tokens: "
+                f"{compaction_limit if compaction_limit is not None else 'disabled'} | "
+                f"trajectory_count: {info.get('trajectory_count', 1)}\n"
+            )
+        leaf = (out.extra_fields or {}).get("tito_leaf")
+        if isinstance(leaf, dict):
+            text += (
+                f"[TITO Leaf] trajectory_id={leaf.get('trajectory_id')} | "
+                f"node_id={leaf.get('node_id')} | parent={leaf.get('parent')} | "
+                f"finish_reason={leaf.get('finish_reason')} | truncated={leaf.get('truncated')} | "
+                f"num_tokens={leaf.get('num_tokens')} | path={leaf.get('path_node_ids')}\n"
+            )
         return text
 
     def _dump_trajectory_text(
@@ -877,6 +926,16 @@ class AgentLoopBase(ABC):
                 parts.append(self._build_summary_text(out, terminate_reason))
                 traj_id = str(uid) if len(outs) == 1 else f"{uid}_{idx}"
                 self.traj_writer.write(version, traj_id, "".join(parts))
+                # Persist the raw SMG TITO prefix-tree snapshot once per request for offline analysis.
+                if idx == 0:
+                    tree = (out.extra_fields or {}).get("tito_tree")
+                    if isinstance(tree, dict):
+                        self.traj_writer.write(
+                            version,
+                            f"{uid}.tree",
+                            json.dumps(tree, ensure_ascii=False, sort_keys=True, indent=1),
+                            suffix=".json",
+                        )
         except Exception:
             psrl_logger.warning(
                 "Failed to dump trajectory text for uid=%s.",

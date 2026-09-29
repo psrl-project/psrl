@@ -40,12 +40,12 @@ def test_engine_train_worker_referenced_in_task_runner():
 
 
 def test_critic_worker_uses_training_worker():
-    """TaskRunner.add_critic_worker must use PSRL_TrainWorker (not legacy fsdp/megatron workers)."""
+    """TaskRunner.add_critic_worker must use verl's unified TrainingWorker (not legacy fsdp/megatron workers)."""
     import inspect
 
     from psrl.trainer.main_ppo import TaskRunner
 
     src = inspect.getsource(TaskRunner.add_critic_worker)
-    assert "PSRL_TrainWorker" in src
+    assert "TrainingWorker" in src
     assert "fsdp_workers" not in src
     assert "megatron_workers" not in src

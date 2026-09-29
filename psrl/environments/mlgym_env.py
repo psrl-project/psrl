@@ -270,7 +270,7 @@ class MLGymEnvironment(Environment[dict, None]):
         """Force-remove any container still labelled with this episode id."""
         if self._episode_id is None:
             return
-        from psrl.utils.common.docker_utils import force_remove_containers_by_label
+        from psrl.sandbox.utils.docker_utils import force_remove_containers_by_label
 
         await asyncio.to_thread(force_remove_containers_by_label, "psrl.airs_episode_id", self._episode_id)
 

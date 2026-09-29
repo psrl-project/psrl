@@ -62,7 +62,6 @@ async def test_mem_agent_uses_independent_conversations_and_overwrites_memory():
         model="model",
         config=MemAgentRuntimeConfig(chunk_tokens=2, max_chunks=2),
         api_key="EMPTY",
-        trajectory_id=0,
         http_session=HttpSession(),
     ).run(
         "Which answer?",
@@ -83,7 +82,6 @@ async def test_mem_agent_uses_independent_conversations_and_overwrites_memory():
     assert "memory-two" in calls[2][1]["messages"][0]["content"]
     assert "gamma delta" not in calls[2][1]["messages"][0]["content"]
     assert calls[0][2]["Authorization"] == "Bearer EMPTY"
-    assert calls[0][2]["x-smg-tito-trajectory-id"] == "0"
 
 
 @pytest.mark.asyncio
@@ -100,41 +98,3 @@ async def test_mem_agent_rejects_silent_context_truncation():
             config=MemAgentRuntimeConfig(chunk_tokens=1, max_chunks=2),
             http_session=HttpSession(),
         ).run("question", "one two three")
-
-
-@pytest.mark.asyncio
-async def test_mem_agent_auto_mode_omits_trajectory_header():
-    calls = []
-
-    class Response:
-        def raise_for_status(self):
-            return None
-
-        async def json(self):
-            return {"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]}
-
-    class RequestContext:
-        async def __aenter__(self):
-            return Response()
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return None
-
-    class HttpSession:
-        def post(self, url, *, json, headers):
-            del url, json
-            calls.append(headers)
-            return RequestContext()
-
-    await MemAgent(
-        tokenizer=WordTokenizer(),
-        base_url="http://session-router/sessions/sid/v1",
-        model="model",
-        config=MemAgentRuntimeConfig(chunk_tokens=1, max_chunks=1),
-        api_key="EMPTY",
-        trajectory_id=None,
-        http_session=HttpSession(),
-    ).run("question", "context")
-
-    assert calls
-    assert all("x-smg-tito-trajectory-id" not in headers for headers in calls)

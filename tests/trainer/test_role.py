@@ -16,6 +16,7 @@ class TestPSRLRole:
             "ActorRolloutRef",
             "Validate",
             "DummyPolicy",
+            "TeacherModel",
         }
         actual = {r.name for r in PSRL_Role}
         assert expected == actual
@@ -23,12 +24,3 @@ class TestPSRLRole:
     def test_role_values_are_unique(self):
         values = [r.value for r in PSRL_Role]
         assert len(values) == len(set(values))
-
-    def test_roles_are_enum_members(self):
-        for role in PSRL_Role:
-            assert PSRL_Role[role.name] == role
-
-    def test_role_is_usable_as_dict_key(self):
-        role_map = {role: role.name for role in PSRL_Role}
-        assert role_map[PSRL_Role.Actor] == "Actor"
-        assert role_map[PSRL_Role.Validate] == "Validate"

@@ -2,14 +2,14 @@ import asyncio
 import concurrent.futures
 import logging
 import os
-import re
+import threading
 from dataclasses import asdict
 
 from examples.mini_swe.config import MiniSWEAgentRuntimeConfig, build_runtime_config
-from examples.mini_swe.runner import run_agent
+from examples.mini_swe.runner import build_grader_spec, parse_duration_seconds, run_agent
 
 from psrl.environments import Environment
-from psrl.utils.concurrency import SlotManager
+from psrl.sandbox import SyncSandboxManager
 from psrl.workers.agent_loop.agent_data import AgentData, MiniSWEAgentData
 from psrl.workers.agent_loop.context import AgentLoopContext
 from psrl.workers.agent_loop.loops.session_agent_loop import SessionAgentLoop
@@ -19,18 +19,10 @@ from psrl.workers.gen.utils import TokenOutput
 psrl_logger = logging.getLogger(__name__)
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
 
-_DEFAULT_EPISODE_TIMEOUT_SECS = 7200.0
 _RUNNER_THREAD_POOL = concurrent.futures.ThreadPoolExecutor(
     max_workers=int(os.getenv("MINI_SWE_RUNNER_THREADS", "128")),
     thread_name_prefix="mini-swe-runner",
 )
-
-
-def _parse_timeout_secs(value: str) -> float:
-    match = re.fullmatch(r"(\d+(?:\.\d+)?)\s*([hms]?)", str(value).strip().lower())
-    if match is None:
-        return _DEFAULT_EPISODE_TIMEOUT_SECS
-    return float(match.group(1)) * {"h": 3600.0, "m": 60.0, "s": 1.0, "": 1.0}[match.group(2)]
 
 
 @register("mini_swe_agent")
@@ -57,6 +49,7 @@ class MiniSWEAgentLoopV1(SessionAgentLoop):
         observation: dict,
         runtime_config: MiniSWEAgentRuntimeConfig,
         session_id: str,
+        sandbox: SyncSandboxManager,
     ) -> dict:
         runner_observation = {key: value for key, value in observation.items() if key != "runtime_config"}
         payload = {
@@ -68,13 +61,43 @@ class MiniSWEAgentLoopV1(SessionAgentLoop):
             "runtime_config": asdict(runtime_config),
             "max_turns": self.max_turns,
             "trajectory_id_strategy": self.trajectory_id_strategy,
-            "actor_id": os.getenv("PSRL_ACTOR_ID", ""),
+            "sandbox_prefix": session_id,
         }
-        timeout = _parse_timeout_secs(runtime_config.sandbox_config.environment.container_timeout) + 1200.0
-        return await asyncio.wait_for(
-            asyncio.get_running_loop().run_in_executor(_RUNNER_THREAD_POOL, run_agent, payload),
-            timeout=timeout,
+        episode_timeout = parse_duration_seconds(runtime_config.sandbox_config.environment.container_timeout)
+        if episode_timeout is None:
+            raise ValueError("MiniSWE container_timeout must be configured.")
+        timeout = episode_timeout + 1200.0
+        grader_spec = build_grader_spec(payload)
+        prepare_task = (
+            asyncio.create_task(
+                self.sandbox_manager.prepare(grader_spec, backend=runtime_config.sandbox_config.backend)
+            )
+            if grader_spec is not None
+            else None
         )
+        cancel_event = threading.Event()
+        runner = asyncio.get_running_loop().run_in_executor(
+            _RUNNER_THREAD_POOL,
+            run_agent,
+            payload,
+            sandbox,
+            cancel_event,
+        )
+        try:
+            return await asyncio.wait_for(asyncio.shield(runner), timeout=timeout)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            cancel_event.set()
+            try:
+                await asyncio.shield(runner)
+            except Exception:
+                pass
+            raise
+        finally:
+            if prepare_task is not None:
+                prepare_task.cancel()
+                results = await asyncio.gather(prepare_task, return_exceptions=True)
+                if isinstance(results[0], Exception):
+                    psrl_logger.warning(f"Grader image preparation failed: {results[0]!r}.")
 
     async def run(
         self,
@@ -99,20 +122,15 @@ class MiniSWEAgentLoopV1(SessionAgentLoop):
         agent_data.init_trajectory(request)
 
         session_id: str | None = None
-        run_slot: tuple[int, int] | None = None
+        sync_sandbox = None
         try:
             runtime_config = observation["runtime_config"]
-            parallelism = runtime_config.sandbox_config.max_parallel_tasks_per_worker
-            if parallelism > 0:
-                namespace = os.path.join(
-                    str(self.config.trainer.project_name),
-                    str(self.config.trainer.experiment_name),
-                )
-                run_slot = await SlotManager.acquire(parallelism, namespace, prefix="psrl_mini_swe_agent_slots")
-
             session_id = await self.create_session(request)
+            sync_sandbox = self.sandbox_manager.sync(
+                backend=runtime_config.sandbox_config.backend,
+            )
             try:
-                result = await self._run_agent(request, observation, runtime_config, session_id)
+                result = await self._run_agent(request, observation, runtime_config, session_id, sync_sandbox)
             except asyncio.TimeoutError:
                 return None, TerminateReason.TRAJECTORY_TIMEOUT
             if result.get("exit_status") == "error":
@@ -141,8 +159,11 @@ class MiniSWEAgentLoopV1(SessionAgentLoop):
             return (finalized, terminate_reason) if finalized is not None else (None, TerminateReason.ABORTED)
         finally:
             try:
-                await env.close()
+                if sync_sandbox is not None:
+                    await sync_sandbox.aclose()
             finally:
-                SlotManager.release(run_slot)
-                if session_id is not None:
-                    await self.delete_session(session_id)
+                try:
+                    await env.close()
+                finally:
+                    if session_id is not None:
+                        await self.delete_session(session_id)

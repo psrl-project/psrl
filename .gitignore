@@ -56,6 +56,7 @@ examples/sciaccel_rl/slides/
 **/logs/
 **/log/
 **/*log*/
+!examples/mini_swe/grading/_vendor/log_parsers/
 # "topology" contains "log", so the rule above swallows this config group.
 !psrl/eval/config/topology/
 **/models/

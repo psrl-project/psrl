@@ -155,6 +155,7 @@ psrl/
 │   │   ├── gateway_client.py     # Client for SMG rollout gateway
 │   │   ├── sticky_session.py     # Session affinity for multi-turn
 │   │   ├── prometheus_utils.py   # Monitoring metrics
+│   │   ├── harness/              # Harness protocol/config/adapters + immutable task contract
 │   │   ├── agent_data/           # Data structures for agent interactions
 │   │   │   ├── base.py, conversation_agent_data.py, tool_agent_data.py
 │   │   │   └── mini_swe_agent_data.py  # MiniSWEAgentData (patch + grading state)
@@ -162,7 +163,9 @@ psrl/
 │   │       ├── base_agent_loop.py, generate_agent_loop.py, batch_generate_agent_loop.py
 │   │       ├── multi_turn_agent_loop.py, multi_turn_completion_agent_loop.py
 │   │       ├── session_agent_loop.py    # ★ NEW: SMG SessionRouter + TITO-backed loop
-│   │       ├── mini_swe_agent_loop_v1.py# ★ CURRENT active SWE-bench agent loop (Docker + async PSRL rollout)
+│   │       ├── harness_agent_loop.py    # Generic task/sandbox/harness/TITO lifecycle (template method)
+│   │       ├── mini_swe_harness_agent_loop.py # Mini-SWE task hooks: env, patch, clean grader
+│   │       ├── mini_swe_agent_loop_v1.py# ★ CURRENT SWE-bench loop (pluggable sandbox + async rollout)
 │   │       └── utils.py
 │   │
 │   └── config/                   # Worker-level config dataclasses (trimmed)
@@ -202,8 +205,7 @@ psrl/
 │   │   ├── cluster_topology.py   # ClusterTopology / GPUSlot / InstanceStatus
 │   │   └── diagnostics.py        # Backlog diagnostics logging
 │   │
-│   ├── concurrency/              # ★ NEW: cross-process limiters
-│   │   ├── slot.py               # fcntl file-lock slot limiter
+│   ├── concurrency/              # Process-local concurrency utilities
 │   │   └── token_bucket.py       # rate limiting
 │   │
 │   ├── checkpoint/               # ★ NEW: checkpoint helpers
@@ -224,7 +226,7 @@ psrl/
 │   ├── dataset/                  # data_processor.py (DataProcessor), rl_dataset.py, utils.py
 │   ├── post_processor/           # base.py + buffer_post_process/ + group_post_process/
 │   ├── profiling/                # collector / event_converter / records
-│   ├── common/                   # chat_template, docker_utils, http_utils (+ distributed POST
+│   ├── common/                   # async_utils, chat_template, http_utils (+ distributed POST
 │   │                             #   actor pool), http_io_thread, memory_utils, nixl_names,
 │   │                             #   patch_utils, serialization, worker_naming, dynamic_import
 │   ├── ray/                      # lazy_primitives, lock_context
@@ -290,7 +292,7 @@ deprecated/          # ★ Top-level graveyard: pre-SMG code, not imported by an
 examples/
 ├── mini_swe/        # ★ SWE-bench RL recipe: fsdp_/megatron_ launch scripts (7B–32B, swe_gym +
 │                    #   swe_smith), config.py, reward.py, swebench_grader.py, runner.py,
-│                    #   config/, data/, eval/, prepare/, plus checked-in run logs
+│                    #   config/, data/, eval/, prepare/, utils/, plus checked-in run logs
 ├── dapo_trainer/    # DAPO recipes (fsdp + megatron, 3B–70B)
 ├── tx/              # Qwen3 / Qwen3.5 launch scripts (8B/32B, 4B/35B-A3B)
 ├── anaylsis/        # [sic] Rollout analysis plots: plot_request_route_timeline.py,
@@ -377,15 +379,31 @@ Templates: `ppo_trainer.yaml` (FSDP) / `ppo_megatron_trainer.yaml` (Megatron).
 | `KVCacheManager` | `utils/kv_cache/manager.py` | LMCache offload / prefix retrieval / cross-instance transfer |
 | `ElasticExecutor` | `utils/elastic_rm/elastic_executor.py` | Pause/resume workloads for GPU re-sharing |
 | `PSRL_AgentLoopManager` | `workers/agent_loop/manager.py` | Multi-turn / session tool-use orchestration; also yields training chunks (`wait_for_training_chunk`) for fine-grain overlap and owns the distributed POST actor pool |
+| `HarnessAgentLoop` | `workers/agent_loop/loops/harness_agent_loop.py` | Generic template-method loop owning task sandbox, harness process, session-scoped TITO capture, abort, and cleanup |
+| `HarnessTaskContext` | `workers/agent_loop/harness/task.py` | Immutable task description: prompt, sandbox specs/backend, snapshot/metrics policy, and opaque task state |
 
 ### mini-SWE Agent Layer
 
 | Class | File | Role |
 |-------|------|------|
-| `MiniSWEAgentLoopV1` | `workers/agent_loop/loops/mini_swe_agent_loop_v1.py` | CURRENT active SWE-bench agent loop: Docker env + async PSRL rollout bridge |
+| `MiniSWEAgentLoopV1` | `workers/agent_loop/loops/mini_swe_agent_loop_v1.py` | CURRENT SWE-bench loop: sync sandbox facade + async PSRL rollout bridge |
+| `MiniSWEHarnessAgentLoop` | `workers/agent_loop/loops/mini_swe_harness_agent_loop.py` | Harness-based SWE loop; supplies environment, prompt, patch collection, clean grading, and task cleanup hooks |
 | `MiniSWEAgentData` | `workers/agent_loop/agent_data/mini_swe_agent_data.py` | Trajectory building, patch extraction, grading state |
 | `ConversationAgentData` | `workers/agent_loop/agent_data/conversation_agent_data.py` | Chat-template base (OpenAI format, token counting) |
 | `MiniSWEEnvironment` | `environments/mini_swe_env.py` | SWE task parsing, per-problem config override merging |
+| `ClaudeCodeHarness` / `CodexHarness` | `workers/agent_loop/harness/` | CLI-specific installation, launch, callback environment, output bounding, and abort behavior |
+
+### Sandbox Layer
+
+| Class | File | Role |
+|-------|------|------|
+| `SandboxManager` / `SandboxLease` | `sandbox/manager.py` | Worker registry, idempotent create, capability/state-policy gates and lifecycle ownership |
+| `SyncSandboxManager` / `SyncSandboxSession` | `sandbox/sync.py` | Thread facade over the owning worker event loop; no extra backend client/loop |
+| `DockerBackend` | `sandbox/backends/docker.py` | Persistent Engine API data plane, typed security/disk policy, container limits and metrics |
+| `DockerLifecycle` | `sandbox/backends/docker_lifecycle.py` | Worker owner lease, graceful cleanup and restartable node-level crash collector |
+| `SandboxCapacityCoordinator` | `sandbox/capacity.py` | One Ray actor per node; weighted CPU+memory admission using actual sandbox requests |
+| `AgentEnvBackend` | `sandbox/backends/e2b.py` | AgentEnv image/template factory plus native full-state fork/snapshot driver |
+| `CubeSandboxBackend` | `sandbox/backends/e2b.py` | Cube template factory plus snapshot/restore branch driver |
 
 ### Staleness System
 
@@ -487,12 +505,26 @@ utils/tito/training_data.py converts them to prompt/response/mask/logprob arrays
 ```
 MiniSWEAgentLoopV1.run(request)
   → MiniSWEEnvironment.reset(task): parse extra_info, apply_data_overrides → runtime_config
-  → worker thread: DefaultAgent.run(task) in DockerEnvironment
-      (observe → _PSRLModel.query() → parse action → exec in Docker;
-       _PSRLModel bridges sync calls to async PSRL rollout via queues)
-  → async _generation_loop: poll req_q → rollout → res_q; token/timeout/turn guards
+  → SandboxManager.sync() → SyncSandboxManager
+  → worker thread: DefaultAgent.run(task) through MiniSWEAgentAdapter
+      (observe → model query → parse action → generic SyncSandboxSession.exec)
+  → capable microVM only: clean baseline snapshot → matching verifier restore
   → post-rollout grading (smith: checkout+patch+revert-tests+harness / gym: eval_script)
   → finalize: compute_score(data_source) → DataProto with reward
+```
+
+Harness-based comparison path:
+
+```
+HarnessAgentLoop.run(request)                       # generic lifecycle owner
+  → MiniSWEHarnessAgentLoop.prepare_harness_task  # environment + task sandbox spec
+  → create TITO session + acquire task sandbox
+  → ClaudeCodeHarness/CodexHarness.prepare + run  # CLI calls session-scoped URL
+  → TITO prefix tree emits one or more trajectories
+  → collect_harness_artifact                     # patch before sandbox release
+  → release agent sandbox + delete/drain session
+  → MiniSWEHarnessAgentLoop.finalize_harness_task # independent clean grader
+  → reward + TokenOutput(s) + generic cleanup
 ```
 
 ---

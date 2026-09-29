@@ -328,6 +328,6 @@ grader for leaderboard submission.
 ### In-training validation
 
 During training, PSRL runs validation rollouts on `test_files` every `test_freq`
-steps using the same `MiniSWEAgentLoop` and `compute_score` as training. The
+steps using the same `MiniSWEAgentLoopV1` and `compute_score` as training. The
 `train/acc` and `val/acc` wandb metrics track resolve rate throughout training
 without needing to invoke `eval_swebench.py`.

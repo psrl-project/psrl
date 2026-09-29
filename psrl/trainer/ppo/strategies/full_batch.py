@@ -6,8 +6,6 @@ none``) and is numerically identical to the original ``ray_trainer.fit()``
 step body.
 """
 
-from __future__ import annotations
-
 import ray
 from verl.utils.debug import marked_timer
 
@@ -40,6 +38,10 @@ class FullBatchStepStrategy(StepStrategy):
                 event_type=EventType.SWITCH,
             ):
                 t.switch_to_trainer_mode()
+
+        # Prefix Match Rate of the full global batch (before balancing /
+        # mini-batch splitting), logged under pmr/*.
+        self.maybe_collect_pmr(batch, metrics, timing_raw)
 
         if t.config.trainer.balance_batch:
             batch = t._balance_batch(batch, metrics=metrics)

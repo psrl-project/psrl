@@ -1,5 +1,6 @@
 import argparse
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Any
 
@@ -42,6 +43,29 @@ def _cache_aware_cfg(config: Any, key: str, default: Any = None) -> Any:
     if nested is not None:
         return nested
     return default
+
+
+def _resolve_custom_chat_template(config: Any) -> str | None:
+    """Resolve the actor chat template to a chat-template FILE PATH for SMG.
+
+    `rollout.chat_template` already names a file. `model.custom_chat_template`
+    accepts either a path or inline jinja, so an inline value is materialized
+    under the psrl log dir for the gateway to load.
+    """
+    value = cfg_get(config, "gen_actor_rollout_ref.rollout.chat_template", None)
+    if value:
+        return value
+    value = cfg_get(config, "gen_actor_rollout_ref.model.custom_chat_template", None)
+    if not value:
+        return None
+    if os.path.isfile(value):
+        return value
+    log_dir = cfg_get(config, "psrl.logging_path", None) or "/tmp"
+    os.makedirs(log_dir, exist_ok=True)
+    target = os.path.join(log_dir, "custom_chat_template.jinja")
+    with open(target, "w") as f:
+        f.write(value)
+    return target
 
 
 def build_rollout_router_args(config: Any, host: str, port: int, ps_manager_addr: str):
@@ -130,21 +154,27 @@ def build_rollout_router_args(config: Any, host: str, port: int, ps_manager_addr
         psrl_kv_transfer_enable=kv_transfer_enable,
         psrl_kv_transfer_mode=kv_transfer_mode,
         psrl_kv_transfer_timeout_ms=kv_transfer_timeout_ms,
-        enable_tito=True,
+        enable_tito=bool(cfg_get(config, "psrl.rollout_gateway.enable_tito", True)),
         tito_debug=bool(cfg_get(config, "psrl.rollout_gateway.tito_debug", False)),
         tito_gc_threshold=cfg_get(config, "psrl.rollout_gateway.tito_gc_threshold", None),
         trajectory_id_strategy=get_trajectory_id_strategy(config),
+        tito_tool_normalization=str(cfg_get(config, "psrl.rollout_gateway.tito_tool_normalization", "none")),
+        tito_workdir=str(cfg_get(config, "psrl.rollout_gateway.tito_workdir", "/testbed")),
+        tito_drop_dead_leaves=bool(cfg_get(config, "psrl.rollout_gateway.tito_drop_dead_leaves", False)),
         multimodal_tensor_transport=str(
             cfg_get(config, "psrl.rollout_gateway.multimodal_tensor_transport", "auto")
         ).lower(),
         multimodal_shm_min_bytes=int(cfg_get(config, "psrl.rollout_gateway.multimodal_shm_min_bytes", 64 * 1024)),
         model_path=cfg_get(config, "train_actor_rollout_ref.model.path", None),
-        chat_template=cfg_get(config, "gen_actor_rollout_ref.rollout.chat_template", None),
         service_discovery=False,
         prometheus_port=None,
         request_timeout_secs=2**64 - 1,
         log_level="warn",
         log_dir=cfg_get(config, "psrl.logging_path", None),
+        tool_call_parser=cfg_get(config, "psrl.rollout_gateway.tool_call_parser", "qwen"),
+        # Forward the patched actor chat template (e.g. Qwen3.5 tolerant of mid-conversation
+        # system messages) so harness requests render like the data side.
+        chat_template=_resolve_custom_chat_template(config),
         api_key=None,
         disable_health_check=True,
     )
@@ -185,6 +215,7 @@ def build_reward_router_args(config: Any, host: str, port: int, prometheus_port:
         request_timeout_secs=2**64 - 1,
         log_level="warn",
         log_dir=cfg_get(config, "psrl.logging_path", None),
+        tool_call_parser=cfg_get(config, "psrl.rollout_gateway.tool_call_parser", "qwen"),
         api_key=None,
         disable_health_check=True,
     )
