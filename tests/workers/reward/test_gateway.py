@@ -1,89 +1,41 @@
 """CPU tests for RewardModelGateway router args construction."""
 
-import importlib.util
-import pathlib
-import sys
-import types as _types
-from unittest.mock import MagicMock
+import importlib
 
+import psrl.workers.reward.reward_model.gateway as _gateway_module
 import pytest
+import ray
 from omegaconf import OmegaConf
 
 pytestmark = pytest.mark.cpu_test
 
-# Stub heavy runtime dependencies so the gateway can be imported in CPU tests.
-
-_MOCKED_MODULES = [
-    "ray",
-    "ray.util",
-    "ray.util.queue",
-    "torch",
-    "torch.distributed",
-    "vllm",
-    "vllm.engine",
-    # Stub out psrl.utils.logger so we don't pull in verl/tensordict/torch
-    "psrl.utils.logger",
-    "psrl.utils.common",
-    "psrl.utils.common.http_utils",
-    "smg",
-    "smg.launch_router",
-]
-
-for _mod in _MOCKED_MODULES:
-    if _mod not in sys.modules:
-        sys.modules[_mod] = MagicMock()
-
-# Make ray.remote a pass-through decorator
-sys.modules["ray"].remote = lambda cls=None, **kwargs: (cls if cls is not None else lambda c: c)
-
-# Provide a real find_available_port stub that returns a port integer
-sys.modules["psrl.utils.common.http_utils"].find_available_port = lambda base_port=8000: base_port
-
-# Provide DualOutputHandler stub
-sys.modules["psrl.utils.logger"].DualOutputHandler = MagicMock(return_value=MagicMock())
-
-# Return the argparse namespace from RouterArgs.from_cli_args so this CPU test can
-# inspect the values without importing the Rust extension.
-sys.modules["smg.launch_router"].RouterArgs.from_cli_args = lambda args, use_router_prefix=False: args
-
-_rm_pkg = _types.ModuleType("psrl.workers.reward.reward_model")
-_rm_pkg.RewardModelManager = MagicMock()
-_rm_pkg.RewardModelReplica = MagicMock()
-sys.modules["psrl.workers.reward.reward_model"] = _rm_pkg
-
-_gateway_path = (
-    pathlib.Path(__file__).parent.parent.parent.parent / "psrl" / "workers" / "reward" / "reward_model" / "gateway.py"
-)
-_spec = importlib.util.spec_from_file_location("psrl.workers.reward.reward_model.gateway", _gateway_path)
-_gateway_mod = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_gateway_mod)
-RewardModelGateway = _gateway_mod.RewardModelGateway
+# `RewardModelGateway` is decorated with `@ray.remote`. Reload the module with a pass-through
+# decorator so it is a plain class for CPU tests, then restore the real `ray.remote`.
+_ray_remote = ray.remote
+ray.remote = lambda cls=None, **kwargs: (cls if cls is not None else lambda c: c)
+try:
+    importlib.reload(_gateway_module)
+finally:
+    ray.remote = _ray_remote
+RewardModelGateway = _gateway_module.RewardModelGateway
 
 
-def _make_config():
-    return OmegaConf.create(
-        {
-            "psrl": {
-                "logging_path": "/tmp/psrl_test_logs",
-            }
-        }
-    )
+def _make_config(tmp_path):
+    return OmegaConf.create({"psrl": {"logging_path": str(tmp_path)}})
 
 
-def test_gateway_init():
+def test_gateway_init(tmp_path):
     """RewardModelGateway can be instantiated with config + model_name."""
-    cfg = _make_config()
     gw = RewardModelGateway.__new__(RewardModelGateway)
-    gw.__init__(cfg, "TestRM")
+    gw.__init__(_make_config(tmp_path), "TestRM")
     assert gw.model_name == "TestRM"
     assert gw.smg_url is None
 
 
-def test_gateway_router_args_policy():
+def test_gateway_router_args_policy(tmp_path):
     """_init_router_args sets policy to round_robin and disables PSRL routing."""
-    cfg = _make_config()
     gw = RewardModelGateway.__new__(RewardModelGateway)
-    gw.__init__(cfg, "TestRM")
+    gw.__init__(_make_config(tmp_path), "TestRM")
     gw.smg_ip = "127.0.0.1"
     gw.smg_port = 8300
 
@@ -93,9 +45,8 @@ def test_gateway_router_args_policy():
     assert args.worker_selection_strategy == "naive"
 
 
-def test_gateway_shutdown_noop_when_not_started():
+def test_gateway_shutdown_noop_when_not_started(tmp_path):
     """shutdown_router is a no-op when router was never started."""
-    cfg = _make_config()
     gw = RewardModelGateway.__new__(RewardModelGateway)
-    gw.__init__(cfg, "TestRM")
+    gw.__init__(_make_config(tmp_path), "TestRM")
     gw.shutdown_router()  # must not raise

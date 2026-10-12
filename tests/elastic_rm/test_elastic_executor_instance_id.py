@@ -1,68 +1,32 @@
 """CPU tests: ElasticExecutor uses RolloutInstanceId keys throughout."""
 
-import enum as _enum
-import importlib.util
-import pathlib as _p
-import sys
+import importlib
 from unittest.mock import MagicMock
 
+import psrl.utils.elastic_rm.elastic_executor as _executor_module
 import pytest
+import ray
+from psrl.utils.elastic_rm.cluster_topology import GPUSlot, InstanceStatus
 
 pytestmark = pytest.mark.cpu_test
 
-_MOCKED = [
-    "ray",
-    "ray.actor",
-    "ray.util",
-    "ray.util.queue",
-    "torch",
-    "psrl.utils.logger",
-    "psrl.utils.common",
-    "psrl.utils.common.memory_utils",
-    "psrl.utils.server",
-    "psrl.utils.server.command",
-    "psrl.trainer.ppo.utils",
-    "psrl.utils.elastic_rm.scaling_policy",
-    "psrl.utils.elastic_rm.diagnostics",
-    "psrl.workers.gen.utils",
-]
-for _m in _MOCKED:
-    if _m not in sys.modules:
-        sys.modules[_m] = MagicMock()
-sys.modules["ray"].remote = lambda cls=None, **kw: (cls if cls is not None else lambda c: c)
-sys.modules["psrl.workers.gen.utils"].RolloutInstanceId = tuple
-
-
-class _InstanceStatus(_enum.Enum):
-    ASLEEP = _enum.auto()
-    AWAKEN = _enum.auto()
-
-
-_policy_mod = sys.modules["psrl.utils.elastic_rm.scaling_policy"]
-_policy_mod.InstanceStatus = _InstanceStatus
+# `ElasticExecutor` is decorated with `@ray.remote`. Reload the module with a pass-through
+# decorator so it is a plain class for CPU tests, then restore the real `ray.remote`.
+_ray_remote = ray.remote
+ray.remote = lambda cls=None, **kwargs: (cls if cls is not None else lambda c: c)
+try:
+    importlib.reload(_executor_module)
+finally:
+    ray.remote = _ray_remote
+ClusterTopology = _executor_module.ClusterTopology
+ElasticExecutor = _executor_module.ElasticExecutor
 
 
 class _FakePolicy:
     min_awake_per_role = 0
 
-    def decide(self, *a, **kw):
+    def decide(self, *args, **kwargs):
         return MagicMock(actions=[])
-
-
-_policy_mod.ScalingPolicy = lambda **kw: _FakePolicy()
-_policy_mod.InstanceSignal = MagicMock
-
-
-def _load(rel):
-    path = _p.Path("/Users/linsh/Desktop/verl_align/psrl") / rel
-    spec = importlib.util.spec_from_file_location(rel.replace("/", ".").removesuffix(".py"), path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-_ee = _load("psrl/utils/elastic_rm/elastic_executor.py")
-ElasticExecutor = _ee.ElasticExecutor
 
 
 def _make_executor():
@@ -74,8 +38,7 @@ def _make_executor():
     ex.roles = [(role, model)]
     ex.instances_status_flags = {}
     ex.instances_engine_stats = {}
-    ex.instance_gpu_mappings = {}
-    ex.gpu_to_instances = {}
+    ex.topology = ClusterTopology()
     ex.scaling_policy = _FakePolicy()
     ex.elastic_rm_config = {}
     ex._post_scale_up_abort_waiting_ratio = 0.0
@@ -94,49 +57,44 @@ def _make_executor():
     return ex, role, model
 
 
-def test_register_instances_accepts_rollout_instance_id_list():
-    """register_instances must accept list[RolloutInstanceId], not num_instances int."""
+def test_register_role_accepts_rollout_instance_id_list():
+    """register_role must key instances by RolloutInstanceId tuples, not an int count."""
     ex, role, model = _make_executor()
     ids = [("wid-0", 0), ("wid-0", 1), ("wid-1", 0)]
-    ex.register_instances(role, model, ids)
+    ex.register_role(role, model, ids, [frozenset() for _ in ids])
     assert ("wid-0", 0) in ex.instances_status_flags[role][model]
     assert ("wid-0", 1) in ex.instances_status_flags[role][model]
     assert ("wid-1", 0) in ex.instances_status_flags[role][model]
 
 
-def test_register_instances_rejects_int():
-    """register_instances must NOT accept a plain integer (old API)."""
+def test_register_role_rejects_int():
+    """register_role must NOT accept a plain integer (old API)."""
     ex, role, model = _make_executor()
-    with pytest.raises((TypeError, AttributeError)):
-        ex.register_instances(role, model, 3)  # old API: int
+    with pytest.raises(TypeError):
+        ex.register_role(role, model, 3, [])
 
 
-def test_register_instance_gpu_mapping_uses_tuple_key():
+def test_register_role_records_gpu_slots_under_tuple_key():
     ex, role, model = _make_executor()
     ids = [("wid-0", 0)]
-    ex.register_instances(role, model, ids)
-    ex.register_instance_gpu_mapping(role, model, ("wid-0", 0), gpu_ids=[0], node_id="node1")
-    mapping = ex.instance_gpu_mappings[role][model][("wid-0", 0)]
-    assert mapping["node_id"] == "node1"
-    assert mapping["gpu_ids"] == [0]
+    gpu_slots = [frozenset({GPUSlot(node_id="node1", gpu_id=0)})]
+    ex.register_role(role, model, ids, gpu_slots)
+    assert ex.topology.get_gpu_slots(role, model, ("wid-0", 0)) == gpu_slots[0]
 
 
-def test_initialize_instance_states_with_tuple_ids():
+def test_select_initial_awake_ids_uses_tuple_ids():
     ex, role, model = _make_executor()
     ids = [("wid-0", 0), ("wid-1", 0)]
-    ex.register_instances(role, model, ids)
-    awaken = [{"role_name": role, "model_name": model, "instance_id": ("wid-0", 0)}]
-    ex.initialize_instance_states(awaken)
-    assert ex.instances_status_flags[role][model][("wid-0", 0)] == _ee.InstanceStatus.AWAKEN
-    assert ex.instances_status_flags[role][model][("wid-1", 0)] == _ee.InstanceStatus.ASLEEP
+    ex.register_role(role, model, ids, [frozenset() for _ in ids])
+    awake = ex.select_initial_awake_ids(role, model, target_awake_num=1)
+    assert awake == [("wid-0", 0)]
+    assert ex.instances_status_flags[role][model][("wid-0", 0)] == InstanceStatus.AWAKEN
+    assert ex.instances_status_flags[role][model][("wid-1", 0)] == InstanceStatus.ASLEEP
 
 
-def test_sync_engine_status_stores_tuple_key():
-    """Engine stats can be stored and retrieved with RolloutInstanceId tuple key."""
+def test_register_role_stores_engine_stats_under_tuple_key():
+    """Engine stats are registered under the RolloutInstanceId tuple key."""
     ex, role, model = _make_executor()
     ids = [("wid-0", 0)]
-    ex.register_instances(role, model, ids)
-    role_stats = ex.instances_engine_stats.setdefault(role, {}).setdefault(model, {})
-    snapshot = {"instance_id": ("wid-0", 0), "scheduler_stats": {}, "generation_throughput": 0.0}
-    role_stats[("wid-0", 0)] = snapshot
+    ex.register_role(role, model, ids, [frozenset()])
     assert ("wid-0", 0) in ex.instances_engine_stats[role][model]

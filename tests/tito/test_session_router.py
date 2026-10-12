@@ -39,7 +39,21 @@ async def mock_chat(request: Request):
     captured["chat_raw_body"] = raw_body
     captured["chat_body"] = body
     captured["chat_headers"] = headers
-    response_body = json.dumps({"choices": [{"message": {"role": "assistant", "content": "hi"}}]})
+    response_body = json.dumps(
+        {
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "my-model",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "hi"},
+                    "finish_reason": "stop",
+                }
+            ],
+        }
+    )
     return FastAPIResponse(
         content=response_body,
         media_type="application/json",
@@ -123,7 +137,7 @@ async def test_delete_session(client):
 
 
 @pytest.mark.asyncio
-async def test_chat_completions_preserves_body(client):
+async def test_chat_completions_buffers_body_with_logprobs(client):
     raw_body = b'{"model":"my-model","messages":[],"logprobs":false,"stream":true}'
     resp = await client.post(
         "/sessions/sid-abc/v1/chat/completions",
@@ -131,7 +145,15 @@ async def test_chat_completions_preserves_body(client):
         headers={"content-type": "application/json"},
     )
     assert resp.status_code == 200
-    assert captured["chat_raw_body"] == raw_body
+    # The router buffers the turn: it forces a non-streaming upstream call and
+    # requests logprobs so TITO can reconstruct token-level trajectories.
+    assert captured["chat_body"] == {
+        "model": "my-model",
+        "messages": [],
+        "logprobs": True,
+        "stream": False,
+        "top_logprobs": 1,
+    }
 
 
 @pytest.mark.asyncio
@@ -289,3 +311,30 @@ async def test_control_continue_without_instance_does_not_pin(client, router):
 
     await client.post("/sessions/sid-nopin/v1/chat/completions", json=payload)
     assert "x-force-pin-once" not in captured["chat_headers"]
+
+
+@pytest.mark.asyncio
+async def test_turn_counter_increments_on_chat_completion(router, client):
+    """Turn counter increments exactly once per successful chat completion."""
+    payload = {"model": "m", "messages": []}
+    state = await router._ensure_state("sid-abc")
+    assert state.get_trajectory_turn(0) == 0
+
+    await client.post("/sessions/sid-abc/v1/chat/completions", json=payload)
+    assert state.get_trajectory_turn(0) == 1
+
+    await client.post("/sessions/sid-abc/v1/chat/completions", json=payload)
+    assert state.get_trajectory_turn(0) == 2
+
+
+@pytest.mark.asyncio
+async def test_delete_during_new_request_returns_409(router, client):
+    """After session is closed, new chat completion requests get 409."""
+    state = await router._ensure_state("sid-close")
+    async with state.lock:
+        state.closing = True
+
+    payload = {"model": "m", "messages": []}
+    resp = await client.post("/sessions/sid-close/v1/chat/completions", json=payload)
+    assert resp.status_code == 409
+    assert "session is closing" in resp.text

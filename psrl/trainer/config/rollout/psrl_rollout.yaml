@@ -108,9 +108,8 @@ agent:
   # Node IPs allowed to host agent loop workers. Empty uses every alive node.
   node_ips: []
 
-  # DAPO Overlong Filtering: drop budget-truncated trajectories from the loss while
-  # keeping their reward in the GRPO group baseline. Distinct from the reward manager's
-  # `overlong_buffer_cfg`, which is a soft length penalty on the score.
+  # DAPO Overlong Filtering: drop budget-truncated trajectories from the loss while keeping
+  # their reward in the GRPO group baseline, unlike the reward manager's soft length penalty.
   overlong_filtering: False
 
   # Custom agent loop config path (list of AgentLoop configs to instantiate).
@@ -149,6 +148,57 @@ agent:
 
     # Agent data class name.
     name: null
+
+  # Worker-local registry of hot-pluggable sandbox backends. Docker is the
+  # default so code-executing loops cannot silently bypass SandboxManager.
+  sandbox:
+
+    _target_: psrl.sandbox.config.SandboxManagerConfig
+    # Keep backend definitions declarative until the worker builds its sandbox manager, so
+    # runtime objects such as Docker clients and metrics locks never enter `RolloutConfig`.
+    _recursive_: false
+
+    default_backend: docker
+
+    # One node envelope shared by every Docker sandbox on that node. Null uses the node's
+    # cgroup/machine limit and utilization is the sole safety margin.
+    capacity:
+      memory_mb: null
+      cpu_cores: null
+      utilization: 0.5
+
+    backends:
+
+      docker:
+        _target_: psrl.sandbox.backends.DockerBackend
+
+        # One owner lease per worker drives node-level garbage collection. The lease directory
+        # must be visible to every worker using the same daemon, and mounted when containerized.
+        lifecycle:
+          heartbeat_dir: /tmp/psrl-sandbox-heartbeats
+
+        # Rootless is opt-in because existing clusters may still use a rootful
+        # node-local daemon. Set require_rootless=true after daemon migration.
+        security:
+          require_rootless: false
+          pids_limit: 4096
+          cap_drop:
+            - ALL
+          cap_add: []
+          no_new_privileges: true
+          read_only_rootfs: false
+
+        policy_profiles:
+
+          # Keep sandbox traffic isolated while making node-local services and
+          # loopback proxy URLs reachable through one stable hostname.
+          mini_swe:
+            network_mode: bridge
+            host_gateway_alias: host.docker.internal
+            rewrite_loopback_proxies: true
+            # Allow setuid/sudo inside the task container. Linux capabilities
+            # remain dropped unless explicitly added above.
+            no_new_privileges: false
 
   # Maximum number of retries for each trajectory in case of failures.
   retry_limit: 1

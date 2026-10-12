@@ -5,21 +5,11 @@ pytestmark = pytest.mark.cpu_test
 
 
 class TestEnvironmentRegistry:
-    def test_environment_base_importable(self):
-        from psrl.environments.base import Environment
-
-        assert Environment is not None
-
     def test_environment_has_registry(self):
         from psrl.environments.base import Environment
 
         assert hasattr(Environment, "_registry")
         assert isinstance(Environment._registry, dict)
-
-    def test_environment_has_register_decorator(self):
-        from psrl.environments.base import Environment
-
-        assert hasattr(Environment, "register")
 
     def test_registered_environment_retrievable(self):
         """A class decorated with @Environment.register('name') is retrievable by name."""

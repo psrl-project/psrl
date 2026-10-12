@@ -51,7 +51,12 @@ pairs depending on the dataset path.
 | No patch / 0 turns (aborted) | `0.0` | `0.0` |
 
 Grading runs in a **fresh** Docker container started from the same per-problem image,
-so it is independent of any side effects from the agent's exploration.
+so it is independent of any side effects from the agent's exploration. The eval
+script and log parser are frozen into the prepared row (`swe_problem.eval_script`
+plus a vendored parser registry), and the test log is parsed *inside* the grading
+sandbox — no `swebench`/`swesmith` package is imported on the training host, so
+rewards are reproducible across worker hosts. Splits prepared before this change
+must be regenerated; see the [preparation guide](prepare).
 
 ### Toy path
 

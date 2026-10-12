@@ -173,20 +173,41 @@ def convert_checkpoint_from_transformers_to_megatron(
 
         numel += safe_copy(hf_layer.mlp.gate.weight, layer.mlp.router.weight)
 
-        for idx, hf_expert in enumerate(hf_layer.mlp.experts):
-            num_experts = len(hf_layer.mlp.experts)
-            num_local_experts = num_experts // ep_size
-            expert_idx_start = ep_rank * num_local_experts
-            expert_idx_end = (ep_rank + 1) * num_local_experts
-            if idx < expert_idx_start or idx >= expert_idx_end:
-                continue
-            local_expert_idx = idx - expert_idx_start
+        hf_experts = hf_layer.mlp.experts
+        # Transformers 5.x keeps experts as 3D tensors, older releases as a ModuleList.
+        num_experts = hf_experts.gate_up_proj.shape[0] if hasattr(hf_experts, "gate_up_proj") else len(hf_experts)
+        num_local_experts = num_experts // ep_size
+        expert_idx_start = ep_rank * num_local_experts
+        expert_idx_end = (ep_rank + 1) * num_local_experts
 
-            fc1_weight = torch.cat([hf_expert.gate_proj.weight, hf_expert.up_proj.weight])
-            numel += safe_copy(fc1_weight, layer.mlp.experts.linear_fc1._parameters[f"weight{local_expert_idx}"])
-            numel += safe_copy(
-                hf_expert.down_proj.weight, layer.mlp.experts.linear_fc2._parameters[f"weight{local_expert_idx}"]
-            )
+        if hasattr(hf_experts, "gate_up_proj"):
+            for idx in range(num_experts):
+                if idx < expert_idx_start or idx >= expert_idx_end:
+                    continue
+                local_expert_idx = idx - expert_idx_start
+
+                # gate_up_proj is [num_experts, 2 * intermediate_size, hidden_size].
+                gate_up = hf_experts.gate_up_proj[idx]
+                intermediate_size = gate_up.shape[0] // 2
+                fc1_weight = torch.cat([gate_up[:intermediate_size], gate_up[intermediate_size:]], dim=0)
+                down_w = hf_experts.down_proj[idx]
+
+                numel += safe_copy(fc1_weight, layer.mlp.experts.linear_fc1._parameters[f"weight{local_expert_idx}"])
+                numel += safe_copy(down_w, layer.mlp.experts.linear_fc2._parameters[f"weight{local_expert_idx}"])
+
+        elif hasattr(hf_experts, "__iter__"):
+            for idx, hf_expert in enumerate(hf_experts):
+                if idx < expert_idx_start or idx >= expert_idx_end:
+                    continue
+                local_expert_idx = idx - expert_idx_start
+
+                fc1_weight = torch.cat([hf_expert.gate_proj.weight, hf_expert.up_proj.weight])
+                numel += safe_copy(fc1_weight, layer.mlp.experts.linear_fc1._parameters[f"weight{local_expert_idx}"])
+                numel += safe_copy(
+                    hf_expert.down_proj.weight, layer.mlp.experts.linear_fc2._parameters[f"weight{local_expert_idx}"]
+                )
+        else:
+            raise TypeError(f"Unsupported experts type: {type(hf_experts)}")
 
         if has_share_expert:
             numel += safe_copy(hf_layer.mlp.shared_expert_gate.weight, layer.mlp.shared_experts.gate_weight)

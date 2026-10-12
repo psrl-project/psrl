@@ -24,11 +24,7 @@ from minisweagent.agents.default import DefaultAgent  # noqa: E402
 from minisweagent.environments.docker import DockerEnvironment  # noqa: E402
 from minisweagent.exceptions import FormatError, InterruptAgentFlow  # noqa: E402
 from minisweagent.models.litellm_textbased_model import LitellmTextbasedModel  # noqa: E402
-from transformers import AutoProcessor, AutoTokenizer  # noqa: E402
-from verl.utils.dataset.rl_dataset import RLHFDataset  # noqa: E402
-
 from psrl.environments import Environment  # noqa: E402
-from psrl.utils.concurrency import SlotManager  # noqa: E402
 from psrl.workers.agent_loop.agent_data import (  # noqa: E402
     AgentData,
     MiniSWEAgentData,
@@ -37,6 +33,8 @@ from psrl.workers.agent_loop.agent_data import (  # noqa: E402
 from psrl.workers.agent_loop.loops.base_agent_loop import AgentLoopBase  # noqa: E402
 from psrl.workers.agent_loop.loops.utils import DictConfigWrap, TerminateReason, register  # noqa: E402
 from psrl.workers.gen.utils import TokenOutput  # noqa: E402
+from transformers import AutoProcessor, AutoTokenizer  # noqa: E402
+from verl.utils.dataset.rl_dataset import RLHFDataset  # noqa: E402
 
 _MIN_GEN_TOKENS = 256
 _QUEUE_POLL_INTERVAL = 0.05
@@ -251,23 +249,11 @@ class MiniSWEAgentLoop(AgentLoopBase):
         observation, _ = await env.reset(task=request, seed=request.get("seed"))
         agent_data.init_trajectory(request)
 
-        run_slot: tuple[int, int] | None = None
         response_queue: queue.Queue | None = None
         agent_future: asyncio.Future | None = None
         try:
             runtime_config = observation["runtime_config"]
             sandbox_config = runtime_config.sandbox_config
-            if sandbox_config.max_parallel_tasks_per_worker > 0:
-                slot_namespace = os.path.join(
-                    str(self.config.trainer.project_name),
-                    str(self.config.trainer.experiment_name),
-                )
-                run_slot = await SlotManager.acquire(
-                    sandbox_config.max_parallel_tasks_per_worker,
-                    slot_namespace,
-                    prefix="psrl_mini_swe_agent_slots",
-                )
-
             docker_env_kwargs = self._build_docker_env_kwargs(observation, runtime_config)
             agent_kwargs = {
                 "system_template": runtime_config.agent.system_template,
@@ -341,7 +327,6 @@ class MiniSWEAgentLoop(AgentLoopBase):
             if response_queue is not None and agent_future is not None and not agent_future.done():
                 response_queue.put(_TerminateSignal("AgentLoopCancelled"))
             await env.close()
-            SlotManager.release(run_slot)
 
     @staticmethod
     def _build_docker_env_kwargs(

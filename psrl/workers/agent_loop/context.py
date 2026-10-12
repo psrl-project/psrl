@@ -5,6 +5,8 @@ from omegaconf import DictConfig
 from transformers import AutoProcessor, AutoTokenizer
 from verl.utils.dataset.rl_dataset import RLHFDataset
 
+from psrl.sandbox.manager import SandboxManager
+
 
 @dataclass(frozen=True)
 class AgentLoopContext:
@@ -19,3 +21,4 @@ class AgentLoopContext:
     processor: AutoProcessor | None
     dataset_cls: type[RLHFDataset]
     data_config: DictConfig
+    sandbox_manager: SandboxManager

@@ -201,19 +201,11 @@ class PSRL_AgentLoopManager:
             str | int, list[EntryInfo]
         ] = {}  # Maps parent request ids to "occupied" child entries
 
-        # Track groups whose failure has already been processed to avoid duplicate handling
-        # when multiple siblings in the same group fail concurrently. Train and validation
-        # are kept apart because their lifetimes differ: the validation record is per-round
-        # and reset by `set_val_buffer_size`, while the train record must survive every
-        # validation round for the whole run. Sharing one set made a validation round
-        # forget which train groups had died, readmitting their stragglers.
+        # Groups whose failure was already processed, so concurrent sibling failures are not
+        # handled twice. Train and validation keep separate records because their lifetimes differ.
         #
-        # The train record is bounded instead of cleared. Train prompt ids never repeat
-        # within a realistic run, so it needs no clear-point for correctness, and no step
-        # boundary is a valid one: with `staleness > 0` an in-flight prompt outlives
-        # several buffers. The cap is sized well past the dispatch window that
-        # `_get_expected_ps_version` throttles to, so an id is only ever retired long
-        # after any request of that vintage could still arrive.
+        # The train record is bounded rather than cleared, since train prompt ids never repeat
+        # and no step boundary is safe to clear on once staleness keeps prompts in flight.
         failed_id_capacity = max(4 * self.entries_per_buffer * (self.staleness + 1), 65536)
         self._failed_train_group_ids: BoundedIdSet = BoundedIdSet(failed_id_capacity)
         self._failed_val_group_ids: set[int] = set()
@@ -221,10 +213,8 @@ class PSRL_AgentLoopManager:
         # Preserve an all-failed validation result for waiters that register late.
         self._val_round_all_failed: bool = False
 
-        # Refill breaker state (train only). A failed group is purged before it is
-        # replaced, so an unbounded refill loop is the run making no progress rather
-        # than recovering. Counted consecutively and cleared by any occupied group, so
-        # sporadic failures over a long run never accumulate into a trip.
+        # Refill breaker state (train only). Groups that fail before being replaced are counted
+        # consecutively and cleared by any occupied group, so sporadic failures never trip it.
         self.refill_failure_threshold = self.config.psrl.agentic_rl.get("refill_failure_threshold", 32)
         self._consecutive_group_failures = 0
         self._group_failure_reasons: Counter = Counter()
@@ -743,6 +733,7 @@ class PSRL_AgentLoopManager:
         failed_uid: int,
         is_validate: bool,
         terminate_reason: TerminateReason | None = None,
+        failure_summary: str | None = None,
     ):
         """Recover a rollout group after one child fails without producing data.
 
@@ -752,7 +743,15 @@ class PSRL_AgentLoopManager:
             is_validate (bool): Whether the group belongs to a validation round.
             terminate_reason (TerminateReason | None): Why the child produced no data.
                 Recorded on the train path so the refill breaker can name the cause.
+            failure_summary (str | None): Worker-captured root cause text for the log.
         """
+        if failure_summary:
+            psrl_logger.error(
+                "notify_group_failed: root cause for parent_id=%s failed_uid=%s:\n%s",
+                parent_id,
+                failed_uid,
+                failure_summary,
+            )
         async with AsyncBusyPollingRayLock(self.ps_manager_handle):
             rollout_n = self.val_rollout_n if is_validate else self.rollout_n
             failed_group_ids = self._failed_val_group_ids if is_validate else self._failed_train_group_ids
@@ -1080,10 +1079,8 @@ class PSRL_AgentLoopManager:
                             )
                             # Clear the reserved entries for the group entry.
                             await self.ps_manager_handle.clear_reserved_entries.remote(prompt_id, is_validate)
-                            # Notify agent loop manager to retry new requests.
-                            # Not counted against the refill breaker: the filter dropped
-                            # this group on purpose, so it is an algorithmic decision
-                            # rather than a rollout fault.
+                            # Notify the manager to retry new requests. Deliberate filtering is not
+                            # counted against the refill breaker, since it is not a rollout fault.
                             await self._refill_failed_group(
                                 n_prompts=1,
                                 context="Group post-processing filter",

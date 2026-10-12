@@ -38,8 +38,8 @@ RolloutInstanceId = _utils_mod.RolloutInstanceId
 
 # Load scaling_policy directly (real module under test).
 _sp_mod = _load_direct("psrl.utils.elastic_rm.scaling_policy", "utils/elastic_rm/scaling_policy.py")
-InstanceSignal = _sp_mod.InstanceSignal
 ScalingAction = _sp_mod.ScalingAction
+InstanceSignal = _sp_mod.InstanceSignal
 ScalingPolicy = _sp_mod.ScalingPolicy
 ThroughputProfileLoader = _sp_mod.ThroughputProfileLoader
 

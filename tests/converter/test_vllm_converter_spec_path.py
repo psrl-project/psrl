@@ -32,13 +32,6 @@ class FakeQwen2Model(nn.Module, SupportsWeightLayoutSpec):
         )
 
 
-class FakeEmptyModel(nn.Module, SupportsWeightLayoutSpec):
-    supports_weight_layout_spec = True
-
-    def get_weight_layout_spec(self) -> WeightLayoutSpec:
-        return WeightLayoutSpec(stacked_params=[], packing_metadata={})
-
-
 class FakeMoEModel(nn.Module, SupportsWeightLayoutSpec):
     supports_weight_layout_spec = True
     NUM_EXPERTS = 2
@@ -282,17 +275,6 @@ class TestBuildFromSpec:
         assert "language_model.k_proj_weight" in state_dict
         assert "language_model.v_proj_weight" in state_dict
         assert "language_model.qkv_proj_weight" not in state_dict, "qkv_proj_weight must be split, not passed through"
-
-
-class TestHasPackingSpec:
-    def test_returns_true_for_supporting_model(self):
-        assert isinstance(FakeQwen2Model(), SupportsWeightLayoutSpec)
-
-    def test_returns_false_for_plain_module(self):
-        assert not isinstance(nn.Linear(4, 4), SupportsWeightLayoutSpec)
-
-    def test_returns_true_for_empty_spec_model(self):
-        assert isinstance(FakeEmptyModel(), SupportsWeightLayoutSpec)
 
 
 class TestVllmConverterIntegration:

@@ -9,24 +9,46 @@ source ${PSRL_WORKSPACE}/env/psrl.sh
 HOME=${PSRL_WORKSPACE}
 PSRL_PATH=$(python -c "import psrl; import os; print(os.path.dirname(os.path.dirname(psrl.__file__)))")
 
+# --- Model ---
+# NOTE(lhy): Modify max_position_embeddings in config.json to 32768 after downloading.
+MODEL_PATH=${PSRL_WORKSPACE}/models/SWE-agent-LM-7B
+
+# --- Data ---
+# SWE-Gym full 2438 train instances, SWE-bench Verified 80-problem validation subset.
+TRAIN_FILE=${TRAIN_FILE:-${PSRL_PATH}/examples/mini_swe/data/swe_gym_subset_100/train.parquet}
+TEST_FILE=${TEST_FILE:-${PSRL_PATH}/examples/mini_swe/data/verified_subset_80/train.parquet}
+
+# --- Agent loop config (full SWE-agent format for SWE-agent-LM-7B) ---
+agent_loop_config_path=${AGENT_LOOP_CONFIG_PATH:-${PSRL_PATH}/examples/mini_swe/config/swebench_agent_config_full_sweagent.yaml}
+trajectory_id_strategy=${TRAJECTORY_ID_STRATEGY:-auto}
+
+if [[ ! -f "$TRAIN_FILE" ]]; then
+    echo "ERROR: Training data not found at $TRAIN_FILE"
+    echo "Run: python examples/mini_swe/data/prepare_swe_gym.py --source SWE-Gym/SWE-Gym --split train --output examples/mini_swe/data/swe_gym_2438"
+    exit 1
+fi
+
+if [[ ! -f "$TEST_FILE" ]]; then
+    echo "ERROR: Validation data not found at $TEST_FILE"
+    echo "Run the data preparation commands for SWE-bench Verified."
+    exit 1
+fi
+
 # --- Pre-flight checks ---
 echo "=== Pre-flight checks ==="
-python -c "from minisweagent.agents.default import DefaultAgent; print('mini-swe-agent: OK')"
-python -c "import swebench; print('swebench', swebench.__version__, ': OK')"
-python -c "from examples.mini_swe.swebench_grader import grade_fresh_container, _grade_gym; print('swebench_grader (gym): OK')"
-python -c "from swebench.harness.log_parsers.python import parse_log_pytest; print('parse_log_pytest: OK')"
+if grep -q "mini_swe_agent_loop_v1" "$agent_loop_config_path"; then
+    python -c "from minisweagent.agents.default import DefaultAgent; print('mini-swe-agent: OK')"
+fi
+python -c "from examples.mini_swe.swebench_grader import grade_fresh_container; print('swebench_grader (gym): OK')"
+python -c "from examples.mini_swe.grading.payload import grader_zip_bytes; print('grading payload', len(grader_zip_bytes()), 'bytes: OK')"
 ray status 2>/dev/null | head -5 || echo "WARNING: ray status failed"
 
 # Pre-flight: spot-check Docker images from training data
-python -c "
-import pandas as pd, subprocess, json, sys
-train_file = '${PSRL_PATH}/examples/mini_swe/data/swe_gym_2438/train.parquet'
-try:
-    df = pd.read_parquet(train_file)
-except FileNotFoundError:
-    print(f'ERROR: Training data not found at {train_file}')
-    print('Run: python examples/mini_swe/data/prepare_swe_gym.py --source SWE-Gym/SWE-Gym --split train --output examples/mini_swe/data/swe_gym_2438')
-    sys.exit(1)
+PSRL_TRAIN_FILE="$TRAIN_FILE" python -c "
+import json, os, subprocess
+import pandas as pd
+
+df = pd.read_parquet(os.environ['PSRL_TRAIN_FILE'])
 sample = df.sample(min(3, len(df)))
 missing = 0
 for _, row in sample.iterrows():
@@ -43,35 +65,11 @@ else:
 "
 echo "=== Pre-flight done ==="
 
-# --- Model ---
-# NOTE(lhy): Modify max_position_embeddings in config.json to 32768 after downloading.
-MODEL_PATH=${PSRL_WORKSPACE}/models/SWE-agent-LM-7B
-
-# --- Data ---
-
-TRAIN_FILE=${PSRL_PATH}/examples/mini_swe/data/swe_gym_subset_100/train.parquet
-TEST_FILE=${PSRL_PATH}/examples/mini_swe/data/verified_subset_80/train.parquet
-
-if [[ ! -f "$TRAIN_FILE" ]]; then
-    echo "ERROR: Training data not found at $TRAIN_FILE"
-    echo "Run: python examples/mini_swe/data/prepare_swe_gym.py --source SWE-Gym/SWE-Gym --split train --output examples/mini_swe/data/swe_gym_2438"
-    exit 1
-fi
-
-if [[ ! -f "$TEST_FILE" ]]; then
-    echo "ERROR: Validation data not found at $TEST_FILE"
-    echo "Run the data preparation commands for SWE-bench Verified."
-    exit 1
-fi
-
 train_files="['$TRAIN_FILE']"
 test_files="['$TEST_FILE']"
 
 CKPT_ROOT=${CKPT_ROOT:-$PWD}
 default_local_dir=$CKPT_ROOT/checkpoint/$experiment_name
-
-# --- Agent loop config (full SWE-agent format for SWE-agent-LM-7B) ---
-agent_loop_config_path=${PSRL_PATH}/examples/mini_swe/config/swebench_agent_config_full_sweagent.yaml
 
 # --- Cluster layout (4 nodes x 8 GPUs, same as dapo script) ---
 GEN_TP=2
@@ -148,6 +146,7 @@ offload=True
 PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config --config-name='ppo_trainer' \
     psrl.ps_manager_ip=${LOCAL_IP} \
     psrl.rollout_n=${n_resp_per_prompt} \
+    psrl.rollout_gateway.trajectory_id_strategy=${trajectory_id_strategy} \
     psrl.staleness=${staleness} \
     psrl.staleness_buffer_entries=${train_prompt_bsz} \
     psrl.ps_mode=nixl_cpu \

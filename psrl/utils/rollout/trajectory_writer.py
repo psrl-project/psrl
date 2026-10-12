@@ -52,14 +52,15 @@ class TrajectoryWriter:
         dir_ = os.path.abspath(os.path.expanduser(dir_))
         return cls(output_dir=dir_, enable=enable)
 
-    def write(self, version: int, traj_id: str, text: str) -> str:
+    def write(self, version: int, traj_id: str, text: str, suffix: str = ".txt") -> str:
         """
-        Write `text` to `<output_dir>/v{version}/{traj_id}.txt`.
+        Write `text` to `<output_dir>/v{version}/{traj_id}{suffix}`.
 
         Args:
             version (int): Model version tag used as the sub-directory name.
             traj_id (str): Trajectory identifier used as the file stem.
             text (str): Full trajectory text to write.
+            suffix (str): File extension, defaults to ``.txt``.
 
         Returns:
             str: The written file path, or empty string if disabled or on error.
@@ -68,7 +69,7 @@ class TrajectoryWriter:
             return ""
         version_dir = os.path.join(self.output_dir, f"v{version}")
         os.makedirs(version_dir, exist_ok=True)
-        path = os.path.join(version_dir, f"{traj_id}.txt")
+        path = os.path.join(version_dir, f"{traj_id}{suffix}")
         try:
             with open(path, "w") as f:
                 f.write(text)

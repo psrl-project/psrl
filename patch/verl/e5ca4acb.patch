@@ -188,6 +188,44 @@ index bef40f1d..3ebc6856 100644
  
  # whether to trust remote code.
  trust_remote_code: False
+diff --git a/verl/trainer/ppo/core_algos.py b/verl/trainer/ppo/core_algos.py
+index 5e6a19a1..3cb67941 100644
+--- a/verl/trainer/ppo/core_algos.py
++++ b/verl/trainer/ppo/core_algos.py
+@@ -1143,6 +1143,7 @@ def agg_loss(
+     batch_num_tokens: Optional[int] = None,
+     global_batch_size: Optional[int] = None,
+     loss_scale_factor: Optional[int] = None,
++    session_loss_weights: torch.Tensor | None = None,
+ ):
+     """
+     Aggregate the loss across global batch to ensure the loss is invariant to fsdp/megatron parallelism.
+@@ -1160,12 +1161,24 @@ def agg_loss(
+         global_batch_size: global batch size
+         loss_scale_factor: scale factor for "seq-mean-token-sum-norm" mode. If None, uses loss_mask.shape[-1].
+             Set this to a constant value to ensure consistent normalization throughout training.
++        session_loss_weights: Per-row reciprocal of (valid session count * session token count),
++            computed over the full training window before DP/micro-batch splitting. Shape (bs,).
++            Empty sessions receive zero weight. This mode does not use `batch_num_tokens`
++            or `global_batch_size`; splitting a session across rows must not change its weight.
+ 
+     Returns:
+         loss: `a scalar torch.Tensor`
+             aggregated loss
+     """
+-    if loss_agg_mode == "token-mean":
++    if loss_agg_mode == "session-mean-token-mean":
++        if session_loss_weights is None:
++            raise ValueError("session-mean-token-mean requires session_loss_weights from the full training window.")
++        if session_loss_weights.shape != loss_mat.shape[:1]:
++            raise ValueError("session_loss_weights must contain exactly one weight per loss row.")
++        # FP32 session weights keep the masked reduction stable for low precision losses.
++        session_mask = loss_mask * session_loss_weights.unsqueeze(-1)
++        loss = verl_F.masked_sum(loss_mat, session_mask) * dp_size
++    elif loss_agg_mode == "token-mean":
+         if batch_num_tokens is None:
+             if dp_size > 1:
+                 raise ValueError("(global) batch_num_tokens is required when dp_size > 1")
 diff --git a/verl/trainer/ppo/metric_utils.py b/verl/trainer/ppo/metric_utils.py
 index 946f7611..b0dbb4d5 100644
 --- a/verl/trainer/ppo/metric_utils.py
@@ -776,6 +814,18 @@ index 812b1f0e..158eda11 100644
      except Exception as e:
          processor = None
          # TODO(haibin.lin): try-catch should be removed after adding transformer version req to setup.py to avoid
+diff --git a/verl/workers/config/actor.py b/verl/workers/config/actor.py
+index f52c3888..74b69a61 100644
+--- a/verl/workers/config/actor.py
++++ b/verl/workers/config/actor.py
+@@ -215,6 +215,7 @@ class ActorConfig(BaseConfig):
+             "seq-mean-token-sum",
+             "seq-mean-token-mean",
+             "seq-mean-token-sum-norm",
++            "session-mean-token-mean",
+         ]
+         if self.loss_agg_mode not in valid_loss_agg_modes:
+             raise ValueError(f"Invalid loss_agg_mode: {self.loss_agg_mode}")
 diff --git a/verl/workers/config/engine.py b/verl/workers/config/engine.py
 index 0bcf14a2..5a47a4da 100644
 --- a/verl/workers/config/engine.py
@@ -1272,10 +1322,33 @@ index bf379b49..882e9f0b 100644
          # 1. build reference model
          if "ref" in self.role:
 diff --git a/verl/workers/utils/losses.py b/verl/workers/utils/losses.py
-index c865b9dd..21b0e2e8 100644
+index c865b9dd..787360a5 100644
 --- a/verl/workers/utils/losses.py
 +++ b/verl/workers/utils/losses.py
-@@ -88,9 +88,82 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
+@@ -83,14 +83,105 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
+     metrics = {}
+ 
+     # select fields and convert to padded tensor
++    loss_mode = config.policy_loss.get("loss_mode", "vanilla")
++    # Weights remain dense row scalars while response fields are padded below.
++    config.global_batch_info.pop("session_loss_weights", None)
++    if config.loss_agg_mode == "session-mean-token-mean":
++        if loss_mode in {"gspo", "sapo", "geo_mean"}:
++            raise ValueError(
++                f"Policy loss {loss_mode!r} fixes its own aggregation and cannot use session-mean-token-mean."
++            )
++        correction = config.policy_loss.get("rollout_correction")
++        if loss_mode == "bypass_mode" and correction and correction.get("rollout_rs") is not None:
++            raise ValueError(
++                "session-mean-token-mean requires rejection masks before session normalization. "
++                "Use decoupled rollout correction instead of bypass rejection sampling."
++            )
++        if "session_loss_weights" not in data:
++            raise ValueError("session-mean-token-mean requires session_loss_weights in the training batch.")
++        config.global_batch_info["session_loss_weights"] = data["session_loss_weights"]
++        metric_aggregation = AggregationType.SUM
+     fields = ["response_mask", "old_log_probs", "advantages"]
+     if "rollout_is_weights" in data:
          fields.append("rollout_is_weights")
      if "ref_log_prob" in data:
          fields.append("ref_log_prob")
@@ -1359,3 +1432,12 @@ index c865b9dd..21b0e2e8 100644
      # compute policy loss
      old_log_prob = data["old_log_probs"]
      advantages = data["advantages"]
+@@ -98,8 +189,6 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
+ 
+     loss_agg_mode = config.loss_agg_mode
+ 
+-    loss_mode = config.policy_loss.get("loss_mode", "vanilla")
+-
+     policy_loss_fn = get_policy_loss_fn(loss_mode)
+     pg_loss, pg_metrics = policy_loss_fn(
+         old_log_prob=old_log_prob,

@@ -1,5 +1,4 @@
 import asyncio
-import atexit
 import logging
 import os
 import traceback
@@ -24,11 +23,8 @@ from verl.utils.tokenizer import (
 )
 from verl.workers.config.model import HFModelConfig
 
+from psrl.sandbox.config import build_sandbox_manager
 from psrl.utils.common.chat_template import resolve_chat_template_value
-from psrl.utils.common.docker_utils import (
-    force_remove_containers_by_label,
-    spawn_actor_reaper,
-)
 from psrl.utils.common.http_io_thread import init_http_io_thread
 from psrl.utils.common.http_utils import configure_distributed_post, init_http_client
 from psrl.utils.logger import DualOutputHandler, EventType, log_dual_events
@@ -54,6 +50,7 @@ class PSRL_AgentLoopWorker:
         session_router_url: str,
         worker_id: int = 0,
         worker_num: int = 1,
+        capacity_coordinator: ray.actor.ActorHandle | None = None,
     ):
         """Initialize agent loop worker.
 
@@ -64,26 +61,12 @@ class PSRL_AgentLoopWorker:
             session_router_url (str): URL of the session router.
             worker_id (int): Unique identifier for this worker instance.
             worker_num (int): Total number of worker instances.
+            capacity_coordinator: Node-local sandbox capacity coordinator.
         """
 
-        # Actor-scoped labels let the reaper reclaim only containers owned by this
-        # process after abnormal termination.
+        # The sandbox lease uses this id to attribute containers to this worker.
         self._actor_id = f"w{worker_id}-{os.uname().nodename}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
         os.environ["PSRL_ACTOR_ID"] = self._actor_id
-        # Use the config parameter directly (self.config is set below) so the
-        # reaper log lands next to the AgentLoopWorker_N.log files.
-        _reaper_log_dir = getattr(getattr(config, "psrl", None), "logging_path", None)
-        self._reaper_proc = spawn_actor_reaper(
-            self._actor_id,
-            log_dir=_reaper_log_dir,
-        )
-        # Graceful shutdown reaps containers before stopping the sidecar.
-        atexit.register(self._terminate_reaper)
-        psrl_logger.info(
-            f"PSRL_AgentLoopWorker {worker_id}: actor_id={self._actor_id!r}, "
-            f"reaper pid={self._reaper_proc.pid}, "
-            f"reaper log_dir={_reaper_log_dir!r}."
-        )
 
         self.config = config
         model_config = config.gen_actor_rollout_ref.model
@@ -110,6 +93,12 @@ class PSRL_AgentLoopWorker:
         self.ps_manager_handle = ps_manager_handle
         self.agent_loop_manager = None
         self.reward_manager = None
+        sandbox_config = config.gen_actor_rollout_ref.rollout.agent.sandbox
+        self.sandbox_manager = build_sandbox_manager(
+            sandbox_config,
+            capacity_coordinator=capacity_coordinator,
+            owner_id=self._actor_id,
+        )
 
         n_rollout_instances = self.config.psrl.deployment.n_rollout_instances
         n_validate_instances = (
@@ -168,29 +157,6 @@ class PSRL_AgentLoopWorker:
         handler = DualOutputHandler(self.config.psrl.logging_path, self.log_prefix)
         logging.getLogger("psrl").addHandler(handler)
         psrl_logger.addHandler(handler)
-
-    def _terminate_reaper(self) -> None:
-        """Belt-and-suspenders cleanup on graceful actor shutdown.
-
-        Belt: synchronously force-remove our actor's containers from the
-              actor process itself. Takes ~5-30 s for hundreds of containers,
-              well within Ray's SIGTERM grace period. This is the fast path
-              that wins the race against the bash sidecar.
-        Suspenders: also signal the bash sidecar to terminate so it does not
-                    run a redundant (and harmless) post-mortem sweep after we
-                    already cleaned up here.
-        """
-        try:
-            force_remove_containers_by_label("psrl.actor_id", self._actor_id)
-        except Exception as e:
-            psrl_logger.debug(f"Synchronous atexit reap failed: {e}.")
-        proc = getattr(self, "_reaper_proc", None)
-        if proc is None or proc.poll() is not None:
-            return
-        try:
-            proc.terminate()
-        except Exception as e:
-            psrl_logger.debug(f"Failed to terminate reaper sidecar: {e}.")
 
     def set_agent_loop_manager(self, agent_loop_manager: ray.actor.ActorHandle):
         """Set the agent loop manager handle for communication.
@@ -251,17 +217,20 @@ class PSRL_AgentLoopWorker:
 
     async def stop_busy_loop(self):
         """Stop the busy loop and wait for the current task to complete."""
-        if not self.busy_loop_task or self.busy_loop_task.done():
-            return
-
-        self.stop_busy_loop_task = True
-        # Wait for the background task to finish
-        # Note: This is now async-safe and won't deadlock when called from Ray actors
-        try:
-            await asyncio.wait_for(self.busy_loop_task, timeout=10.0)
-        except asyncio.TimeoutError:
-            psrl_logger.warning("Timeout waiting for busy loop task to complete")
-            self.busy_loop_task.cancel()
+        if self.busy_loop_task and not self.busy_loop_task.done():
+            self.stop_busy_loop_task = True
+            # Wait for the background task to finish. This is async-safe and
+            # will not deadlock when called from Ray actors.
+            try:
+                await asyncio.wait_for(self.busy_loop_task, timeout=10.0)
+            except asyncio.TimeoutError:
+                psrl_logger.warning("Timeout waiting for busy loop task to complete")
+                self.busy_loop_task.cancel()
+        if self.agent_programs:
+            await asyncio.gather(*self.agent_programs, return_exceptions=True)
+        metrics = {name: snapshot.as_dict() for name, snapshot in self.sandbox_manager.metrics_snapshot().items()}
+        psrl_logger.info("Final sandbox lifecycle metrics: %s.", metrics)
+        await self.sandbox_manager.shutdown()
 
     async def _launch_agent_loop(self):
         """Main loop that processes agent programs from the pending queue."""
@@ -288,6 +257,12 @@ class PSRL_AgentLoopWorker:
 
         return task_done_callback
 
+    @staticmethod
+    def _failure_diagnostics(agent_loop) -> str:
+        """Extract the original loop failure retained across retry handling."""
+        details = getattr(agent_loop, "last_error_traceback", "")
+        return details or "<no underlying exception was captured>"
+
     async def generate_trajectory(self, batch: TensorDict):
         """Generate trajectories using the specified agent type based on configuration.
 
@@ -299,11 +274,36 @@ class PSRL_AgentLoopWorker:
         """
         assert len(batch) == 1, "Only support single request for generation"
 
-        default_agent_name = self.config.gen_actor_rollout_ref.rollout.agent.default_agent_loop
-        agent_name = tu.get(batch, "agent_name", [default_agent_name])[0]
+        agent_name = "mini_swe_claude_code"
         task = asyncio.create_task(self._run_agent_loop(agent_name, batch))
         task.add_done_callback(self._create_task_done_callback(task))
         self.agent_programs.add(task)
+
+    def _create_agent_loop(self, agent_name: str):
+        """Instantiate the registered agent loop with this worker's shared context."""
+        assert agent_name in AGENT_LOOP_REGISTRY, (
+            f"Agent loop {agent_name} not registered, registered agent loops: {AGENT_LOOP_REGISTRY.keys()}"
+        )
+        agent_loop_config = AGENT_LOOP_REGISTRY[agent_name]
+
+        context = AgentLoopContext(
+            config=self.config,
+            rollout_gateway_url=self.rollout_gateway_url,
+            session_router_url=self.session_router_url,
+            reward_manager=self.reward_manager,
+            ps_manager_handle=self.ps_manager_handle,
+            tokenizer=self.tokenizer,
+            processor=self.processor,
+            dataset_cls=self.dataset_cls,
+            data_config=DictConfigWrap(self.config.data),
+            sandbox_manager=self.sandbox_manager,
+        )
+        # Keep framework objects out of Hydra's dataclass conversion path.
+        agent_loop_factory = hydra.utils.instantiate(
+            config=agent_loop_config,
+            _partial_=True,
+        )
+        return agent_loop_factory(context=context)
 
     async def _run_agent_loop(
         self,
@@ -362,25 +362,7 @@ class PSRL_AgentLoopWorker:
             assert agent_name in AGENT_LOOP_REGISTRY, (
                 f"Unregistered agent loop: name={agent_name!r}, available={AGENT_LOOP_REGISTRY.keys()!r}."
             )
-            agent_loop_config = AGENT_LOOP_REGISTRY[agent_name]
-
-            context = AgentLoopContext(
-                config=self.config,
-                rollout_gateway_url=self.rollout_gateway_url,
-                session_router_url=self.session_router_url,
-                reward_manager=self.reward_manager,
-                ps_manager_handle=self.ps_manager_handle,
-                tokenizer=self.tokenizer,
-                processor=self.processor,
-                dataset_cls=self.dataset_cls,
-                data_config=DictConfigWrap(self.config.data),
-            )
-            # Keep framework objects out of Hydra's dataclass conversion path.
-            agent_loop_factory = hydra.utils.instantiate(
-                config=agent_loop_config,
-                _partial_=True,
-            )
-            agent_loop = agent_loop_factory(context=context)
+            agent_loop = self._create_agent_loop(agent_name)
 
             with log_dual_events(
                 f"Agent loop with requests {request_ids}",
@@ -413,6 +395,14 @@ class PSRL_AgentLoopWorker:
 
                     # Retry if applicable
                     if retry_attempt < retry_limit:
+                        if getattr(agent_loop, "last_error_traceback", ""):
+                            psrl_logger.error(
+                                "Agent loop request %s attempt %d/%d root cause:\n%s",
+                                request_ids,
+                                retry_attempt,
+                                retry_limit,
+                                self._failure_diagnostics(agent_loop),
+                            )
                         psrl_logger.warning(
                             f"Retrying agent loop: request_ids={request_ids!r}, "
                             f"reason={terminate_reason.value!r}, "
@@ -421,6 +411,13 @@ class PSRL_AgentLoopWorker:
                         continue
 
                 if terminate_reason.needs_worker_retry() or terminate_reason.is_aborted:
+                    if getattr(agent_loop, "last_error_traceback", ""):
+                        psrl_logger.error(
+                            "Agent loop requests %s exhausted with terminate_reason=%s. Root cause:\n%s",
+                            request_ids,
+                            terminate_reason.value,
+                            self._failure_diagnostics(agent_loop),
+                        )
                     psrl_logger.warning(
                         f"Agent loop exhausted retries: request_ids={request_ids!r}, "
                         f"reason={terminate_reason.value!r}, attempts={retry_limit}."
@@ -434,16 +431,29 @@ class PSRL_AgentLoopWorker:
                     # validation recovery branch.
                     failed_uid = tu.get(batch, "uid")[0]
                     parent_id = tu.get(batch, "parent_id")[0] if "parent_id" in batch else failed_uid
-                    psrl_logger.warning(
-                        f"Group slot lost for uid={failed_uid} parent_id={parent_id} "
-                        f"(terminate_reason={terminate_reason.value}, validate={validate}), notifying manager."
-                    )
-                    await self.agent_loop_manager.notify_group_failed.remote(
-                        parent_id=parent_id,
-                        failed_uid=failed_uid,
-                        is_validate=validate,
-                        terminate_reason=terminate_reason,
-                    )
+                    if self.config.psrl.agentic_rl.get("manager_retry_on_error", True):
+                        psrl_logger.warning(
+                            "Group slot lost for uid=%s parent_id=%s "
+                            "(terminate_reason=%s, validate=%s), notifying manager.",
+                            failed_uid,
+                            parent_id,
+                            terminate_reason.value,
+                            validate,
+                        )
+                        await self.agent_loop_manager.notify_group_failed.remote(
+                            parent_id=parent_id,
+                            failed_uid=failed_uid,
+                            is_validate=validate,
+                            terminate_reason=terminate_reason,
+                            failure_summary=self._failure_diagnostics(agent_loop),
+                        )
+                    else:
+                        raise RuntimeError(
+                            f"Agent loop for uid={request_ids} "
+                            f"failed with terminate_reason={terminate_reason.value} "
+                            f"after {retry_limit} attempt(s). "
+                            "Set psrl.agentic_rl.manager_retry_on_error=True to recover silently."
+                        )
                 else:
                     psrl_logger.debug(
                         f"Agent loop terminated: request_ids={request_ids!r}, reason={terminate_reason.value!r}."

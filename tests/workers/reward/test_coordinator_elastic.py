@@ -1,79 +1,13 @@
 """CPU tests for RolloutCoordinator elastic hooks and RewardModelCoordinator overrides."""
 
 import asyncio
-import importlib
-import importlib.util
-import pathlib
-import sys
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from psrl.workers.gen.rollout_coordination import RolloutCoordinator
+from psrl.workers.reward.reward_model.coordinator import RewardModelCoordinator
 
 pytestmark = pytest.mark.cpu_test
-
-# ── Heavy-dep stubs ──────────────────────────────────────────────────────────
-_MOCKED = [
-    "ray",
-    "ray.actor",
-    "ray.util",
-    "ray.util.queue",
-    "aiohttp",
-    "torch",
-    "numpy",
-    "psrl.utils.logger",
-    "psrl.utils.common",
-    "psrl.utils.common.http_utils",
-    "psrl.utils.elastic_rm",
-    "psrl.utils.elastic_rm.diagnostics",
-    "psrl.utils.server",
-    "psrl.utils.server.command",
-    "psrl.workers.gen.stats_collector",
-    "psrl.workers.gen.utils",
-    "psrl.workers.gen.zmq_queue",
-]
-for _m in _MOCKED:
-    if _m not in sys.modules:
-        sys.modules[_m] = MagicMock()
-
-sys.modules["ray"].remote = lambda cls=None, **kw: (cls if cls is not None else lambda c: c)
-sys.modules["ray"].actor.ActorHandle = object
-sys.modules["ray.util"].get_node_ip_address = MagicMock(return_value="127.0.0.1")
-sys.modules["psrl.workers.gen.utils"].RolloutInstanceId = tuple
-sys.modules["psrl.workers.gen.utils"].DEFAULT_MAX_CONNECTIONS = 100
-sys.modules["psrl.workers.gen.utils"].DEFAULT_TIMEOUT = 60.0
-
-
-# Stub CommandExtension
-class _CommandExtension:
-    def __init__(self):
-        import queue as _q
-
-        self.command_queue = _q.Queue()
-
-    def _complete_command(self, cmd_id, result):
-        pass
-
-
-sys.modules["psrl.utils.server.command"].CommandExtension = _CommandExtension
-sys.modules["psrl.utils.server.command"].Command = MagicMock
-sys.modules["psrl.utils.server.command"].CommandType = MagicMock
-
-RolloutCoordinator = importlib.import_module("psrl.workers.gen.rollout_coordination").RolloutCoordinator
-_COORDINATOR_PATH = (
-    pathlib.Path(__file__).parent.parent.parent.parent
-    / "psrl"
-    / "workers"
-    / "reward"
-    / "reward_model"
-    / "coordinator.py"
-)
-_COORDINATOR_SPEC = importlib.util.spec_from_file_location("reward_model_coordinator_under_test", _COORDINATOR_PATH)
-_COORDINATOR_MODULE = importlib.util.module_from_spec(_COORDINATOR_SPEC)
-_COORDINATOR_SPEC.loader.exec_module(_COORDINATOR_MODULE)
-RewardModelCoordinator = _COORDINATOR_MODULE.RewardModelCoordinator
-
-
-# ── Fixtures ─────────────────────────────────────────────────────────────────
 
 
 def _make_server_handle():
@@ -136,13 +70,13 @@ def test_get_sleep_level_rollout_returns_2():
 def test_do_sleep_instance_calls_nixl_sleep():
     coord = _make_rollout_coord()
     coord._get_sleep_level = lambda: 2
-    asyncio.get_event_loop().run_until_complete(coord._do_sleep_instance("wid-0"))
+    asyncio.run(coord._do_sleep_instance("wid-0"))
     coord.server_handles["wid-0"].nixl_sleep.remote.assert_called_once_with(level=2)
 
 
 def test_do_wake_up_instance_calls_nixl_wake_up():
     coord = _make_rollout_coord()
-    asyncio.get_event_loop().run_until_complete(coord._do_wake_up_instance("wid-0"))
+    asyncio.run(coord._do_wake_up_instance("wid-0"))
     coord.server_handles["wid-0"].nixl_wake_up.remote.assert_called_once_with()
 
 
@@ -157,7 +91,7 @@ def test_reward_get_sleep_level_returns_1():
 def test_reward_do_sleep_instance_calls_plain_sleep():
     """RewardModelCoordinator.sleep uses server.sleep (not nixl_sleep)."""
     coord = _make_reward_coord()
-    asyncio.get_event_loop().run_until_complete(coord._do_sleep_instance("rm-0"))
+    asyncio.run(coord._do_sleep_instance("rm-0"))
     coord.server_handles["rm-0"].sleep.remote.assert_called_once_with(level=1)
     coord.server_handles["rm-0"].nixl_sleep.remote.assert_not_called()
 
@@ -165,7 +99,7 @@ def test_reward_do_sleep_instance_calls_plain_sleep():
 def test_reward_do_wake_up_instance_calls_plain_wake_up():
     """RewardModelCoordinator.wake_up uses server.wake_up (not nixl_wake_up)."""
     coord = _make_reward_coord()
-    asyncio.get_event_loop().run_until_complete(coord._do_wake_up_instance("rm-0"))
+    asyncio.run(coord._do_wake_up_instance("rm-0"))
     coord.server_handles["rm-0"].wake_up.remote.assert_called_once_with()
     coord.server_handles["rm-0"].nixl_wake_up.remote.assert_not_called()
 
@@ -174,7 +108,7 @@ def test_get_router_backlog_size_no_url_returns_0():
     """Without gateway URL, backlog size returns 0 immediately."""
     coord = _make_reward_coord()
     coord.rollout_gateway_url = ""
-    result = asyncio.get_event_loop().run_until_complete(coord.get_router_backlog_size())
+    result = asyncio.run(coord.get_router_backlog_size())
     assert result == 0
 
 
@@ -188,5 +122,5 @@ def test_get_router_backlog_size_sums_worker_loads():
         return {"workers": [{"id": "w1", "load": 3}, {"id": "w2", "load": 5}]}
 
     coord._gateway_get_json = _mock_get
-    result = asyncio.get_event_loop().run_until_complete(coord.get_router_backlog_size())
+    result = asyncio.run(coord.get_router_backlog_size())
     assert result == 8

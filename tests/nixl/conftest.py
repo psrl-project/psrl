@@ -8,3 +8,11 @@ test_nixl_e2e.py, test_nixl_meta_server_comm.py, test_send_recv.py,
 test_send_recv_model.py require a full nixl + GPU + multi-node environment
 and are designed to be run as scripts (not via pytest in CI).
 """
+
+# Exclude the script-style / multi-node tests from pytest collection.
+collect_ignore = [
+    "test_nixl_e2e.py",
+    "test_nixl_meta_server_comm.py",
+    "test_send_recv.py",
+    "test_send_recv_model.py",
+]

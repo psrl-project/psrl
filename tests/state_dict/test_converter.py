@@ -756,7 +756,7 @@ class TestLoadStateDictNdimMismatchSlicing(unittest.TestCase):
         """Verify matching dimensions bypass the mismatch branch."""
         src_3d = torch.randn(1, 128, 2048)
         dst_sample = torch.empty(1, 128, 2048)
-        # ndim matches → the branch condition is False
+        # Equal ndim makes the mismatch branch condition false.
         self.assertEqual(src_3d.ndim, dst_sample.ndim)
 
 

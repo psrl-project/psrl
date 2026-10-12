@@ -31,3 +31,18 @@ grpc_registration_health_rpc_timeout_s: 5.0
 # Buffer and replay KV events after sequence gaps.
 # Disabled because inline monitoring tolerates gaps and avoids replay indexing failures.
 enable_kv_event_replay: False
+
+# Enale TITO debug in SMG
+tito_debug: False
+
+# Harness tool-input canonicalizer for TITO prefix hashing. "none" disables it and "claude_code"
+# mirrors Claude Code's normalizeToolInput so replayed histories keep matching the stored prefix.
+tito_tool_normalization: claude_code
+tito_workdir: /testbed
+
+# Drop dead (rollback) TITO leaves so abandoned branches are never down-streamed as training
+# data. Compaction branches that carry fresh context are ordinary leaves and stay.
+tito_drop_dead_leaves: true
+
+# Tool call parser for the SMG gateway
+tool_call_parser: null

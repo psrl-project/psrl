@@ -36,6 +36,9 @@ test = [
     "pytest-mock>=3.12",
     "pytest-cov>=5.0",
 ]
+sandbox-e2b = [
+    "e2b>=2.38.0",
+]
 
 [project.urls]
 Homepage="https://github.com/psrl-project/psrl"
@@ -62,8 +65,13 @@ psrl = "psrl.trainer.config.hydra_plugins.psrl_searchpath:PSRLSearchPathPlugin"
 [tool.ruff]
 line-length = 119
 src = ["psrl"]
-# Archived pre-SMG code is kept for reference and never imported by live code.
-extend-exclude = ["deprecated"]
+extend-exclude = [
+    # Archived pre-SMG code kept for reference only. It is never imported by live code.
+    "deprecated",
+    # Vendored upstream parsers: copied verbatim and hashed in _vendor/PROVENANCE.md.
+    # Reformatting them would trip the payload integrity check in payload.py.
+    "examples/mini_swe/grading/_vendor",
+]
 
 [tool.ruff.lint]
 select = [

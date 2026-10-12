@@ -5,20 +5,14 @@ Overlap chunk-safe training stages with ongoing rollout.
 each mini-batch chunk and is exact only for group-local GRPO normalization.
 """
 
-from __future__ import annotations
-
-from typing import TYPE_CHECKING
-
 import ray
 from transfer_queue.metadata import KVBatchMeta
 from verl.utils.debug import marked_timer
 
+from psrl.trainer.ppo.ray_trainer import PSRL_RayPPOTrainer
 from psrl.trainer.ppo.strategies.base import StepStrategy, psrl_logger
 from psrl.utils.config import resolve_fine_grain_chunk_size
 from psrl.utils.logger import EventType, log_dual_events
-
-if TYPE_CHECKING:
-    from psrl.trainer.ppo.ray_trainer import PSRL_RayPPOTrainer
 
 
 class FineGrainOverlapStrategy(StepStrategy):
@@ -27,6 +21,11 @@ class FineGrainOverlapStrategy(StepStrategy):
 
     `recompute` updates the concatenated batch. `pre_step` updates each
     mini-batch chunk.
+
+    Session-mean-token-mean loss (``actor.loss_agg_mode=session-mean-token-mean``)
+    requires window-level normalization, so it is only allowed with
+    ``overlap_scope=recompute`` (pre_step's chunk-local normalization would change
+    the per-session denominator per chunk).
     """
 
     def __init__(self, trainer: PSRL_RayPPOTrainer, cfg) -> None:
@@ -48,6 +47,19 @@ class FineGrainOverlapStrategy(StepStrategy):
                 f"not yet implemented). Got effective_granularity={self.effective_granularity!r}. "
                 "Use overlap_scope=recompute with micro_batch, or reduce multiplier so chunk "
                 "clamps to mini_batch."
+            )
+
+        # Session-mean-token-mean loss computes session weights once per scheduled batch, so the
+        # chunk-local denominator of pre_step would change them. Require the recompute scope.
+        loss_agg_mode = t.config.train_actor_rollout_ref.actor.get("loss_agg_mode", "token-mean")
+        if self.overlap_scope == "pre_step" and loss_agg_mode == "session-mean-token-mean":
+            raise ValueError(
+                "overlap_scope=pre_step is not compatible with actor.loss_agg_mode="
+                "session-mean-token-mean: pre_step applies chunk-local per-session normalization, "
+                "which is inconsistent with window-level session normalization. "
+                "Use overlap_scope=recompute (advantage + updates run on the "
+                "concatenated full batch; per-sample stages still overlap) or set "
+                "psrl.fine_grain_overlap.granularity=none for the full-batch path."
             )
 
         ray.get(t.agent_loop_manager.set_chunk_size.remote(self.chunk_groups))
@@ -177,6 +189,10 @@ class FineGrainOverlapStrategy(StepStrategy):
                 break
 
         full_batch = KVBatchMeta.concat(chunks)
+
+        # Prefix Match Rate of the full global batch (after chunk concat),
+        # logged under pmr/*.
+        self.maybe_collect_pmr(full_batch, metrics, timing_raw)
 
         # --- recompute scope: advantage + updates run on the full batch ---
         if self.overlap_scope == "recompute":

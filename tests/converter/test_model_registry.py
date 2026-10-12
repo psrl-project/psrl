@@ -74,10 +74,3 @@ class TestGlobalModelRegistry:
 
         # megatron_modeling.py registers "Megatron" via @register_model
         assert "Megatron" in model_registry._mappings
-
-    def test_model_registry_importable(self):
-        from psrl.utils.converter import create_parameter_mapping, model_registry, register_model
-
-        assert model_registry is not None
-        assert callable(create_parameter_mapping)
-        assert callable(register_model)

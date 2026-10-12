@@ -21,5 +21,5 @@ bash "$SCRIPT_DIR/prefetch_images.sh" \
     --retries 10
 
 bash "$SCRIPT_DIR/load_all_nodes.sh" \
-    --hosts ${PSRL_WORKSPACE}/hosts/64GPUs \
-    --image-dir ${PSRL_WORKSPACE}/docker_images/swe_eval
+    --hosts ${PSRL_WORKSPACE}/hosts/16GPUs \
+    --image-dir ${PSRL_WORKSPACE}/docker_images/swe_train

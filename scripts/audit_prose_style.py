@@ -46,6 +46,7 @@ EXCLUDED_PARTS = {
     ".pytest_cache",
     ".ruff_cache",
     "__pycache__",
+    "_vendor",
     "deprecated",
     "external",
     "patch",

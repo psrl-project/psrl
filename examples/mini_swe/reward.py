@@ -1,5 +1,23 @@
 """
-Compute patch and test based rewards for mini-SWE-agent trajectories.
+mini-SWE-agent reward functions for PSRL.
+
+Toy data sources (`mini_swe_agent_simple`, `mini_swe_agent`) use a shaped signal.
+An exact patch match scores 1.0, a partial patch match (file overlap plus line
+similarity) scores 0.10 to 0.85, and wrong files with a patch or the correct file
+without a patch scores 0.05. Running tests or a python verification without a patch
+scores 0.03, edits without a patch score 0.02, and code exploration alone scores
+0.01. No meaningful tool usage, or 0 turns from a timeout, scores 0.0. Long
+fruitless runs (at least 10 turns, no patch, no editor) score -0.05, and a premature
+submit with no tool usage (1 to 2 turns) scores -0.1.
+
+SWE-bench data sources (`swebench_verified`, `swe_smith_py`, `swe_gym`) use
+`binary_01` (1.0 resolved, 0.0 otherwise), `binary` (+1.0 resolved, -1.0 otherwise,
+legacy signed behavior), and `aborted` (0.0 and removed from training when the agent
+loop produced no sample).
+
+The `acc` field (0/1 float, set in `agent_data.finalize_output`) is emitted
+alongside `score` on wandb to track resolve_rate separately from the shaped
+training signal.
 """
 
 import logging
@@ -139,6 +157,13 @@ def _compute_swe_reward(
     """
     Compute a SWE-bench reward with configurable granularity.
 
+    Reward modes:
+        binary_01 returns {1, 0} as an unsigned outcome reward.
+        binary returns {+1, 0, -1} as legacy signed behavior.
+        test_ratio is continuous based on f2p_pass / f2p_total.
+        partial_credit is multi-level, ordered no_patch < apply_fail < no_progress < partial_fix < resolved.
+        shaped is partial_credit plus an efficiency bonus for fewer turns.
+
     Args:
         extra_info (dict[str, Any] | None): Grading and trajectory metadata.
         reward_mode (str): Binary, test ratio, partial credit, or shaped mode.
@@ -163,7 +188,17 @@ def _compute_swe_reward(
         psrl_logger.debug("[swe reward] score=+1.0, acc=1.0 (resolved).")
         return {"score": 1.0, "acc": 1.0}
 
-    # --- Binary mode: everything else is -1 ---
+    # With per-group normalization, `binary_01` gives the same GRPO advantages as the
+    # legacy signed reward, so the separate mode leaves GAE and REINFORCE recipes intact.
+    if reward_mode == "binary_01":
+        psrl_logger.debug(
+            f"[swe reward] score=0.0, acc=0.0 (binary_01 mode, not resolved), "
+            f"apply_ok={grader_result.get('apply_ok')}, "
+            f"f2p={grader_result.get('f2p_pass')}/{grader_result.get('f2p_total')}."
+        )
+        return {"score": 0.0, "acc": 0.0}
+
+    # --- Legacy signed binary mode: everything else is -1 ---
     if reward_mode == "binary":
         psrl_logger.debug(
             f"[swe reward] score=-1.0, acc=0.0 (binary mode, not resolved), "
@@ -263,10 +298,24 @@ def compute_score(
         ground_truth (Any): Expected patch or grading metadata.
         extra_info (dict[str, Any] | None): Trajectory and grader details.
         reward_mode: Reward granularity for SWE-bench data sources.
+            - "binary_01": {1, 0} outcome reward
+            - "binary": {+1, 0, -1} legacy signed behavior
+            - "partial_credit": Multi-level rewards based on patch/test progress
+            - "test_ratio": Continuous score based on f2p/p2p ratios
+            - "shaped": partial_credit plus an efficiency bonus
         **kwargs: Ignored framework arguments.
 
     Returns:
-        float | dict[str, Any]: Scalar toy reward or SWE score and accuracy.
+        float: For toy data sources (``mini_swe_agent_simple``, ``mini_swe_agent``),
+            returns a plain float reward in the range [-0.1, 1.0].
+        dict[str, Any]: For SWE-bench data sources (``swebench_verified``,
+            ``swe_smith_py``, ``swe_gym``), returns ``{"score": float, "acc": float}`` so that
+            `DAPORewardLoopManager` emits both the shaped training signal and the
+            0/1 resolve_rate metric to wandb separately.
+
+            Reward values are +1.0 resolved, 0.0 aborted (0 turns or Docker failure),
+            0.0 not resolved (binary_01 mode), -1.0 in all other cases (binary mode),
+            and between -1.0 and 0.95 for the partial credit modes.
     """
     # --- SWE-bench Verified / SWE-smith-py: test-execution reward ---
     if data_source in ("swebench_verified", "swe_smith_py", "swe_gym"):

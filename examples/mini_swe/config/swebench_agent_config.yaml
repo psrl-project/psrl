@@ -1,9 +1,8 @@
 - name: mini_swe_agent
   _target_: psrl.workers.agent_loop.loops.mini_swe_agent_loop_v1.MiniSWEAgentLoopV1
   sandbox_config:
-    # Cap concurrent Docker rollouts per AgentLoopWorker. Unlimited (0) overloads
-    # the local docker daemon and causes `docker run` to hit pull_timeout.
-    max_parallel_tasks_per_worker: 8
+    sandbox_cpu_count: 2
+    collect_resource_metrics: ${oc.decode:${oc.env:PSRL_SANDBOX_COLLECT_RESOURCE_METRICS,false}}
     # Per-turn timeout forwarded to mini-swe-agent's model client.
     rollout_turn_timeout: 2400
     environment:
@@ -12,9 +11,12 @@
       image: "swebench-sentinel-override-per-instance"
       cwd: "/testbed"
       container_timeout: "2h"
-      # Grading heavy repositories can briefly require more memory than rollout.
-      # The separate limit prevents cgroup OOM failures.
-      grader_memory: "30g"
+    rollout_environment:
+      memory: "8g"
+    grader_environment:
+      # Heavy repos run `pip install -e .` during grading and briefly need up to 30 GB.
+      memory: "30g"
+      timeout: 900
   agent:
     # System / problem / observation / format-error templates copied verbatim from
     # the official mini-swe-agent swebench.yaml (plain ```bash``` fences variant).

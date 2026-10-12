@@ -3,8 +3,8 @@ mini-SWE-agent Runtime Configuration for PSRL.
 
 Dataclass-based config for the mini-SWE-agent integration. These configs
 control the PSRL-side orchestration (sandbox timeouts, parallelism, templates).
-mini-swe-agent's own components (`DockerEnvironment`, `DefaultAgent`,
-`LitellmTextbasedModel`) are configured directly via their Python APIs
+mini-swe-agent's own components (`DefaultAgent`, `LitellmTextbasedModel`) are
+configured directly via their Python APIs
 in the black-box runner -- no YAML generation is needed.
 """
 
@@ -28,11 +28,11 @@ psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
 @dataclass
 class MiniEnvironmentConfig:
     """
-    Environment settings passed to mini-swe-agent's `get_environment()`.
+    Backend-neutral environment settings used to build a `SandboxSpec`.
     """
 
-    environment_class: str = "docker"
     image: str = "python:3.11-slim"
+    template: str | None = None
     cwd: str = "/testbed"
     env: dict = field(
         default_factory=lambda: {
@@ -43,20 +43,11 @@ class MiniEnvironmentConfig:
             "TQDM_DISABLE": "1",
         }
     )
-    run_args: list = field(
-        default_factory=lambda: [
-            "--rm",
-            "--memory=8g",
-            "--network",
-            "host",
-            "--add-host",
-            "host.docker.internal:host-gateway",
-        ]
-    )
+    forward_env: list[str] = field(default_factory=list)
+    memory: str | int | None = "8g"
     container_timeout: str = "2h"
-    # Installing heavy repositories can briefly exceed rollout memory during grading.
-    # A separate 30 GB limit prevents cgroup OOM failures.
-    grader_memory: str = "30g"
+    # Default shell-command timeout. Case-specific mappings may override it.
+    timeout: int = 30
 
 
 @dataclass
@@ -65,14 +56,26 @@ class MiniSandboxConfig:
     PSRL-side orchestration settings (not passed to mini-swe-agent directly).
     """
 
-    max_parallel_tasks_per_worker: int = 0
+    # Per-sandbox CPU request. Node-wide admission uses this value together
+    # with the effective rollout or grader memory request.
+    sandbox_cpu_count: int = 2
+    backend: str | None = None
+    policy_profile: str | None = "mini_swe"
+    snapshot_verifier: bool = True
+    collect_resource_metrics: bool = False
+    # Shared base plus small case-specific overlays keeps rollout and verifier
+    # behavior aligned without duplicating image, cwd, env, or lifetime config.
     environment: MiniEnvironmentConfig = field(default_factory=MiniEnvironmentConfig)
+    rollout_environment: dict[str, Any] = field(default_factory=dict)
+    grader_environment: dict[str, Any] = field(
+        default_factory=lambda: {
+            "memory": "30g",
+            "timeout": 900,
+        }
+    )
 
     # Per-turn timeout forwarded to mini-swe-agent's model client.
     rollout_turn_timeout: int = 480
-
-    # Legacy queue-bridge loop compatibility.
-    query_timeout: int = 600
 
 
 @dataclass
@@ -84,8 +87,8 @@ class MiniAgentConfig:
     `AgentConfig` (no defaults in upstream). `problem_template` maps to
     mini-swe-agent's `instance_template` kwarg.
 
-    Both templates must come from `simple_agent_config.yaml`. Empty defaults make
-    `build_runtime_config` reject incomplete merged configurations.
+    Native mini-swe-agent configs must provide both templates. Harness-based
+    loops reuse the sandbox portion of this schema and do not require them.
     """
 
     cost_limit: float = 0.0
@@ -159,7 +162,10 @@ def _ensure_dict(val: Any) -> dict:
 # --- Factory ---
 
 
-def build_runtime_config(yaml_kwargs: dict[str, Any]) -> MiniSWEAgentRuntimeConfig:
+def build_runtime_config(
+    yaml_kwargs: dict[str, Any],
+    require_agent_templates: bool = True,
+) -> MiniSWEAgentRuntimeConfig:
     """
     Build config by merging YAML kwargs onto the `OmegaConf` structured schema.
     """
@@ -173,7 +179,7 @@ def build_runtime_config(yaml_kwargs: dict[str, Any]) -> MiniSWEAgentRuntimeConf
     merged = OmegaConf.merge(schema, OmegaConf.create(raw))
     cfg: MiniSWEAgentRuntimeConfig = OmegaConf.to_object(merged)  # type: ignore[assignment]
 
-    if not cfg.agent.system_template or not cfg.agent.problem_template:
+    if require_agent_templates and (not cfg.agent.system_template or not cfg.agent.problem_template):
         raise ValueError(
             "agent.system_template and agent.problem_template must be provided "
             "in simple_agent_config.yaml (they have no hardcoded defaults)."

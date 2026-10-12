@@ -1,21 +1,37 @@
 """
-Grade SWE-bench patches in fresh Docker containers.
+SWE-bench / SWE-smith-py Grader for PSRL RL Training.
 
-The grader enforces patch policy, runs tests, and parses official harness results.
+Grades a model patch in a fresh sandbox (isolated from the rollout sandbox),
+applies the patch, runs the per-SWE-problem eval script, and grades the result.
+
+The evaluation itself is host-independent: the eval script is taken straight
+from the prepared parquet (``swe_problem.eval_script``, populated for Verified /
+SWE-Gym / SWE-smith) and parsed *inside the grader sandbox* by a stdlib-only
+driver built from ``examples/mini_swe/grading``. No ``swebench`` / ``swesmith``
+import happens on the training host at rollout time.
+
+Patch policy enforcement (disallow test / config file changes) mirrors
+OpenClaw-RL's ``_analyze_patch_policy`` with the same env-var configuration
+interface.
+
+Public API
+----------
+analyze_patch_policy(patch_text, swe_problem) -> dict
+grade_fresh_container(swe_problem, model_patch, grader_kind, image_name, ...) -> dict
 """
 
-from __future__ import annotations
-
+import base64
 import logging
 import os
 import re
-import tempfile
+import shlex
 import time
-from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from psrl.utils.common.docker_utils import force_remove_containers_by_label
+from examples.mini_swe.grading.runtime import run_grading
+from examples.mini_swe.grading.schema import GradingPlan, GradingResult
+from psrl.sandbox import ExecResult, SandboxSpec, SnapshotRef, SyncSandboxManager, SyncSandboxSession
 
 psrl_logger = logging.getLogger(__file__)
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
@@ -30,14 +46,21 @@ _OUTPUT_TAIL_BYTES = 4096
 # args (those are added per-call).
 _BASE_RUN_ARGS: list[str] = [
     "--rm",
-    "--memory=30g",  # 10g was too small: heavy repos (scikit-learn, xarray)
-    # run `pip install -e .` inside the container and can
-    # temporarily exceed 10g, triggering cgroup OOM kills.
-    "--network",
-    "host",
-    "--add-host",
-    "host.docker.internal:host-gateway",
+    # Heavy repositories can exceed 10 GiB while installing build dependencies.
+    "--memory=30g",
 ]
+
+# Forward corporate proxy environment variables to the grading container so that
+# pip/apt inside the eval script can reach external package indexes.
+_PROXY_ENV_KEYS = [
+    "http_proxy",
+    "https_proxy",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "no_proxy",
+    "NO_PROXY",
+]
+
 
 # --- Patch policy ---
 
@@ -63,12 +86,6 @@ def _changed_files_from_patch(patch_text: str) -> list[str]:
 def _is_test_like_path(path: str) -> bool:
     """
     Return True if a path looks like a test file or test directory.
-
-    Args:
-        path (str): File path relative to the repo root.
-
-    Returns:
-        bool: True when the path appears to be a test artifact.
     """
     lower = path.lower()
     parts = lower.split("/")
@@ -84,12 +101,6 @@ def _is_test_like_path(path: str) -> bool:
 def _is_config_like_path(path: str) -> bool:
     """
     Return True if a path looks like a project configuration file.
-
-    Args:
-        path (str): File path relative to the repo root.
-
-    Returns:
-        bool: True when the path appears to be a configuration artifact.
     """
     lower = path.lower()
     name = Path(lower).name
@@ -109,15 +120,61 @@ def _is_config_like_path(path: str) -> bool:
     }
 
 
+# Files whose modification can change the installed dependency set or build backend. A patch
+# touching one must keep the eval script's editable re-install, which propagates new metadata.
+_PACKAGING_FILE_NAMES = frozenset(
+    {
+        "pyproject.toml",
+        "setup.py",
+        "setup.cfg",
+        "manifest.in",
+        "pipfile",
+        "pipfile.lock",
+        "poetry.lock",
+        "environment.yml",
+        "environment.yaml",
+        "tox.ini",
+        "constraints.txt",
+    }
+)
+
+
+def _added_files_from_patch(patch: str) -> list[str]:
+    """
+    Return the paths a unified diff creates.
+    """
+    added: list[str] = []
+    current: str | None = None
+    for line in patch.splitlines():
+        match = re.match(r"^diff --git a/(.+?) b/(.+)$", line)
+        if match:
+            current = match.group(2)
+        elif line.startswith("new file mode") and current:
+            added.append(current)
+            current = None
+    return added
+
+
+def _patch_needs_editable_install(patch: str) -> bool:
+    """
+    Whether re-running the eval script's editable install is required.
+
+    The image already has the checkout installed editable, so that install is
+    normally a redundant rebuild. Two cases still need it: a patch that changes
+    packaging metadata/dependency pins, and a patch that adds a Python package
+    directory. Setuptools editable installs use a static package map, so a
+    brand-new package would not be importable until the map is regenerated.
+    """
+    for path in _changed_files_from_patch(patch):
+        name = os.path.basename(path).lower()
+        if name in _PACKAGING_FILE_NAMES or name.startswith("requirements"):
+            return True
+    return any(os.path.basename(path) == "__init__.py" for path in _added_files_from_patch(patch))
+
+
 def _extract_eval_test_files(swe_problem: dict[str, Any]) -> list[str]:
     """
     Extract F2P + P2P test file paths from a SWE problem dict.
-
-    Args:
-        swe_problem (dict[str, Any]): Dataset row with FAIL_TO_PASS / PASS_TO_PASS.
-
-    Returns:
-        list[str]: Sorted list of unique test-file paths for the eval tests.
     """
     files: set[str] = set()
     for key in ("FAIL_TO_PASS", "PASS_TO_PASS"):
@@ -146,8 +203,7 @@ def analyze_patch_policy(
 
     Args:
         patch_text (str): Unified diff produced by the agent.
-        swe_problem (dict[str, Any]): Dataset row for the SWE problem
-            (needs FAIL_TO_PASS, PASS_TO_PASS).
+        swe_problem (dict[str, Any]): Dataset row for the SWE problem.
 
     Returns:
         dict[str, Any]: Policy analysis result containing at least
@@ -187,330 +243,73 @@ def analyze_patch_policy(
     }
 
 
-# --- Evaluation script resolution ---
+# --- Grader failure shaping ---
 
 
-@lru_cache(maxsize=2048)
-def _get_verified_eval_script(swe_problem_id: str, swe_problem_json: str) -> str:
-    """
-    Build and cache the eval script for a SWE-bench Verified SWE problem.
-
-    Args:
-        swe_problem_id (str): SWE problem ID (the HF ``instance_id`` field),
-            used as the cache key.
-        swe_problem_json (str): JSON-serialised SWE problem dict (full row).
-
-    Returns:
-        str: Bash eval script from ``make_test_spec``.
-    """
-    import json
-
-    from swebench.harness.test_spec.test_spec import make_test_spec
-
-    swe_problem = json.loads(swe_problem_json)
-    ts = make_test_spec(swe_problem)
-    return ts.eval_script
-
-
-def _get_smith_eval_script(swe_problem: dict[str, Any]) -> str:
-    """
-    Build the eval script for a SWE-smith SWE problem using the profiles registry.
-
-    Args:
-        swe_problem (dict[str, Any]): Full SWE-smith dataset row.
-
-    Returns:
-        str: Bash eval script string.
-    """
-    from swesmith.profiles import registry
-
-    rp = registry.get_from_inst(swe_problem)
-    cmd, _ = rp.get_test_cmd(swe_problem, f2p_only=False)
-    # Wrap into a minimal bash script consistent with SWE-smith eval.sh format.
-    return "\n".join(
-        [
-            "#!/bin/bash",
-            "set -uxo pipefail",
-            "cd /testbed",
-            cmd,
-        ]
-    )
+def _grader_failure(swe_problem: dict[str, Any], error: str) -> dict[str, Any]:
+    """Build a grader result for a host-side failure (no container involved)."""
+    return {
+        "policy_violated": False,
+        "policy_reasons": [],
+        "resolved": False,
+        "apply_ok": False,
+        "f2p_pass": 0,
+        "f2p_total": len(swe_problem.get("FAIL_TO_PASS", [])),
+        "p2p_pass": 0,
+        "p2p_total": len(swe_problem.get("PASS_TO_PASS", [])),
+        "timeout": False,
+        "error": error,
+        "parser_error": None,
+        "failure_reason": None,
+        "elapsed_s": 0.0,
+        "output_tail": "",
+        "resolved_by": "grader_error",
+    }
 
 
-# --- Grading helpers ---
+# --- Standalone adapter ---
 
 
-def _grade_verified(
-    swe_problem: dict[str, Any],
-    model_patch: str,
-    eval_output: str,
-    apply_ok: bool,
-) -> dict[str, Any]:
-    """
-    Grade a Verified SWE problem rollout with the swebench harness.
+class _DockerGradingSession:
+    """Adapt ``minisweagent``'s DockerEnvironment to the grading session API.
 
-    Args:
-        swe_problem (dict[str, Any]): Full SWE-bench Verified row.
-        model_patch (str): Patch submitted by the model.
-        eval_output (str): Raw stdout/stderr from the eval script.
-        apply_ok (bool): Whether git apply succeeded.
-
-    Returns:
-        dict[str, Any]: Grading result with at least ``resolved``,
-            ``f2p_pass``, ``f2p_total``, ``p2p_pass``, ``p2p_total``,
-            and ``resolved_by`` fields.
-    """
-    import json
-
-    from swebench.harness.grading import get_eval_report
-    from swebench.harness.test_spec.test_spec import make_test_spec
-
-    f2p = swe_problem.get("FAIL_TO_PASS", [])
-    p2p = swe_problem.get("PASS_TO_PASS", [])
-    if isinstance(f2p, str):
-        f2p = json.loads(f2p)
-    if isinstance(p2p, str):
-        p2p = json.loads(p2p)
-
-    if not apply_ok:
-        return {
-            "resolved": False,
-            "f2p_pass": 0,
-            "f2p_total": len(f2p),
-            "p2p_pass": 0,
-            "p2p_total": len(p2p),
-            "resolved_by": "apply_failed",
-        }
-
-    try:
-        ts = make_test_spec(swe_problem)
-        prediction = {
-            "instance_id": swe_problem["instance_id"],
-            "model_name_or_path": "psrl/rollout",
-            "model_patch": model_patch,
-        }
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".log", delete=False) as tf:
-            tf.write(eval_output)
-            log_path = tf.name
-        # Unwrap the instance entry returned by swebench 4 and newer.
-        report_map = get_eval_report(ts, prediction, log_path, include_tests_status=True)
-        report = report_map.get(swe_problem["instance_id"], {})
-        resolved = bool(report.get("resolved", False))
-        tests_status = report.get("tests_status", {})
-        f2p_status = tests_status.get("FAIL_TO_PASS", {})
-        p2p_status = tests_status.get("PASS_TO_PASS", {})
-        return {
-            "resolved": resolved,
-            "f2p_pass": len(f2p_status.get("success", [])),
-            "f2p_total": len(f2p),
-            "p2p_pass": len(p2p_status.get("success", [])),
-            "p2p_total": len(p2p),
-            "resolved_by": "harness",
-        }
-    except Exception as exc:
-        psrl_logger.warning(f"[swebench_grader] Verified harness grading failed, falling back to returncode: {exc}.")
-        return {
-            "resolved": False,
-            "f2p_pass": 0,
-            "f2p_total": len(f2p),
-            "p2p_pass": 0,
-            "p2p_total": len(p2p),
-            "resolved_by": "harness_error",
-        }
-
-
-def _grade_smith(
-    swe_problem: dict[str, Any],
-    model_patch: str,
-    eval_output: str,
-    apply_ok: bool,
-    returncode: int,
-) -> dict[str, Any]:
-    """
-    Grade a SWE-smith-py SWE problem rollout with the swesmith harness.
-
-    Falls back to returncode if the harness grading raises.
-
-    Args:
-        swe_problem (dict[str, Any]): Full SWE-smith-py row.
-        model_patch (str): Patch submitted by the model.
-        eval_output (str): Raw stdout/stderr from the eval script.
-        apply_ok (bool): Whether git apply succeeded.
-        returncode (int): Exit code of the eval script.
-
-    Returns:
-        dict[str, Any]: Grading result.
+    Only the standalone evaluation CLI takes this path, and training always supplies
+    a PSRL ``SyncSandboxManager``. File transfers use base64 so the tiny payload
+    survives shell quoting.
     """
 
-    from swesmith.harness.grading import get_eval_report as smith_get_eval_report
+    def __init__(self, environment: Any) -> None:
+        self._environment = environment
 
-    f2p = swe_problem.get("FAIL_TO_PASS", [])
-    p2p = swe_problem.get("PASS_TO_PASS", [])
+    def exec(self, command: str, *, cwd: str | None = None, timeout_s: float | None = None, **_: Any) -> ExecResult:
+        """Run ``command`` and translate minisweagent's dict result."""
+        kwargs = {} if timeout_s is None else {"timeout": timeout_s}
+        result = self._environment.execute({"command": command}, cwd=cwd, **kwargs)
+        exception = result.get("exception_info") or ""
+        if exception:
+            if "timeout" in exception.lower():
+                raise TimeoutError(exception)
+            raise RuntimeError(exception)
+        return ExecResult(int(result.get("returncode", -1)), result.get("output", ""), "")
 
-    if not apply_ok:
-        return {
-            "resolved": False,
-            "f2p_pass": 0,
-            "f2p_total": len(f2p),
-            "p2p_pass": 0,
-            "p2p_total": len(p2p),
-            "resolved_by": "apply_failed",
-        }
+    def write_bytes(self, path: str, data: bytes) -> None:
+        """Write bytes by decoding a base64 literal through the shell."""
+        encoded = base64.b64encode(data).decode()
+        command = f"printf %s {shlex.quote(encoded)} | base64 -d > {shlex.quote(path)}"
+        result = self._environment.execute({"command": command}, cwd="/")
+        if result.get("returncode", -1) != 0:
+            raise RuntimeError(f"Could not write {path!r}: {result.get('output', '')}")
 
-    try:
-        prediction = {
-            "instance_id": swe_problem["instance_id"],
-            "model_name_or_path": "psrl/rollout",
-            "model_patch": model_patch,
-        }
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".log", delete=False) as tf:
-            tf.write(eval_output)
-            log_path = tf.name
-        report = smith_get_eval_report(prediction, swe_problem, log_path)
-        resolved = bool(report.get("resolved", False))
-        tests_status = report.get("tests_status", {})
-        f2p_status = tests_status.get("FAIL_TO_PASS", {})
-        p2p_status = tests_status.get("PASS_TO_PASS", {})
-        return {
-            "resolved": resolved,
-            "f2p_pass": len(f2p_status.get("success", [])),
-            "f2p_total": len(f2p),
-            "p2p_pass": len(p2p_status.get("success", [])),
-            "p2p_total": len(p2p),
-            "resolved_by": "harness",
-        }
-    except Exception as exc:
-        psrl_logger.warning(f"[swebench_grader] SWE-smith harness grading failed, falling back to returncode: {exc}.")
-        resolved_fallback = returncode == 0
-        return {
-            "resolved": resolved_fallback,
-            "f2p_pass": 0,
-            "f2p_total": len(f2p),
-            "p2p_pass": 0,
-            "p2p_total": len(p2p),
-            "resolved_by": "returncode_fallback",
-        }
+    def read_bytes(self, path: str) -> bytes:
+        """Read bytes by base64-encoding the file through the shell."""
+        result = self._environment.execute({"command": f"base64 -w0 {shlex.quote(path)}"}, cwd="/")
+        if result.get("returncode", -1) != 0:
+            raise RuntimeError(f"Could not read {path!r}: {result.get('output', '')}")
+        return base64.b64decode(result.get("output", ""))
 
-
-# --- SWE-Gym grading ---
-
-
-def _get_gym_eval_script(swe_problem: dict[str, Any]) -> str:
-    """Retrieve the pre-computed eval_script from the swe_problem dict.
-
-    SWE-Gym instances store the eval_script directly in the parquet
-    (generated by prepare_swe_gym.py) because the swegym fork of swebench
-    cannot coexist with swebench 4.x at runtime.
-
-    Args:
-        swe_problem (dict[str, Any]): Full SWE-Gym dataset row.
-
-    Returns:
-        str: Bash eval script string.
-
-    Raises:
-        ValueError: If eval_script is missing from swe_problem.
-    """
-    eval_script = swe_problem.get("eval_script", "")
-    if not eval_script:
-        raise ValueError(
-            f"SWE-Gym instance {swe_problem.get('instance_id', '?')} "
-            f"missing eval_script in swe_problem. "
-            f"Re-run prepare_swe_gym.py to regenerate the parquet."
-        )
-    return eval_script
-
-
-def _grade_gym(
-    swe_problem: dict[str, Any],
-    model_patch: str,
-    eval_output: str,
-    apply_ok: bool,
-) -> dict[str, Any]:
-    """Grade a SWE-Gym instance using swebench's pytest parser directly.
-
-    Bypasses ``get_eval_report`` (which requires the repo to be in
-    ``MAP_REPO_TO_PARSER``, and SWE-Gym repos are not in swebench 4.x)
-    by directly calling ``parse_log_pytest`` + ``get_eval_tests_report``.
-
-    Args:
-        swe_problem (dict[str, Any]): Full SWE-Gym dataset row.
-        model_patch (str): Patch submitted by the model.
-        eval_output (str): Raw stdout/stderr from the eval script.
-        apply_ok (bool): Whether git apply succeeded.
-
-    Returns:
-        dict[str, Any]: Grading result with ``resolved``, ``f2p_pass``,
-            ``f2p_total``, ``p2p_pass``, ``p2p_total``, ``resolved_by``.
-    """
-    import json as _json
-
-    f2p = swe_problem.get("FAIL_TO_PASS", [])
-    p2p = swe_problem.get("PASS_TO_PASS", [])
-    if isinstance(f2p, str):
-        f2p = _json.loads(f2p)
-    if isinstance(p2p, str):
-        p2p = _json.loads(p2p)
-
-    if not apply_ok:
-        return {
-            "resolved": False,
-            "f2p_pass": 0,
-            "f2p_total": len(f2p),
-            "p2p_pass": 0,
-            "p2p_total": len(p2p),
-            "resolved_by": "apply_failed",
-        }
-
-    try:
-        from swebench.harness.constants import KEY_INSTANCE_ID
-        from swebench.harness.grading import (
-            FAIL_TO_PASS as _FAIL_TO_PASS,
-        )
-        from swebench.harness.grading import (
-            PASS_TO_PASS as _PASS_TO_PASS,
-        )
-        from swebench.harness.grading import (
-            EvalType,
-            ResolvedStatus,
-            get_eval_tests_report,
-            get_resolution_status,
-        )
-        from swebench.harness.log_parsers.python import parse_log_pytest
-
-        # The pytest parser does not access its type-only `test_spec` argument.
-        status_map = parse_log_pytest(eval_output, None)  # type: ignore[arg-type]
-
-        # Build eval_ref for get_eval_tests_report.
-        eval_ref = {
-            KEY_INSTANCE_ID: swe_problem["instance_id"],
-            _FAIL_TO_PASS: f2p,
-            _PASS_TO_PASS: p2p,
-        }
-
-        report = get_eval_tests_report(status_map, eval_ref, eval_type=EvalType.PASS_AND_FAIL)
-        resolved = get_resolution_status(report) == ResolvedStatus.FULL.value
-
-        f2p_status = report.get("FAIL_TO_PASS", {})
-        p2p_status = report.get("PASS_TO_PASS", {})
-        return {
-            "resolved": resolved,
-            "f2p_pass": len(f2p_status.get("success", [])),
-            "f2p_total": len(f2p),
-            "p2p_pass": len(p2p_status.get("success", [])),
-            "p2p_total": len(p2p),
-            "resolved_by": "harness",
-        }
-    except Exception as exc:
-        psrl_logger.warning(f"[swebench_grader] SWE-Gym harness grading failed, falling back to returncode: {exc}.")
-        return {
-            "resolved": False,
-            "f2p_pass": 0,
-            "f2p_total": len(f2p),
-            "p2p_pass": 0,
-            "p2p_total": len(p2p),
-            "resolved_by": "harness_error",
-        }
+    def close(self) -> None:
+        """Tear down the underlying Docker environment."""
+        self._environment.cleanup()
 
 
 # --- Main grader entry point ---
@@ -523,33 +322,44 @@ def grade_fresh_container(
     image_name: str,
     timeout: int = _DEFAULT_EVAL_TIMEOUT,
     swe_task_id: str = "",
-    memory: str = "",
+    memory: str | int | None = "",
+    sandbox: SyncSandboxManager | None = None,
+    sandbox_spec: SandboxSpec | None = None,
+    sandbox_snapshot: SnapshotRef | None = None,
+    grading_plan: GradingPlan | None = None,
 ) -> dict[str, Any]:
     """
-    Grade a model patch in a fresh Docker container.
+    Grade a model patch in a fresh sandbox.
 
-    Patch policy is checked before the isolated test harness runs.
+    1. Runs ``analyze_patch_policy`` and returns immediately if it is violated.
+    2. Builds the :class:`GradingPlan` from the prepared row (host-independent).
+    3. Spawns a fresh sandbox from the per-problem image.
+    4. For SWE-smith, runs ``git checkout HEAD~1`` to restore F2P test files.
+    5. Resets the tree and applies the model patch via ``git apply``.
+    6. Runs the eval script and grades the log inside the sandbox.
 
     Args:
-        swe_problem (dict[str, Any]): Full HF dataset row for one SWE problem.
+        swe_problem (dict[str, Any]): Full dataset row for one SWE problem.
         model_patch (str): Patch submitted by the agent (unified diff).
-        grader_kind (str): ``"verified"`` or ``"smith"``.
+        grader_kind (str): ``"verified"``, ``"gym"`` or ``"smith"``.
         image_name (str): Docker image used for the rollout.
         timeout (int): Eval script execution timeout in seconds.
         swe_task_id (str): PSRL rollout episode ID for container labelling.
         memory (str): ``--memory`` limit for the grading container.
+        sandbox: Generic synchronous PSRL sandbox manager used by training.
+        sandbox_spec: Backend-neutral grading sandbox request used by training.
+        sandbox_snapshot: Compatible clean baseline restored by stateful backends.
+        grading_plan: Pre-built plan. When omitted it is derived from
+            ``swe_problem`` (``eval_script`` + ``log_parser``).
 
     Returns:
-        dict[str, Any]: Test counts, policy state, and execution diagnostics.
+        dict[str, Any]: Grading result. Infrastructure failures add
+        ``failure_reason`` / ``parser_error`` diagnostics, and reward semantics
+        are unchanged (callers keep their existing ``reward_mode`` handling).
     """
-    from minisweagent.environments.docker import DockerEnvironment
-
     swe_problem_id: str = swe_problem.get("instance_id", "unknown")
     log_prefix = f"[swebench_grader, task_id={swe_task_id or swe_problem_id}]"
     t0 = time.monotonic()
-
-    f2p = swe_problem.get("FAIL_TO_PASS", [])
-    p2p = swe_problem.get("PASS_TO_PASS", [])
 
     # --- 0. Patch policy guard ---
     if not model_patch:
@@ -560,11 +370,13 @@ def grade_fresh_container(
             "resolved": False,
             "apply_ok": False,
             "f2p_pass": 0,
-            "f2p_total": len(f2p),
+            "f2p_total": len(swe_problem.get("FAIL_TO_PASS", [])),
             "p2p_pass": 0,
-            "p2p_total": len(p2p),
+            "p2p_total": len(swe_problem.get("PASS_TO_PASS", [])),
             "timeout": False,
             "error": "no_patch",
+            "parser_error": None,
+            "failure_reason": "no_patch",
             "elapsed_s": 0.0,
             "output_tail": "",
             "resolved_by": "no_patch",
@@ -579,45 +391,34 @@ def grade_fresh_container(
             "resolved": False,
             "apply_ok": False,
             "f2p_pass": 0,
-            "f2p_total": len(f2p),
+            "f2p_total": len(swe_problem.get("FAIL_TO_PASS", [])),
             "p2p_pass": 0,
-            "p2p_total": len(p2p),
+            "p2p_total": len(swe_problem.get("PASS_TO_PASS", [])),
             "timeout": False,
             "error": None,
+            "parser_error": None,
+            "failure_reason": "policy_blocked",
             "elapsed_s": time.monotonic() - t0,
             "output_tail": "",
             "resolved_by": "policy_blocked",
         }
 
-    # --- 1. Build eval script before spawning container (may raise) ---
-    import json
-
-    eval_script: str = ""
+    # --- 1. Resolve the frozen grading plan (host-independent) ---
     try:
-        if grader_kind == "gym":
-            eval_script = _get_gym_eval_script(swe_problem)
-        elif grader_kind == "smith":
-            eval_script = _get_smith_eval_script(swe_problem)
-        else:
-            swe_problem_json = json.dumps(swe_problem, default=str)
-            eval_script = _get_verified_eval_script(swe_problem_id, swe_problem_json)
-    except Exception as exc:
-        psrl_logger.error(f"{log_prefix} Failed to build eval script: {exc}.")
-        return {
-            "policy_violated": False,
-            "policy_reasons": [],
-            "resolved": False,
-            "apply_ok": False,
-            "f2p_pass": 0,
-            "f2p_total": len(f2p),
-            "p2p_pass": 0,
-            "p2p_total": len(p2p),
-            "timeout": False,
-            "error": f"eval_script_build_error: {exc}",
-            "elapsed_s": time.monotonic() - t0,
-            "output_tail": "",
-            "resolved_by": "eval_script_error",
-        }
+        plan = grading_plan or GradingPlan.from_swe_problem(swe_problem)
+    except (ValueError, TypeError) as exc:
+        result = _grader_failure(swe_problem, str(exc))
+        result.update(failure_reason="invalid_plan", resolved_by="invalid_plan", elapsed_s=time.monotonic() - t0)
+        return result
+    if plan is None:
+        psrl_logger.error(
+            f"{log_prefix} No eval_script on the prepared row. Re-run the dataset preparation step for this split."
+        )
+        result = _grader_failure(swe_problem, "missing_eval_script")
+        result["failure_reason"] = "missing_eval_script"
+        result["resolved_by"] = "missing_eval_script"
+        result["elapsed_s"] = time.monotonic() - t0
+        return result
 
     # --- 2. Spawn fresh eval container ---
     grader_label = (
@@ -625,144 +426,143 @@ def grade_fresh_container(
     )
     run_args = list(_BASE_RUN_ARGS)
     if memory:
-        # Override the --memory=Xg entry in _BASE_RUN_ARGS with the caller's value.
         run_args = [a for a in run_args if not a.startswith("--memory=")]
         run_args.append(f"--memory={memory}")
     run_args += ["--label", grader_label]
-    # The reaper uses the shared actor ID to find grader and rollout containers.
+    # Per-actor label consumed by the reaper sidecar in
+    # psrl.sandbox.utils.docker_utils.
     _actor_id = os.environ.get("PSRL_ACTOR_ID", "")
     if _actor_id:
         run_args += ["--label", f"psrl.actor_id={_actor_id}"]
 
-    # Forward corporate proxy environment variables to the grading container
-    # so that pip/apt inside the eval script can reach external package indexes.
-    _PROXY_ENV_KEYS = [
-        "http_proxy",
-        "https_proxy",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "no_proxy",
-        "NO_PROXY",
-    ]
-
-    docker_env: DockerEnvironment | None = None
+    sandbox_session: SyncSandboxSession | _DockerGradingSession | None = None
+    docker_environment: Any | None = None
+    uses_psrl_sandbox = sandbox is not None
     apply_ok = False
-    eval_output = ""
-    eval_returncode = -1
-    timed_out = False
-    error_msg: str | None = None
+    verdict: dict[str, Any] = {}
+
+    def execute(command: str, *, cwd: str, command_timeout: int | None = None) -> ExecResult:
+        """Execute a shell command through whichever session is active."""
+        if sandbox_session is None:
+            raise RuntimeError("Grading sandbox is not initialized.")
+        return sandbox_session.exec(command, cwd=cwd, timeout_s=command_timeout)
 
     try:
         psrl_logger.info(f"{log_prefix} Spawning eval container: image={image_name!r}, grader_kind={grader_kind!r}.")
-        docker_env = DockerEnvironment(
-            image=image_name,
-            cwd="/testbed",
-            run_args=run_args,
-            forward_env=_PROXY_ENV_KEYS,
-            container_timeout=_DEFAULT_CONTAINER_TIMEOUT,
-        )
-        psrl_logger.info(f"{log_prefix} Eval container started: id={docker_env.container_id!r}.")
+        if sandbox is not None:
+            if sandbox_spec is None:
+                raise ValueError("sandbox_spec is required when sandbox is provided.")
+            if sandbox_snapshot is not None:
+                sandbox_session = sandbox.restore(
+                    sandbox_snapshot, sandbox_spec, state_policy=sandbox_spec.state_policy
+                )
+            else:
+                sandbox_session = sandbox.create(sandbox_spec)
+            sandbox_id = sandbox_session.ref.sandbox_id
+        else:
+            from minisweagent.environments.docker import DockerEnvironment
+
+            docker_environment = DockerEnvironment(
+                image=image_name,
+                cwd="/testbed",
+                run_args=run_args,
+                forward_env=_PROXY_ENV_KEYS,
+                container_timeout=_DEFAULT_CONTAINER_TIMEOUT,
+            )
+            sandbox_session = _DockerGradingSession(docker_environment)
+            sandbox_id = docker_environment.container_id
+        psrl_logger.info(f"{log_prefix} Eval container started: id={sandbox_id!r}.")
 
         # --- 3. SWE-smith: restore F2P test files via HEAD~1 ---
         if grader_kind == "smith":
-            out = docker_env.execute(
-                {"command": "git checkout HEAD~1"},
-                cwd="/testbed",
-            )
-            if out["returncode"] != 0:
-                psrl_logger.warning(
-                    f"{log_prefix} git checkout HEAD~1 failed (rc={out['returncode']}): {out['output'][:200]}."
-                )
+            out = execute("git checkout HEAD~1", cwd="/testbed")
+            if out.exit_code != 0:
+                raise RuntimeError(f"Could not restore SWE-smith baseline: {out.stdout[:200]!r}.")
 
         # --- 4. Reset tree and apply model patch ---
-        apply_cmd = "git reset --hard HEAD && git clean -fd"
-        out = docker_env.execute({"command": apply_cmd}, cwd="/testbed")
-        if out["returncode"] != 0:
-            psrl_logger.warning(f"{log_prefix} git reset failed (rc={out['returncode']}).")
+        # Reset to the dataset baseline so agent-created commits stay part of the patch.
+        base_commit = str(swe_problem.get("base_commit") or "")
+        reset_target = shlex.quote(base_commit) if base_commit else "HEAD"
+        out = execute(f"git reset --hard {reset_target} && git clean -fd", cwd="/testbed")
+        if out.exit_code != 0:
+            raise RuntimeError(f"Could not reset grading baseline: {out.stdout[:200]!r}.")
 
-        # Write patch to a tmp file inside the container via heredoc.
-        delimiter = "PSRL_PATCH_EOF"
-        apply_cmd2 = f"git apply <<'{delimiter}'\n{model_patch}\n{delimiter}"
-        out2 = docker_env.execute({"command": apply_cmd2}, cwd="/testbed")
-        apply_ok = out2["returncode"] == 0
+        # PSRL's file API avoids heredoc delimiter collisions and shell expansion.
+        write_bytes = sandbox_session.write_bytes
+        write_bytes("/tmp/psrl-model.patch", model_patch.encode())
+        out2 = execute("git apply --binary /tmp/psrl-model.patch", cwd="/testbed")
+        apply_ok = out2.exit_code == 0
         if not apply_ok:
-            psrl_logger.info(f"{log_prefix} git apply failed (rc={out2['returncode']}): {out2['output'][:300]}.")
+            psrl_logger.info(f"{log_prefix} git apply failed: {out2.stdout[:300]}.")
 
-        # --- 5. SWE-smith: revert test-file changes from the patch ---
-        if grader_kind == "smith" and apply_ok:
-            eval_test_files = _extract_eval_test_files(swe_problem)
-            if eval_test_files:
-                files_str = " ".join(eval_test_files)
-                out3 = docker_env.execute(
-                    {"command": f"git checkout -- {files_str}"},
-                    cwd="/testbed",
-                )
-                if out3["returncode"] != 0:
-                    psrl_logger.warning(f"{log_prefix} Reverting test files failed (rc={out3['returncode']}).")
+        if apply_ok:
+            # --- 5. SWE-smith: revert test-file changes from the patch ---
+            if grader_kind == "smith":
+                eval_test_files = _extract_eval_test_files(swe_problem)
+                if eval_test_files:
+                    out3 = execute(f"git checkout -- {shlex.join(eval_test_files)}", cwd="/testbed")
+                    if out3.exit_code != 0:
+                        raise RuntimeError(f"Could not restore grading tests: {out3.stdout[:200]!r}.")
 
-        # --- 6. Run eval script ---
-        eval_delim = "PSRL_EVAL_EOF"
-        eval_cmd = f"bash <<'{eval_delim}'\n{eval_script}\n{eval_delim}"
-        psrl_logger.info(f"{log_prefix} Running eval script (timeout={timeout}s)...")
-
-        # Pass a per-command override because the environment timeout covers the container.
-        try:
-            out_eval = docker_env.execute(
-                {"command": eval_cmd},
-                cwd="/testbed",
-                timeout=timeout,
+            # --- 6. Run + grade inside the sandbox ---
+            # Skip the eval script's editable re-install unless the patch changed that wheel.
+            skip_editable_install = not _patch_needs_editable_install(model_patch)
+            psrl_logger.info(f"{log_prefix} Running eval script (timeout={timeout}s)...")
+            verdict = run_grading(
+                sandbox_session,
+                plan,
+                workdir="/testbed",
+                timeout_s=timeout,
+                skip_editable_install=skip_editable_install,
             )
-            eval_output = out_eval.get("output", "")
-            eval_returncode = out_eval.get("returncode", -1)
-            if out_eval.get("exception_info"):
-                timed_out = "timeout" in out_eval.get("exception_info", "").lower()
-        except Exception as exc:
-            timed_out = "timeout" in str(exc).lower() or "TimeoutExpired" in type(exc).__name__
-            error_msg = str(exc)
-            psrl_logger.warning(f"{log_prefix} Eval script raised: {exc}.")
+        else:
+            verdict = GradingResult(
+                f2p_total=len(plan.f2p),
+                p2p_total=len(plan.p2p),
+                failure_reason="apply_failed",
+                output_tail=out2.stdout[-_OUTPUT_TAIL_BYTES:],
+            ).to_dict()
 
     except Exception as exc:
-        error_msg = str(exc)
         psrl_logger.error(f"{log_prefix} Container error: {exc}.")
+        verdict = GradingResult(
+            f2p_total=len(plan.f2p),
+            p2p_total=len(plan.p2p),
+            failure_reason="eval_timeout" if isinstance(exc, TimeoutError) else "container_error",
+            timeout=isinstance(exc, TimeoutError),
+            error=str(exc),
+        ).to_dict()
+
     finally:
-        if docker_env is not None:
+        if sandbox_session is not None:
             try:
-                docker_env.cleanup()
+                sandbox_session.close()
             except Exception as cleanup_exc:
-                psrl_logger.warning(f"{log_prefix} Container cleanup failed: {cleanup_exc}.")
-        # Sweep by label because asynchronous cleanup may return before removal.
-        try:
-            force_remove_containers_by_label("psrl.grader_task_id", grader_label.split("=", 1)[1])
-        except Exception as sweep_exc:
-            psrl_logger.warning(f"{log_prefix} Label sweep failed: {sweep_exc}.")
+                psrl_logger.warning(f"{log_prefix} Sandbox cleanup failed: {cleanup_exc}.")
+        # Synchronous belt-and-suspenders sweep by label for the standalone path, since
+        # ``docker_env.cleanup`` has been observed to silently succeed without killing anything.
+        if not uses_psrl_sandbox:
+            try:
+                from psrl.sandbox.utils.docker_utils import force_remove_containers_by_label
 
-    elapsed = time.monotonic() - t0
-    output_tail = eval_output[-_OUTPUT_TAIL_BYTES:] if eval_output else ""
+                force_remove_containers_by_label("psrl.grader_task_id", grader_label.split("=", 1)[1])
+            except Exception as sweep_exc:
+                psrl_logger.warning(f"{log_prefix} Label sweep failed: {sweep_exc}.")
 
-    # --- 7. Grade the eval output ---
-    if grader_kind == "smith":
-        grade = _grade_smith(swe_problem, model_patch, eval_output, apply_ok, eval_returncode)
-    elif grader_kind == "gym":
-        grade = _grade_gym(swe_problem, model_patch, eval_output, apply_ok)
-    else:
-        grade = _grade_verified(swe_problem, model_patch, eval_output, apply_ok)
-
-    # Merge grading result with meta fields.
     result: dict[str, Any] = {
         "policy_violated": False,
         "policy_reasons": [],
         "apply_ok": apply_ok,
-        "timeout": timed_out,
-        "error": error_msg,
-        "elapsed_s": round(elapsed, 2),
-        "output_tail": output_tail,
-        **grade,
+        "resolved_by": "harness",
+        **verdict,
     }
+    result["resolved_by"] = verdict.get("failure_reason") or "harness"
+    result["elapsed_s"] = round(time.monotonic() - t0, 2)
 
     psrl_logger.info(
         f"{log_prefix} Grading complete: resolved={result['resolved']}, "
         f"apply_ok={apply_ok}, f2p={result['f2p_pass']}/{result['f2p_total']}, "
         f"p2p={result['p2p_pass']}/{result['p2p_total']}, "
-        f"elapsed={elapsed:.1f}s, resolved_by={result['resolved_by']!r}."
+        f"elapsed={result['elapsed_s']:.1f}s, resolved_by={result['resolved_by']!r}."
     )
     return result

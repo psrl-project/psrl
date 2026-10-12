@@ -2,7 +2,6 @@
 import importlib.util
 import os
 import sys
-import types
 from unittest.mock import MagicMock
 
 import pytest
@@ -21,17 +20,6 @@ def _load_module_direct(dotted_name: str, file_path: str) -> object:
     return mod
 
 
-def _fake_module(dotted_name: str, **attrs) -> object:
-    """Register a minimal module stub for CPU-only test collection."""
-    if dotted_name in sys.modules:
-        return sys.modules[dotted_name]
-    mod = types.ModuleType(dotted_name)
-    for name, value in attrs.items():
-        setattr(mod, name, value)
-    sys.modules[dotted_name] = mod
-    return mod
-
-
 _HERE = os.path.dirname(__file__)
 _PSRL = os.path.join(_HERE, "../psrl")
 
@@ -39,14 +27,18 @@ _PSRL = os.path.join(_HERE, "../psrl")
 if "psrl.utils.logger" not in sys.modules:
     sys.modules["psrl.utils.logger"] = MagicMock()
 
-# NOTE(lhy): Stub agent-loop types so CPU tests do not import Torch during collection.
-_gen_utils = _fake_module(
+# Load the real `gen.utils` so CPU-only tests can import its dataclasses and the
+# `RolloutInstanceId` alias. Stub torch for the load, then restore `sys.modules`.
+_previous_torch = sys.modules.get("torch")
+sys.modules["torch"] = MagicMock()
+_gen_utils = _load_module_direct(
     "psrl.workers.gen.utils",
-    RolloutInstanceId=tuple[str, int],
-    INVALID_ROLLOUT_INSTANCE_ID=("", -1),
-    TokenInput=MagicMock,
-    TokenOutput=MagicMock,
+    os.path.join(_PSRL, "workers/gen/utils.py"),
 )
+if _previous_torch is None:
+    sys.modules.pop("torch", None)
+else:
+    sys.modules["torch"] = _previous_torch
 RolloutInstanceId = _gen_utils.RolloutInstanceId
 
 # Load staleness_controller directly (avoids ray via ps/__init__.py)
@@ -61,17 +53,26 @@ EntryInfo = _staleness_controller.EntryInfo
 
 @pytest.fixture(scope="session")
 def ray_cluster():
-    """Start a single-node Ray cluster once for the whole test session."""
+    """Provide a Ray cluster for the session, reusing one that is already running.
+
+    On dev boxes a Ray cluster may already be up (``/tmp/ray/ray_current_cluster``).
+    Connecting with ``address="auto"`` avoids passing ``num_cpus``/``num_gpus``,
+    which Ray rejects when attaching to an existing cluster. Only when no cluster
+    is reachable do we start a local one.
+    """
     import ray
 
     already_running = ray.is_initialized()
     if not already_running:
-        ray.init(
-            num_cpus=4,
-            ignore_reinit_error=True,
-            include_dashboard=False,
-            log_to_driver=False,
-        )
+        try:
+            ray.init(address="auto", ignore_reinit_error=True)
+        except Exception:
+            ray.init(
+                num_cpus=4,
+                ignore_reinit_error=True,
+                include_dashboard=False,
+                log_to_driver=False,
+            )
     yield
     if not already_running:
         ray.shutdown()

@@ -373,7 +373,6 @@ class PSRL_BaseTrainWorker:
             raise RuntimeError("ray_pull_model is not supported for TrainWorker in 'cpu' or 'cpu_ref' mode.")
         elif self.psrl_config.ps_mode == "nixl_cpu" or self.psrl_config.ps_mode == "nixl_gpu":
             self.nixl_pull_model()
-            self._debug_log_train_info(label=f"TRAIN_AFTER_PULL_R{self.worker_rank}")
             # NOTE(linsh): Reload after the first pull because empty initialization leaves
             # optimizer master parameters stale, while later optimizer state remains local.
             if self.pull_times == 1:

@@ -244,10 +244,8 @@ def validate_config(
             "into one trajectory per turn."
         )
     if wants_thinking_disabled(thinking_template) and chat_template:
-        # Reject only templates that actually prefill an unclosed `<think>` on history.
-        # An accumulating template that emits a bare `content` stays balanced with
-        # thinking off, which is what SkyRL runs in
-        # `examples/train/thunder_agent/scripts/r2egym_32b/run_trainer.sh`.
+        # Reject only templates that prefill an unclosed `<think>` on history, since a balanced
+        # accumulating template stays valid with thinking off.
         template_source = resolve_chat_template_value(chat_template)
         if template_source and template_prefills_assistant_think(template_source):
             raise ValueError(
@@ -325,13 +323,6 @@ def validate_config(
     # Check TMS configuration
     if config.psrl.tms.enable_cuda_graph:
         assert config.psrl.tms.range == "all", "TMS CUDA graph can only be enabled when TMS range is 'all'"
-    if config.psrl.tms.range not in ["train", "all"]:
-        assert (
-            config.train_actor_rollout_ref.actor.strategy == "megatron"
-            and config.train_actor_rollout_ref.actor.megatron.optimizer_offload
-            or config.train_actor_rollout_ref.actor.strategy == "fsdp2"
-            and config.train_actor_rollout_ref.actor.fsdp_config.optimizer_offload
-        ), "Optimizer offload must be enabled when TMS is not enabled for training workers"
 
     # Check LMCache and KV transfer configuration
     lmcache_cfg = config.psrl.get("lmcache", {})
@@ -439,6 +430,18 @@ def validate_config(
                 "psrl.fine_grain_overlap.overlap_scope=pre_step is not compatible with "
                 f"ppo_epochs={ppo_epochs} > 1 (streaming accumulation cannot revisit chunks). "
                 "Set ppo_epochs=1 or use overlap_scope=recompute."
+            )
+
+        loss_agg_mode = config.train_actor_rollout_ref.actor.get("loss_agg_mode", "token-mean")
+        if overlap_scope == "pre_step" and loss_agg_mode == "session-mean-token-mean":
+            raise ValueError(
+                "psrl.fine_grain_overlap.overlap_scope=pre_step is not compatible with "
+                "train_actor_rollout_ref.actor.loss_agg_mode=session-mean-token-mean: pre_step "
+                "computes session weights per chunk (chunk-local session counts), which breaks the "
+                "window-level session equality required by session-mean-token-mean loss. "
+                "Set overlap_scope=recompute (advantage+update run once on the concatenated "
+                "full batch; per-sample GPU stages still overlap) or disable fine_grain_overlap "
+                "(granularity=none) for the full-batch path."
             )
 
         if granularity == "micro_batch" and overlap_scope == "pre_step":

@@ -20,13 +20,13 @@ from examples.sciaccel_rl.config import SciAccelRuntimeConfig
 from harbor.job import Job
 from harbor.models.job.config import AgentConfig, JobConfig, SourceJobConfig
 from harbor.models.trial.config import TaskConfig
-from psrl.utils.agent.thinking import MULTI_TRAJ, harness_extra_body
-from psrl.utils.common.docker_utils import (
+from psrl.sandbox.utils.docker_utils import (
     CLEANUP_EXECUTOR,
     force_remove_compose_images,
     force_remove_compose_project,
     prune_dangling_images,
 )
+from psrl.utils.agent.thinking import MULTI_TRAJ, harness_extra_body
 
 psrl_logger = logging.getLogger("psrl.sciaccel_rl.runner")
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))

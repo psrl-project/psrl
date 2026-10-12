@@ -6,8 +6,15 @@ from psrl.workers.agent_loop.loops.base_agent_loop import AgentLoopBase
 from psrl.workers.gen.utils import TokenInput
 
 
+class _ConcreteAgentLoop(AgentLoopBase):
+    """Concrete subclass so `__new__` can skip `__init__` on the ABC."""
+
+    async def run(self, request):  # pragma: no cover (only instantiation is under test)
+        raise NotImplementedError
+
+
 def _bare_loop():
-    loop = AgentLoopBase.__new__(AgentLoopBase)
+    loop = _ConcreteAgentLoop.__new__(_ConcreteAgentLoop)
     loop.rollout_gateway_url = "http://gateway"
     loop.model_config = SimpleNamespace(path="model")
     loop.rollout_config = SimpleNamespace(

@@ -13,9 +13,8 @@ PSRL_PATH=$(python -c "import psrl; import os; print(os.path.dirname(os.path.dir
 # --- Pre-flight checks ---
 echo "=== Pre-flight checks ==="
 python -c "from minisweagent.agents.default import DefaultAgent; print('mini-swe-agent: OK')"
-python -c "import swebench; print('swebench', swebench.__version__, ': OK')"
-python -c "from examples.mini_swe.swebench_grader import grade_fresh_container, _grade_gym; print('swebench_grader (gym): OK')"
-python -c "from swebench.harness.log_parsers.python import parse_log_pytest; print('parse_log_pytest: OK')"
+python -c "from examples.mini_swe.swebench_grader import grade_fresh_container; print('swebench_grader (gym): OK')"
+python -c "from examples.mini_swe.grading.payload import grader_zip_bytes; print('grading payload', len(grader_zip_bytes()), 'bytes: OK')"
 ray status 2>/dev/null | head -5 || echo "WARNING: ray status failed"
 
 # Pre-flight: spot-check Docker images from training data
