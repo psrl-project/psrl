@@ -1,3 +1,43 @@
+From 38246890a6dc71f50af3eba28e17f11e4f94b2de Mon Sep 17 00:00:00 2001
+From: Somoku <linsh0@protonmail.com>
+Subject: [PATCH] Basic patch for PSRL
+
+- safer get_event_loop
+- add spmd vllm rollout back
+- add router replay in megatron
+- add lazy import for megatron v0.15.0
+- disaggregate dist group init from `__init__` to speedup worker startup
+- support specifying resource num per bundle to enable colocate of different resource pools
+- support configure worker-specified env setups through `configure_worker`
+- support tms for weight and optim memory management
+- patch DCP async save to avoid NCCL fork-corrupting timeout (no-fork replacement)
+- add use_per_rank_checkpoint path in MegatronCheckpointManager
+---
+ recipe/dapo/test_dapo_7b_math.sh                   |  24 +-
+ recipe/dapo/test_dapo_7b_math_megatron.sh          |  31 +-
+ verl/protocol.py                                   |  23 +-
+ verl/single_controller/base/worker.py              |   3 +-
+ verl/single_controller/ray/base.py                 |  57 ++-
+ verl/trainer/config/data/legacy_data.yaml          |   2 +-
+ verl/trainer/constants_ppo.py                      |   5 +-
+ verl/trainer/sft_trainer.py                        |   2 +-
+ verl/utils/checkpoint/__init__.py                  |   4 -
+ .../checkpoint/megatron_checkpoint_manager.py      |  65 ++-
+ verl/utils/import_utils.py                         |  60 ++-
+ verl/utils/megatron/dist_checkpointing.py          |  50 ++
+ verl/utils/megatron_utils.py                       |   4 +
+ verl/utils/vllm/__init__.py                        |   4 +-
+ verl/utils/vllm/utils.py                           |  98 ----
+ verl/workers/actor/megatron_actor.py               |   3 +
+ verl/workers/fsdp_workers.py                       | 513 +++++++++++----------
+ verl/workers/megatron_workers.py                   | 388 +++++++++-------
+ verl/workers/reward_manager/dapo.py                |   2 +
+ verl/workers/rollout/base.py                       |   1 +
+ verl/workers/rollout/vllm_rollout/__init__.py      |   1 +
+ verl/workers/rollout/vllm_rollout/vllm_rollout.py  |   8 +-
+ 22 files changed, 772 insertions(+), 576 deletions(-)
+
+---
 diff --git a/recipe/dapo/test_dapo_7b_math.sh b/recipe/dapo/test_dapo_7b_math.sh
 index e7fa9926..c6d75bd5 100644
 --- a/recipe/dapo/test_dapo_7b_math.sh
@@ -147,120 +187,8 @@ index a866e968..63188ff6 100644
      trainer.resume_mode=auto \
 -    trainer.log_val_generations=10
 +    trainer.log_val_generations=10 2>&1 | tee ${exp_name}.log
-diff --git a/verl/models/mcore/model_forward.py b/verl/models/mcore/model_forward.py
-index 09e169d7..4a04afc8 100644
---- a/verl/models/mcore/model_forward.py
-+++ b/verl/models/mcore/model_forward.py
-@@ -14,6 +14,7 @@
- # See the License for the specific language governing permissions and
- # limitations under the License.
- 
-+import torch
- 
- from verl.utils.megatron_utils import unwrap_model
- 
-@@ -109,22 +110,33 @@ def model_forward_gen(vision_model: bool = False):
-             When using the bshd format, we have to add paddings to the input_ids to meet the longest sequence length, 
-             so it is recommended to disable dynamic batch size and set batch size to 1
-             """
--            assert not vision_model, "vision model does not support bshd format"
-             assert fp8 is None, "fp8 is not supported for bshd format yet"
- 
-             batch_size, sequence_length = attention_mask.shape[:2]
-+            position_ids_for_preprocess = (
-+                torch.arange(sequence_length, device=input_ids.device).unsqueeze(0).expand(batch_size, -1)
-+                if vision_model
-+                else position_ids
-+            )
-+            pre_process_for_bshd = True if vision_model else pre_process
-             new_input_ids, new_attention_mask, new_position_ids = preprocess_bshd(
--                input_ids, attention_mask, position_ids, sequence_parallel=sp, pre_process=pre_process
-+                input_ids,
-+                attention_mask,
-+                position_ids_for_preprocess,
-+                sequence_parallel=sp,
-+                pre_process=pre_process_for_bshd,
-             )
-             output_orig = model(
-                 input_ids=new_input_ids,
--                position_ids=new_position_ids,
-+                position_ids=None if vision_model else new_position_ids,
-                 attention_mask=new_attention_mask,
-                 **model_kwargs,
-             )
-             if post_process and logits_processor is not None:
-                 args = {
--                    k: preprocess_bshd(v, attention_mask, position_ids, sequence_parallel=sp, pre_process=True)[0]
-+                    k: preprocess_bshd(
-+                        v, attention_mask, position_ids_for_preprocess, sequence_parallel=sp, pre_process=True
-+                    )[0]
-                     for k, v in logits_processor_args.items()
-                 }
-                 output_dict = logits_processor(output_orig, **args)
-diff --git a/verl/models/mcore/model_initializer.py b/verl/models/mcore/model_initializer.py
-index 49a30bc9..3c3e4bcd 100644
---- a/verl/models/mcore/model_initializer.py
-+++ b/verl/models/mcore/model_initializer.py
-@@ -71,6 +71,7 @@ class BaseModelInitializer(ABC):
-         transformer_layer_spec = self.get_transformer_layer_spec(vp_stage=vp_stage)
-         rope_scaling_args = self.get_rope_scaling_args()
-         mtp_block_spec = extra_kwargs.get("mtp_block_spec", None)
-+        from verl.utils.megatron_utils import get_hf_rope_theta
-         model = GPTModel(
-             config=self.tfconfig,
-             transformer_layer_spec=transformer_layer_spec,
-@@ -80,7 +81,7 @@ class BaseModelInitializer(ABC):
-             post_process=post_process,
-             share_embeddings_and_output_weights=share_embeddings_and_output_weights,
-             position_embedding_type="rope",
--            rotary_base=self.hf_config.rope_theta,
-+            rotary_base=get_hf_rope_theta(self.hf_config),
-             **rope_scaling_args,
-             mtp_block_spec=mtp_block_spec,
-             **({} if not self.has_vp_stage else {"vp_stage": vp_stage}),
-diff --git a/verl/models/mcore/registry.py b/verl/models/mcore/registry.py
-index d8c7b2cf..4d29845a 100644
---- a/verl/models/mcore/registry.py
-+++ b/verl/models/mcore/registry.py
-@@ -70,6 +70,8 @@ class SupportedModel(Enum):
-     QWEN3_MOE_VL = "Qwen3VLMoeForConditionalGeneration"
-     QWEN3_VL = "Qwen3VLForConditionalGeneration"
-     GPT_OSS = "GptOssForCausalLM"
-+    QWEN3_5 = "Qwen3_5ForConditionalGeneration"
-+    QWEN3_5MoE = "Qwen3_5MoeForConditionalGeneration"
- 
- 
- # Registry for model configuration converters
-@@ -117,6 +119,8 @@ MODEL_FORWARD_REGISTRY: dict[SupportedModel, Callable] = {
-     SupportedModel.GLM4_MOE: model_forward_gen(),
-     SupportedModel.QWEN3_TOKEN_CLASSIFICATION: model_forward_gen(),
-     SupportedModel.GPT_OSS: model_forward_gen(),
-+    SupportedModel.QWEN3_5: model_forward_gen(True),
-+    SupportedModel.QWEN3_5MoE: model_forward_gen(True),
- }
- 
- # Registry for model forward functions
-@@ -136,6 +140,8 @@ MODEL_FORWARD_NOPAD_REGISTRY: dict[SupportedModel, Callable] = {
-     SupportedModel.GLM4_MOE: gptmodel_forward_no_padding,
-     SupportedModel.QWEN3_TOKEN_CLASSIFICATION: gptmodel_forward_no_padding,
-     SupportedModel.GPT_OSS: gptmodel_forward_no_padding,
-+    SupportedModel.QWEN3_5: gptmodel_forward_no_padding,
-+    SupportedModel.QWEN3_5MoE: gptmodel_forward_no_padding,
- }
- 
- # Registry for model forward functions
-@@ -154,6 +160,9 @@ MODEL_FORWARD_FUSED_REGISTRY: dict[SupportedModel, Callable] = {
-     SupportedModel.DEEPSEEK_V3: fused_forward_model_gen(),
-     SupportedModel.GLM4_MOE: fused_forward_model_gen(),
-     SupportedModel.GPT_OSS: fused_forward_model_gen(),
-+    SupportedModel.QWEN3_5: fused_forward_model_gen(True),
-+    SupportedModel.QWEN3_5MoE: fused_forward_model_gen(True),
-+
- }
- 
- # Registry for model weight converters
 diff --git a/verl/protocol.py b/verl/protocol.py
-index 43eb26da..0784603d 100644
+index 43eb26da..678b7c7a 100644
 --- a/verl/protocol.py
 +++ b/verl/protocol.py
 @@ -749,7 +749,7 @@ class DataProto:
@@ -272,6 +200,34 @@ index 43eb26da..0784603d 100644
              tensors[key] = self.batch.pop(key)
          non_tensors = {}
          # non tensor batch
+@@ -942,7 +942,26 @@ class DataProto:
+ 
+         non_tensor_batch = list_of_dict_to_dict_of_list(list_of_dict=[d.non_tensor_batch for d in data])
+         for key, val in non_tensor_batch.items():
+-            non_tensor_batch[key] = np.concatenate(val, axis=0)
++            try:
++                non_tensor_batch[key] = np.concatenate(val, axis=0)
++            except ValueError as e:
++                shapes = [v.shape for v in val]
++                unique_shapes = set(shapes)
++                problematic_indices = {
++                    s: [i for i, sh in enumerate(shapes) if sh == s]
++                    for s in unique_shapes
++                }
++                first_mismatch_idx = next(
++                    (i for i, sh in enumerate(shapes) if sh != shapes[0]),
++                    None,
++                )
++                raise ValueError(
++                    f"Failed to concatenate non_tensor_batch key {key!r}: {e}. "
++                    f"Unique shapes and their indices: {problematic_indices}. "
++                    f"Sample value at index 0: {val[0]!r}, "
++                    f"sample value at first mismatch index {first_mismatch_idx}: "
++                    f"{val[first_mismatch_idx]!r}."
++                ) from e
+ 
+         # Merge meta_info with special handling for metrics
+         merged_meta_info = {}
 diff --git a/verl/single_controller/base/worker.py b/verl/single_controller/base/worker.py
 index 4b82f4e1..3f3a1b86 100644
 --- a/verl/single_controller/base/worker.py
@@ -448,6 +404,104 @@ index df927583..1ce90c5e 100644
 -from .checkpoint_handler import CheckpointHandler, OrchestrationMode
 -
 -__all__ = ["CheckpointHandler", "OrchestrationMode"]
+diff --git a/verl/utils/checkpoint/megatron_checkpoint_manager.py b/verl/utils/checkpoint/megatron_checkpoint_manager.py
+index 26a5f7b2..3f2967a4 100644
+--- a/verl/utils/checkpoint/megatron_checkpoint_manager.py
++++ b/verl/utils/checkpoint/megatron_checkpoint_manager.py
+@@ -120,6 +120,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
+         bridge=None,
+         provider=None,
+         peft_cls=None,
++        use_per_rank_checkpoint: bool = False,
+         **kwargs,
+     ):
+         super().__init__(
+@@ -147,6 +148,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
+         self.provider = provider
+         self.vanilla_bridge = self.provider is None
+         self.peft_cls = peft_cls
++        self.use_per_rank_checkpoint = use_per_rank_checkpoint
+         self.rank = torch.distributed.get_rank()
+         # Megatron-Bridge is Okay to load/save HF checkpoint for value model as well
+         self.use_dist_checkpointing = (
+@@ -321,11 +323,26 @@ class MegatronCheckpointManager(BaseCheckpointManager):
+         )
+         log_with_rank(f"Generated state dict for loading: {sharded_state_dict.keys()}", rank=self.rank, logger=logger)
+ 
+-        # Load Dist Checkpointing
+-        state_dict = load_dist_checkpointing(
+-            sharded_state_dict=sharded_state_dict,
+-            ckpt_dir=dist_checkpoint_path,
+-        )
++        # DISPATCH POINT 2: Use PSRL per-rank load instead of DCP
++        if self.use_per_rank_checkpoint:
++            from psrl.utils.checkpoint import load_megatron_checkpoint
++            log_with_rank(
++                f"Loading PSRL per-rank checkpoint from {dist_checkpoint_path}",
++                rank=self.rank, logger=logger, log_only_rank_0=True
++            )
++            state_dict = load_megatron_checkpoint(
++                sharded_state_dict=sharded_state_dict,
++                ckpt_dir=dist_checkpoint_path,
++            )
++        else:
++            log_with_rank(
++                f"Loading DCP checkpoint from {dist_checkpoint_path}",
++                rank=self.rank, logger=logger, log_only_rank_0=True
++            )
++            state_dict = load_dist_checkpointing(
++                sharded_state_dict=sharded_state_dict,
++                ckpt_dir=dist_checkpoint_path,
++            )
+ 
+         if self.should_load_model and self.use_dist_checkpointing:
+             assert "model" in state_dict or any(
+@@ -442,17 +459,35 @@ class MegatronCheckpointManager(BaseCheckpointManager):
+                     log_with_rank(
+                         f"Generated state dict for saving: {state_dict['model'].keys()}", rank=self.rank, logger=logger
+                     )
+-            # Start Async save if enabled
+-            async_save_request = save_dist_checkpointing(
+-                sharded_state_dict=state_dict,
+-                ckpt_path=dist_checkpoint_path,
+-                async_save=self.checkpoint_config.async_save,
+-            )
+-
+-            # Synchronize all async save requests
+-            if not self.checkpoint_config.async_save:
+-                assert async_save_request is None, "Async save request should be None when not using async save."
++            # DISPATCH POINT 1: Use PSRL per-rank save instead of DCP
++            if self.use_per_rank_checkpoint:
++                from psrl.utils.checkpoint import save_megatron_checkpoint
++                log_with_rank(
++                    f"Using PSRL per-rank checkpoint save (UCX-safe) to {dist_checkpoint_path}",
++                    rank=self.rank, logger=logger, log_only_rank_0=True
++                )
++                save_megatron_checkpoint(
++                    sharded_state_dict=state_dict,
++                    ckpt_path=dist_checkpoint_path,
++                    async_save=False,  # PSRL doesn't support async
++                )
++                async_save_request = None
+                 torch.distributed.barrier()
++            else:
++                log_with_rank(
++                    f"Using DCP save to {dist_checkpoint_path}",
++                    rank=self.rank, logger=logger, log_only_rank_0=True
++                )
++                async_save_request = save_dist_checkpointing(
++                    sharded_state_dict=state_dict,
++                    ckpt_path=dist_checkpoint_path,
++                    async_save=self.checkpoint_config.async_save,
++                )
++
++                # Synchronize all async save requests
++                if not self.checkpoint_config.async_save:
++                    assert async_save_request is None, "Async save request should be None when not using async save."
++                    torch.distributed.barrier()
+         else:
+             assert self.use_hf_checkpoint, "When not using distributed checkpointing, use_hf_checkpoint should be True."
+             # Generate optimizer and exra state dicts
 diff --git a/verl/utils/import_utils.py b/verl/utils/import_utils.py
 index 626b6285..f3b21fb9 100644
 --- a/verl/utils/import_utils.py
@@ -533,49 +587,83 @@ index 626b6285..f3b21fb9 100644
 +
 +    for name in names:
 +        lazy_import_to_globals(module_path, name, target_globals=target_globals)
+diff --git a/verl/utils/megatron/dist_checkpointing.py b/verl/utils/megatron/dist_checkpointing.py
+index 4f3b544e..146117e2 100644
+--- a/verl/utils/megatron/dist_checkpointing.py
++++ b/verl/utils/megatron/dist_checkpointing.py
+@@ -12,6 +12,8 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ 
++import queue as _stdlib_queue
++
+ import torch
+ from megatron.core import dist_checkpointing, mpu
+ from megatron.core.dist_checkpointing.serialization import (
+@@ -23,6 +25,53 @@ from megatron.core.dist_checkpointing.strategies.fully_parallel import (
+     FullyParallelSaveStrategyWrapper,
+ )
+ 
++# ---------------------------------------------------------------------------
++# NCCL no-fork patch for DCP async save
++#
++# DCP's FileSystemWriterAsync.write_preloaded_data_multiproc forks child
++# processes via mp.get_context("fork"). Forked children inherit NCCL
++# communicators; when the child exits, ncclCommAbort runs and corrupts the
++# parent's NCCL state, eventually causing a 600-second timeout and SIGABRT.
++#
++# The fix: replace the multiproc entry-point with a sequential in-process
++# version that uses stdlib queue.SimpleQueue instead of forking.
++# ---------------------------------------------------------------------------
++from megatron.core.dist_checkpointing.strategies import filesystem_async as _fsa
++
++_orig_write_preloaded_data = _fsa.FileSystemWriterAsync.write_preloaded_data
++
++
++def _write_preloaded_data_multiproc_nofork(transform_list, use_msc, rank, write_buckets, global_results_queue):
++    """Sequential no-fork replacement for FileSystemWriterAsync.write_preloaded_data_multiproc.
++
++    Processes write buckets one at a time in the current process to avoid
++    forking NCCL communicators which causes ncclCommAbort corruption.
++    """
++    write_results = {}
++    for i, write_bucket in enumerate(write_buckets):
++        results_q = _stdlib_queue.SimpleQueue()
++        count_q = _stdlib_queue.Queue()
++        count_q.put(i)
++        kwargs = {
++            "local_proc_idx": i,
++            "write_bucket": write_bucket,
++            "results_queue": results_q,
++            "count_queue": count_q,
++            "use_fsync": True,
++        }
++        if use_msc:
++            kwargs["use_msc"] = use_msc
++        _orig_write_preloaded_data(transform_list, **kwargs)
++        local_proc_idx, local_results_or_exc = results_q.get()
++        if isinstance(local_results_or_exc, Exception):
++            raise local_results_or_exc
++        write_results[local_proc_idx] = local_results_or_exc
++    global_results_queue.put(write_results)
++
++
++_fsa.FileSystemWriterAsync.write_preloaded_data_multiproc = staticmethod(_write_preloaded_data_multiproc_nofork)
++# ---------------------------------------------------------------------------
++
+ 
+ def save_dist_checkpointing(sharded_state_dict, ckpt_path, async_save=False):
+     validate_sharding_integrity = True
+@@ -64,3 +113,4 @@ def load_dist_checkpointing(sharded_state_dict, ckpt_dir):
+     state_dict = dist_checkpointing.load(sharded_state_dict, ckpt_dir, sharded_strategy=load_strategy)
+ 
+     return state_dict
++
 diff --git a/verl/utils/megatron_utils.py b/verl/utils/megatron_utils.py
-index c319910d..0b96a056 100644
+index c319910d..8d2832ab 100644
 --- a/verl/utils/megatron_utils.py
 +++ b/verl/utils/megatron_utils.py
-@@ -42,6 +42,37 @@ from verl.utils.model import normalize_model_name
- from verl.utils.torch_dtypes import PrecisionType
- 
- 
-+def get_hf_rope_theta(hf_config: PretrainedConfig) -> float:
-+    """Return RoPE base frequency theta.
-+
-+    Most configs expose ``rope_theta`` on the root. Newer models (e.g. Qwen3 in transformers>=5) store it under
-+    ``rope_parameters["rope_theta"]``, optionally nested per attention pattern when ``rope_parameters`` maps names
-+    to parameter dicts.
-+    """
-+    # For transformers <= 4.57.6
-+    if hasattr(hf_config, "rope_theta"):
-+        return hf_config.rope_theta
-+    if hasattr(hf_config, "text_config") and hasattr(hf_config.text_config, "rope_theta"):
-+        return hf_config.text_config.rope_theta
-+
-+    # For transformers >= 5.0.0, check rope_parameters dict (optionally nested) for rope_theta
-+    rp = None
-+    if hasattr(hf_config, "rope_parameters"):
-+        rp = hf_config.rope_parameters
-+    elif hasattr(hf_config, "text_config") and hasattr(hf_config.text_config, "rope_parameters"):
-+        rp = hf_config.text_config.rope_parameters
-+    if isinstance(rp, dict):
-+        if "rope_theta" in rp:
-+            return rp["rope_theta"]
-+        for v in rp.values():
-+            if isinstance(v, dict) and "rope_theta" in v:
-+                return v["rope_theta"]
-+    raise AttributeError(
-+        f"{type(hf_config).__name__} has no rope_theta and no rope_parameters['rope_theta'] — "
-+        "cannot determine RoPE base."
-+    )
-+
-+
- def get_model_config(model):
-     return get_attr_wrapped_model(model, "config", allow_none=False)
- 
-@@ -1054,6 +1085,10 @@ def get_transformer_layer_offset(pipeline_rank, vp_stage, config: TransformerCon
+@@ -1054,6 +1054,10 @@ def get_transformer_layer_offset(pipeline_rank, vp_stage, config: TransformerCon
          inspect.signature(parallel_state.is_pipeline_first_stage).parameters.get("vp_stage", None) is not None
      )
      extra_kwargs = {} if not has_vp_stage else {"ignore_virtual": False, "vp_stage": vp_stage}
@@ -586,72 +674,140 @@ index c319910d..0b96a056 100644
  
      if config.pipeline_model_parallel_size > 1:
          if hasattr(config, "pipeline_model_parallel_layout") and config.pipeline_model_parallel_layout:
-diff --git a/verl/utils/model.py b/verl/utils/model.py
-index b9d17cfb..d7441ef0 100644
---- a/verl/utils/model.py
-+++ b/verl/utils/model.py
-@@ -34,7 +34,7 @@ from transformers import (
-     AutoModelForImageTextToText,
-     AutoModelForSequenceClassification,
-     AutoModelForTokenClassification,
--    AutoModelForVision2Seq,
-+    AutoModelForImageTextToText,
-     GenerationConfig,
-     MistralForSequenceClassification,
-     PretrainedConfig,
-@@ -620,7 +620,7 @@ def patch_valuehead_model(model) -> None:
+diff --git a/verl/utils/vllm/__init__.py b/verl/utils/vllm/__init__.py
+index 00aa7bdb..41c16845 100644
+--- a/verl/utils/vllm/__init__.py
++++ b/verl/utils/vllm/__init__.py
+@@ -12,7 +12,7 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
  
+-from .utils import TensorLoRARequest, VLLMHijack, is_version_ge
++from .utils import is_version_ge
  
- def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_code):
--    from transformers import AutoModelForCausalLM, AutoModelForTokenClassification, AutoModelForVision2Seq
-+    from transformers import AutoModelForCausalLM, AutoModelForTokenClassification, AutoModelForImageTextToText
+ # The contents of vllm/patch.py should not be imported here, because the contents of
+ # patch.py should be imported after the vllm LLM instance is created. Therefore,
+@@ -20,7 +20,5 @@ from .utils import TensorLoRARequest, VLLMHijack, is_version_ge
+ # patch.py separately.
  
-     try:
-         model = AutoModelForTokenClassification.from_pretrained(
-@@ -641,8 +641,8 @@ def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_cod
- 
-     from trl import AutoModelForCausalLMWithValueHead
- 
--    if type(model_config) in AutoModelForVision2Seq._model_mapping.keys():
--        module_class = AutoModelForVision2Seq
-+    if type(model_config) in AutoModelForImageTextToText._model_mapping.keys():
-+        module_class = AutoModelForImageTextToText
-     else:
-         module_class = AutoModelForCausalLM
-     ori_model = module_class.from_pretrained(
-@@ -659,7 +659,7 @@ def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_cod
- 
- _architecture_to_auto_class = {
-     "ForCausalLM": AutoModelForCausalLM,
--    "ForVision2Seq": AutoModelForVision2Seq,
-+    "ForImageTextToText": AutoModelForImageTextToText,
-     "ForTokenClassification": AutoModelForTokenClassification,
-     "ForSequenceClassification": AutoModelForSequenceClassification,
- }
-@@ -672,8 +672,8 @@ def get_hf_auto_model_class(hf_config):
-     if has_remote_code:
-         auto_class = next(k for k, v in hf_config.auto_map.items() if hf_config.architectures[0] in v)
-         match auto_class:
--            case "AutoModelForVision2Seq":
--                actor_module_class = AutoModelForVision2Seq
-+            case "AutoModelForImageTextToText":
-+                actor_module_class = AutoModelForImageTextToText
-             case "AutoModelForCausalLM":
-                 actor_module_class = AutoModelForCausalLM
-             case "AutoModelForImageTextToText":
+ __all__ = [
+-    "TensorLoRARequest",
+-    "VLLMHijack",
+     "is_version_ge",
+ ]
 diff --git a/verl/utils/vllm/utils.py b/verl/utils/vllm/utils.py
-index acf24398..5cf1fceb 100644
+index acf24398..f64783ee 100644
 --- a/verl/utils/vllm/utils.py
 +++ b/verl/utils/vllm/utils.py
-@@ -15,7 +15,7 @@
+@@ -15,108 +15,10 @@
  
  from msgspec import field
  from packaging import version as vs
 -from vllm.lora.models import LoRAModel
-+from vllm.lora.lora_model import LoRAModel
- from vllm.lora.request import LoRARequest
- from vllm.lora.utils import get_adapter_absolute_path
- from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
+-from vllm.lora.request import LoRARequest
+-from vllm.lora.utils import get_adapter_absolute_path
+-from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
+ 
+ from verl.third_party.vllm import get_version
+ 
+ 
+-class TensorLoRARequest(LoRARequest):
+-    peft_config: dict = field(default=None)
+-    lora_tensors: dict = field(default=None)
+-
+-
+-class VLLMHijack:
+-    @staticmethod
+-    def hijack():
+-        def hijack__load_adapter(self, lora_request: TensorLoRARequest) -> LoRAModel:
+-            """
+-            based on vllm.lora.worker_manager.WorkerLoRAManager._load_adapter, support load adapter with lora tensors
+-
+-            Reason:
+-            VLLM does not support adding LoRA from tensors directly. It only supports adding LoRA via file paths.
+-            To synchronize the LoRA tensors of the actor model, we need to find a workaround to enable VLLM to
+-            load memory-based LoRA tensors.
+-            """
+-            try:
+-                supported_lora_modules = self._adapter_manager.supported_lora_modules
+-                packed_modules_mapping = self._adapter_manager.packed_modules_mapping
+-                expected_lora_modules: list[str] = []
+-                for module in supported_lora_modules:
+-                    if module in packed_modules_mapping:
+-                        expected_lora_modules.extend(packed_modules_mapping[module])
+-                    else:
+-                        expected_lora_modules.append(module)
+-
+-                expected_lora_modules = list(set(expected_lora_modules))
+-
+-                lora_tensors = None
+-                from vllm.lora.peft_helper import PEFTHelper
+-
+-                if isinstance(lora_request, TensorLoRARequest):
+-                    peft_config = lora_request.peft_config
+-                    lora_tensors = lora_request.lora_tensors
+-                    peft_helper = PEFTHelper.from_dict(peft_config)
+-                else:
+-                    lora_path = get_adapter_absolute_path(lora_request.lora_path)
+-
+-                    peft_helper = PEFTHelper.from_local_dir(lora_path, self.max_position_embeddings)
+-
+-                # Validates the LoRA configuration against requirements before
+-                # loading weights, throwing an exception if validation fails.
+-                peft_helper.validate_legal(self.lora_config)
+-
+-                # For some models like Qwen2VL, we need to use hf_to_vllm_mapper
+-                # to ensure correct loading of lora weights.
+-                model = self._adapter_manager.model
+-                hf_to_vllm_mapper = None
+-                if hasattr(model, "hf_to_vllm_mapper") and model.hf_to_vllm_mapper is not None:
+-                    hf_to_vllm_mapper = model.hf_to_vllm_mapper
+-
+-                if isinstance(lora_request, TensorLoRARequest):
+-                    lora = self._lora_model_cls.from_lora_tensors(
+-                        lora_model_id=lora_request.lora_int_id,
+-                        tensors=lora_tensors,
+-                        peft_helper=peft_helper,
+-                        device="cpu",
+-                        dtype=self.lora_config.lora_dtype,
+-                        embeddings=None,
+-                        target_embedding_padding=self.vocab_size + self.lora_config.lora_extra_vocab_size,
+-                        embedding_modules=self.embedding_modules,
+-                        embedding_padding_modules=self.embedding_padding_modules,
+-                        weights_mapper=hf_to_vllm_mapper,
+-                    )
+-                else:
+-                    lora = self._lora_model_cls.from_local_checkpoint(
+-                        lora_path,
+-                        expected_lora_modules,
+-                        peft_helper=peft_helper,
+-                        lora_model_id=lora_request.lora_int_id,
+-                        device="cpu",
+-                        dtype=self.lora_config.lora_dtype,
+-                        target_embedding_padding=self.vocab_size + self.lora_config.lora_extra_vocab_size,
+-                        embedding_modules=self.embedding_modules,
+-                        embedding_padding_modules=self.embedding_padding_modules,
+-                        weights_mapper=hf_to_vllm_mapper,
+-                    )
+-            except Exception as e:
+-                raise e
+-
+-            if lora.extra_vocab_size > self.lora_config.lora_extra_vocab_size:
+-                raise ValueError(
+-                    f"LoRA added vocab size {lora.extra_vocab_size} is greater than lora_extra_vocab_size "
+-                    f"{self.lora_config.lora_extra_vocab_size}."
+-                )
+-            return lora
+-
+-        def do_hijack(target_cls, target_method_name, hooking_method):
+-            setattr(target_cls, target_method_name, hooking_method)
+-
+-        do_hijack(LRUCacheWorkerLoRAManager, "_load_adapter", hijack__load_adapter)
+-
+-
+ def is_version_ge(pkg: str = "vllm", minver: str = "0.7.3"):
+     """check if the package version is greater than or equal to the minimum version"""
+     return vs.parse(get_version(pkg)) >= vs.parse(minver)
 diff --git a/verl/workers/actor/megatron_actor.py b/verl/workers/actor/megatron_actor.py
 index 466402ca..5ed8a5bc 100644
 --- a/verl/workers/actor/megatron_actor.py
@@ -1339,7 +1495,7 @@ index b7d89134..c99b0091 100644
  
      def _forward_micro_batch(self, micro_batch):
 diff --git a/verl/workers/megatron_workers.py b/verl/workers/megatron_workers.py
-index db2e3fb1..4ea866f7 100644
+index db2e3fb1..553d4442 100644
 --- a/verl/workers/megatron_workers.py
 +++ b/verl/workers/megatron_workers.py
 @@ -20,6 +20,7 @@ import logging
@@ -1459,7 +1615,15 @@ index db2e3fb1..4ea866f7 100644
          if not torch.distributed.is_initialized():
              set_numa_affinity()
              rank = int(os.environ["LOCAL_RANK"])
-@@ -287,48 +322,8 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
+@@ -261,6 +296,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
+                 backend=get_nccl_backend(),
+                 timeout=datetime.timedelta(seconds=self.config.get("nccl_timeout", 600)),
+                 init_method=os.environ.get("DIST_INIT_METHOD", None),
++                device_id=torch.device(f"cuda:{rank}"),
+             )
+             get_torch_device().set_device(rank)
+ 
+@@ -287,48 +323,8 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
              )
          only_rollout = self._is_rollout and not self._is_actor
  
@@ -1508,7 +1672,7 @@ index db2e3fb1..4ea866f7 100644
          # normalize config
          if self._is_actor:
              self.config.actor.ppo_mini_batch_size *= self.config.rollout.n
-@@ -362,7 +357,13 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
+@@ -362,7 +358,13 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
              init_megatron_optim_config,
          )
          from verl.utils.megatron_utils import McoreModuleWrapperConfig, make_megatron_module
@@ -1523,7 +1687,7 @@ index db2e3fb1..4ea866f7 100644
  
          self._init_hf_config_and_tf_config(
              model_path,
-@@ -378,108 +379,112 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
+@@ -378,108 +380,112 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
              self.config.model.get("trust_remote_code", False),
          )
  
@@ -1733,7 +1897,7 @@ index db2e3fb1..4ea866f7 100644
  
          return actor_module, actor_optimizer, actor_optimizer_scheduler, self.hf_config, optim_config
  
-@@ -548,6 +553,24 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
+@@ -548,6 +554,24 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
              importlib.import_module(self.config.model.external_lib)
  
          from verl.utils.torch_dtypes import PrecisionType
@@ -1758,7 +1922,15 @@ index db2e3fb1..4ea866f7 100644
  
          override_model_config = OmegaConf.to_container(OmegaConf.create(self.config.model.get("override_config", {})))
          if self._is_actor:
-@@ -723,7 +746,6 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
+@@ -650,6 +674,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
+                 bridge=self.bridge,
+                 provider=self.provider,
+                 use_dist_checkpointing=self.config.actor.megatron.use_dist_checkpointing,
++                use_per_rank_checkpoint=not self.psrl_config.checkpoint.use_dcp_save,
+                 peft_cls=self.peft_cls,
+             )
+ 
+@@ -723,7 +748,6 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
          get_torch_device().set_rng_state(self.torch_random_states)
  
      @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
@@ -1766,7 +1938,7 @@ index db2e3fb1..4ea866f7 100644
      @DistProfiler.annotate(color="red")
      def update_actor(self, data: DataProto):
          assert self._is_actor
-@@ -766,7 +788,6 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
+@@ -766,7 +790,6 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
          return output
  
      @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="rollout"))
@@ -1774,7 +1946,7 @@ index db2e3fb1..4ea866f7 100644
      @DistProfiler.annotate(color="red")
      def generate_sequences(self, prompts: DataProto):
          assert self._is_rollout
-@@ -816,7 +837,6 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
+@@ -816,7 +839,6 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
          return output
  
      @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
@@ -1782,7 +1954,7 @@ index db2e3fb1..4ea866f7 100644
      @DistProfiler.annotate(color="olive")
      def compute_ref_log_prob(self, data: DataProto):
          assert self._is_ref
-@@ -838,7 +858,6 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
+@@ -838,7 +860,6 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
          return output
  
      @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
@@ -1790,7 +1962,7 @@ index db2e3fb1..4ea866f7 100644
      @DistProfiler.annotate(color="blue")
      def compute_log_prob(self, data: DataProto):
          assert self._is_actor
-@@ -998,12 +1017,21 @@ class CriticWorker(MegatronWorker, DistProfilerExtension):
+@@ -998,12 +1019,21 @@ class CriticWorker(MegatronWorker, DistProfilerExtension):
          )
          self.config: McoreCriticConfig = config
  
@@ -1812,7 +1984,15 @@ index db2e3fb1..4ea866f7 100644
          if not torch.distributed.is_initialized():
              set_numa_affinity()
              rank = int(os.environ["LOCAL_RANK"])
-@@ -1035,11 +1063,7 @@ class CriticWorker(MegatronWorker, DistProfilerExtension):
+@@ -1011,6 +1041,7 @@ class CriticWorker(MegatronWorker, DistProfilerExtension):
+                 backend=get_nccl_backend(),
+                 timeout=datetime.timedelta(seconds=self.config.get("nccl_timeout", 600)),
+                 init_method=os.environ.get("DIST_INIT_METHOD", None),
++                device_id=torch.device(f"cuda:{rank}"),
+             )
+             get_torch_device().set_device(rank)
+ 
+@@ -1035,11 +1066,7 @@ class CriticWorker(MegatronWorker, DistProfilerExtension):
          )
  
          set_random_seed(seed=self.config.megatron.seed)
@@ -1825,7 +2005,7 @@ index db2e3fb1..4ea866f7 100644
          # normalize config
          self.config.ppo_mini_batch_size *= self.config.rollout_n
          self.config.ppo_mini_batch_size //= mpu.get_data_parallel_world_size()
-@@ -1047,8 +1071,6 @@ class CriticWorker(MegatronWorker, DistProfilerExtension):
+@@ -1047,8 +1074,6 @@ class CriticWorker(MegatronWorker, DistProfilerExtension):
              self.config.ppo_micro_batch_size //= mpu.get_data_parallel_world_size()
              self.config.ppo_micro_batch_size_per_gpu = self.config.ppo_micro_batch_size
  
@@ -1834,7 +2014,7 @@ index db2e3fb1..4ea866f7 100644
      def _build_critic_model_optimizer(
          self, model_path, optim_config, override_model_config, override_transformer_config, override_ddp_config
      ):
-@@ -1058,7 +1080,12 @@ class CriticWorker(MegatronWorker, DistProfilerExtension):
+@@ -1058,7 +1083,12 @@ class CriticWorker(MegatronWorker, DistProfilerExtension):
              init_megatron_optim_config,
          )
          from verl.utils.megatron_utils import McoreModuleWrapperConfig, make_megatron_module
@@ -1848,7 +2028,7 @@ index db2e3fb1..4ea866f7 100644
  
          self._init_hf_config_and_tf_config(
              model_path,
-@@ -1141,12 +1168,23 @@ class CriticWorker(MegatronWorker, DistProfilerExtension):
+@@ -1141,12 +1171,23 @@ class CriticWorker(MegatronWorker, DistProfilerExtension):
          # create critic
  
          from verl.utils.torch_dtypes import PrecisionType
@@ -1872,7 +2052,7 @@ index db2e3fb1..4ea866f7 100644
          override_model_config = OmegaConf.to_container(OmegaConf.create(self.config.model.get("override_config", {})))
          override_transformer_config = OmegaConf.to_container(
              OmegaConf.create(self.config.megatron.get("override_transformer_config", {}))
-@@ -1300,12 +1338,15 @@ class RewardModelWorker(MegatronWorker, DistProfilerExtension):
+@@ -1300,12 +1341,15 @@ class RewardModelWorker(MegatronWorker, DistProfilerExtension):
          )
          self.config = config
  
@@ -1888,7 +2068,15 @@ index db2e3fb1..4ea866f7 100644
          if not torch.distributed.is_initialized():
              set_numa_affinity()
              rank = int(os.environ["LOCAL_RANK"])
-@@ -1345,6 +1386,7 @@ class RewardModelWorker(MegatronWorker, DistProfilerExtension):
+@@ -1313,6 +1357,7 @@ class RewardModelWorker(MegatronWorker, DistProfilerExtension):
+                 backend=get_nccl_backend(),
+                 timeout=datetime.timedelta(seconds=self.config.get("nccl_timeout", 600)),
+                 init_method=os.environ.get("DIST_INIT_METHOD", None),
++                device_id=torch.device(f"cuda:{rank}"),
+             )
+             get_torch_device().set_device(rank)
+ 
+@@ -1345,6 +1390,7 @@ class RewardModelWorker(MegatronWorker, DistProfilerExtension):
  
      def _build_rm_model(self, model_path, tokenizer, override_model_config, override_transformer_config):
          from verl.utils.megatron_utils import McoreModuleWrapperConfig, make_megatron_module
@@ -1896,7 +2084,7 @@ index db2e3fb1..4ea866f7 100644
  
          self._init_hf_config_and_tf_config(
              model_path,
-@@ -1402,12 +1444,22 @@ class RewardModelWorker(MegatronWorker, DistProfilerExtension):
+@@ -1402,12 +1448,22 @@ class RewardModelWorker(MegatronWorker, DistProfilerExtension):
          # create critic
  
          from verl.utils.torch_dtypes import PrecisionType
@@ -1919,6 +2107,19 @@ index db2e3fb1..4ea866f7 100644
          override_model_config = OmegaConf.to_container(OmegaConf.create(self.config.model.get("override_config", {})))
          override_transformer_config = OmegaConf.to_container(
              OmegaConf.create(self.config.megatron.get("override_transformer_config", {}))
+diff --git a/verl/workers/reward_manager/dapo.py b/verl/workers/reward_manager/dapo.py
+index b703c05b..d2404c5f 100644
+--- a/verl/workers/reward_manager/dapo.py
++++ b/verl/workers/reward_manager/dapo.py
+@@ -93,6 +93,8 @@ class DAPORewardManager(AbstractRewardManager):
+             data_source = data_item.non_tensor_batch[self.reward_fn_key]
+ 
+             extra_info = data_item.non_tensor_batch.get("extra_info", {})
++            num_turns = data_item.non_tensor_batch.get("__num_turns__", None)
++            extra_info["num_turns"] = num_turns
+ 
+             rollout_reward_scores = data_item.non_tensor_batch.get("reward_scores", {})
+ 
 diff --git a/verl/workers/rollout/base.py b/verl/workers/rollout/base.py
 index ae324a06..33a46afb 100644
 --- a/verl/workers/rollout/base.py
@@ -1944,19 +2145,30 @@ index 79935138..d1af8a75 100644
  
  def get_version(pkg):
 diff --git a/verl/workers/rollout/vllm_rollout/vllm_rollout.py b/verl/workers/rollout/vllm_rollout/vllm_rollout.py
-index 42a1cd96..70d35891 100644
+index 42a1cd96..e5f001ea 100644
 --- a/verl/workers/rollout/vllm_rollout/vllm_rollout.py
 +++ b/verl/workers/rollout/vllm_rollout/vllm_rollout.py
-@@ -56,7 +56,7 @@ from verl import DataProto
+@@ -56,8 +56,7 @@ from verl import DataProto
  from verl.third_party.vllm import VLLM_SLEEP_LEVEL, get_version
  from verl.utils.device import is_npu_available
  from verl.utils.distributed import initialize_global_process_group_ray
 -from verl.utils.ray_utils import ray_noset_visible_devices
+-from verl.utils.vllm import TensorLoRARequest, VLLMHijack, is_version_ge
 +from verl.utils.ray_utils import ray_noset_visible_devices, get_event_loop
- from verl.utils.vllm import TensorLoRARequest, VLLMHijack, is_version_ge
  from verl.utils.vllm.vllm_fp8_utils import apply_vllm_fp8_patches, is_fp8_model, load_quanted_weights
  from verl.workers.config import HFModelConfig, RolloutConfig
-@@ -157,7 +157,7 @@ class vLLMAsyncRollout(BaseRollout):
+ from verl.workers.rollout.base import BaseRollout
+@@ -78,8 +77,7 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+ # 3. simplify init logics
+ 
+ 
+-if is_version_ge(pkg="vllm", minver="0.7.3"):
+-    VLLMHijack.hijack()
++
+ 
+ 
+ def _check_vllm_version_for_sleep_level():
+@@ -157,7 +155,7 @@ class vLLMAsyncRollout(BaseRollout):
                      address = f"tcp://{ip}:{port}"
              self.socket.bind(address)
  
@@ -1965,3 +2177,448 @@ index 42a1cd96..70d35891 100644
          self.zmq_loop_task = loop.create_task(self._loop_forever())
  
          return address
+diff --git a/verl/workers/rollout/vllm_rollout/vllm_rollout_spmd.py b/verl/workers/rollout/vllm_rollout/vllm_rollout_spmd.py
+new file mode 100644
+index 00000000..34e2a70b
+--- /dev/null
++++ b/verl/workers/rollout/vllm_rollout/vllm_rollout_spmd.py
+@@ -0,0 +1,439 @@
++# Copyright 2024 Bytedance Ltd. and/or its affiliates
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++"""
++The vllm_rollout that can be applied in different backend
++When working with FSDP:
++- Use DTensor weight loader (recommended) or HF weight loader
++- Utilize state_dict from the FSDP to synchronize the weights among tp ranks in vLLM
++When working with Megatron:
++- Use Megatron weight loader
++- During training, only the current pp stage holds the parameters
++- Before inference, broadcast the parameters of the current pp rank
++  to all other pp ranks (all pp ranks holds all the parameters)
++- Bind the parameters to the inference engine
++- Do inference in tp. pp is treated as additional dp
++- After inference, all the parameters that doesn't belong to this pp rank is freed.
++"""
++
++import asyncio
++import getpass
++import inspect
++import logging
++import os
++import pickle
++import socket
++import time
++from contextlib import contextmanager
++from dataclasses import asdict
++from types import MethodType
++from typing import Any, Generator
++
++import numpy as np
++import ray
++import torch
++import torch.distributed
++import zmq
++import zmq.asyncio
++from filelock import FileLock
++from omegaconf import ListConfig
++from tensordict import TensorDict
++from torch.distributed.device_mesh import DeviceMesh
++from vllm import LLM, SamplingParams
++from vllm.lora.request import LoRARequest
++
++from verl import DataProto
++from verl.third_party.vllm import VLLM_SLEEP_LEVEL
++from verl.utils.device import is_npu_available
++from verl.utils.profiler import GPUMemoryLogger
++from verl.utils.ray_utils import ray_noset_visible_devices
++from verl.utils.torch_functional import (get_response_mask,
++                                         pad_2d_list_to_length)
++from verl.utils.vllm import is_version_ge
++from verl.workers.config import HFModelConfig, RolloutConfig
++from verl.workers.rollout.base import BaseRollout
++
++logger = logging.getLogger(__file__)
++logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
++
++# TODO
++# 1. support pp in vllm
++# 2. passing tokenizer is not necessary? no encoding/decoding is happending here
++# 3. simplify init logics
++
++
++# NOTE(sgm): add for verl. We can optimize it by making the dataloader yield List[int] without padding.
++def _pre_process_inputs(pad_token_id, prompt_token_ids: torch.Tensor) -> list[int]:
++    # remove the left padding in the prompt token_id
++    # pad_token_id = self.llm_engine.tokenizer.pad_token_id if self.llm_engine.tokenizer.pad_token_id
++    # is not None else self.llm_engine.tokenizer.eos_token_id
++    non_pad_index = torch.nonzero(prompt_token_ids != pad_token_id, as_tuple=False)[0][0]
++    token_ids = prompt_token_ids[non_pad_index:].tolist()
++    return token_ids
++
++
++
++
++class vLLMRollout(BaseRollout):
++    def __init__(
++        self,
++        config: RolloutConfig,
++        model_config: HFModelConfig,
++        device_mesh: DeviceMesh,
++    ):
++        super().__init__(config, model_config, device_mesh)
++
++        if config.layered_summon:
++            self.sleep_level = 1
++        else:
++            self.sleep_level = VLLM_SLEEP_LEVEL
++
++        model_path = model_config.local_path
++        tokenizer = model_config.tokenizer
++        model_hf_config = model_config.hf_config
++        trust_remote_code = model_config.trust_remote_code
++        self.lora_kwargs = (
++            {"enable_lora": True, "max_loras": 1, "max_lora_rank": model_config.lora_rank}
++            if model_config.lora_rank > 0
++            else {}
++        )
++
++        tensor_parallel_size = self.config.get("tensor_model_parallel_size", 1)
++        assert tensor_parallel_size <= torch.distributed.get_world_size(), (
++            "tensor parallel size should be less than or equal to the world size"
++        )
++        max_num_batched_tokens = self.config.get("max_num_batched_tokens", 8192)
++
++        rope_scaling_config = getattr(model_hf_config, "rope_scaling", None)
++        if not rope_scaling_config:
++            max_position_embeddings = None
++            if hasattr(model_hf_config, "max_position_embeddings"):
++                max_position_embeddings = model_hf_config.max_position_embeddings
++            elif hasattr(model_hf_config, "llm_config") and hasattr(
++                model_hf_config.llm_config, "max_position_embeddings"
++            ):
++                max_position_embeddings = model_hf_config.llm_config.max_position_embeddings
++            elif hasattr(model_hf_config, "text_config") and hasattr(
++                model_hf_config.text_config, "max_position_embeddings"
++            ):
++                max_position_embeddings = model_hf_config.text_config.max_position_embeddings
++            if max_position_embeddings is None:
++                raise ValueError("max_position_embeddings not found in model_hf_config")
++            assert max_position_embeddings >= config.prompt_length + config.response_length, (
++                "model context length should be greater than total sequence length"
++            )
++        else:
++            # handle type where there's a length extend factor
++            # see https://qwen.readthedocs.io/en/latest/deployment/vllm.html#extended-context-support
++            # for using yarn as an example
++            rope_scaling_factor = rope_scaling_config.get("factor", 1.0)
++
++            assert (
++                model_hf_config.max_position_embeddings * rope_scaling_factor
++                >= config.prompt_length + config.response_length
++            ), (
++                "model context length should be greater than total sequence length, "
++                + f"got rope_scaling_factor={rope_scaling_factor} and "
++                + f"max_position_embeddings={model_hf_config.max_position_embeddings}"
++            )
++
++        max_model_len = int(config.max_model_len or config.prompt_length + config.response_length)
++
++        if max_num_batched_tokens < max_model_len and self.config.enable_chunked_prefill:
++            raise ValueError(
++                "Enable chunked prefill, max_num_batched_tokens is smaller than max_model_len, \
++                             please increase max_num_batched_tokens or disable chunked prefill"
++            )
++
++        load_format = "dummy" if config.load_format.startswith("dummy") else config.load_format
++
++        # copy it to avoid secretly modifying the engine config
++        engine_kwargs = config.get("engine_kwargs", {}).get("vllm", {}) or {}
++
++        # For each vLLM engine parameter,
++        # - `None` means not setting it, so we pop it, and leave it to vLLM default value
++        #    (which can vary across different vLLM versions);
++        # - Otherwise it's the desired value we want to explicitly set.
++        engine_kwargs = {key: val for key, val in engine_kwargs.items() if val is not None}
++        if config.get("limit_images", None):  # support for multi-image data
++            engine_kwargs["limit_mm_per_prompt"] = {"image": config.get("limit_images")}
++
++
++        self.inference_engine = LLM(
++            model=model_path,
++            enable_sleep_mode=config.free_cache_engine,
++            tensor_parallel_size=tensor_parallel_size,
++            distributed_executor_backend="external_launcher",
++            dtype=config.dtype,
++            enforce_eager=config.enforce_eager,
++            gpu_memory_utilization=config.gpu_memory_utilization,
++            disable_custom_all_reduce=True,
++            skip_tokenizer_init=False,
++            max_model_len=max_model_len,
++            max_num_seqs=config.max_num_seqs,
++            load_format=load_format,
++            disable_log_stats=config.disable_log_stats,
++            max_num_batched_tokens=max_num_batched_tokens,
++            enable_chunked_prefill=config.enable_chunked_prefill,
++            enable_prefix_caching=config.enable_prefix_caching,
++            trust_remote_code=trust_remote_code,
++            seed=config.get("seed", 0),
++            **self.lora_kwargs,
++            **engine_kwargs,
++        )
++
++        kwargs = dict(
++            n=1,
++            logprobs=0,  # can be set to 0 and let actor to recompute
++            max_tokens=config.response_length,
++            repetition_penalty=config.get("repetition_penalty", 1.0),
++        )
++
++        kwargs["detokenize"] = False
++
++        # supporting adding any sampling params from the config file
++        for k in config.keys():
++            if hasattr(SamplingParams(), str(k)) and k != "seed":
++                kwargs[k] = config.get(k)
++        kwargs["n"] = 1  # already repeat in ray_trainer
++        print(f"kwargs: {kwargs}")
++        self.sampling_params = SamplingParams(**kwargs)
++
++        self.pad_token_id = tokenizer.pad_token_id
++
++    @contextmanager
++    def update_sampling_params(self, **kwargs):
++        # update sampling params
++        old_sampling_params_args = {}
++        if kwargs:
++            for key, value in kwargs.items():
++                if hasattr(self.sampling_params, key):
++                    old_value = getattr(self.sampling_params, key)
++                    old_sampling_params_args[key] = old_value
++                    setattr(self.sampling_params, key, value)
++        yield
++        # roll back to previous sampling params
++        # if len(old_sampling_params_args):
++        for key, value in old_sampling_params_args.items():
++            setattr(self.sampling_params, key, value)
++
++    @GPUMemoryLogger(role="vllm rollout spmd", logger=logger)
++    @torch.no_grad()
++    def generate_sequences(self, prompts: DataProto, **kwargs) -> DataProto:
++        """Generate sequences for a batch of prompts.
++
++        Args:
++            batch (DataProto): Input batch.
++
++        Returns:
++            DataProto: Output batch.
++            - prompts: [bsz, prompt_length], prompt token ids from dataset.
++            - responses: [bsz, response_length], output token ids include response tokens
++              from LLM generation and observation tokens from tool_calls.
++            - response_mask: [bsz, response_length], 1 for LLM generated tokens, 0 for observation/padding tokens.
++            - input_ids: [bsz, prompt_length + response_length], whole sequence token ids, including prompt tokens
++              and response tokens.
++            - attention_mask: [bsz, prompt_length + response_length], 0 for padding tokens, 1 for other tokens.
++            - position_ids: [bsz, prompt_length + response_length], incremental position ids.
++
++            For multi-turn conversations:
++            responses:     |<- LLM generation ->|<- tool_calls ->|<- LLM generation ->|<- padding ->|
++            response_mask: | 1, 1, 1, ..., 1, 1 | 0, 0, .., 0, 0 | 1, 1, 1, ..., 1, 1 | 0, 0, ..., 0|
++        """
++        idx = prompts.batch["input_ids"]  # (bs, prompt_length)
++        # left-padded attention_mask
++        attention_mask = prompts.batch["attention_mask"]
++        position_ids = prompts.batch["position_ids"]
++
++        # used to construct attention_mask
++        eos_token_id = prompts.meta_info["eos_token_id"]
++
++        batch_size = idx.size(0)
++
++        non_tensor_batch = prompts.non_tensor_batch
++        if "raw_prompt_ids" not in non_tensor_batch:
++            non_tensor_batch["raw_prompt_ids"] = np.array(
++                [_pre_process_inputs(self.pad_token_id, idx[i]) for i in range(batch_size)], dtype=object
++            )
++
++        if batch_size != len(non_tensor_batch["raw_prompt_ids"]):
++            raise RuntimeError("vllm sharding manager is not work properly.")
++
++        if "multi_modal_data" in non_tensor_batch:
++            vllm_inputs = []
++            for raw_prompt_ids, multi_modal_data in zip(
++                non_tensor_batch.pop("raw_prompt_ids"), non_tensor_batch.pop("multi_modal_data"), strict=True
++            ):
++                vllm_inputs.append({"prompt_token_ids": raw_prompt_ids, "multi_modal_data": multi_modal_data})
++        else:
++            vllm_inputs = [
++                {"prompt_token_ids": raw_prompt_ids} for raw_prompt_ids in non_tensor_batch.pop("raw_prompt_ids")
++            ]
++
++        for input_data in vllm_inputs:
++            # Ensure token IDs are lists or numpy arrays
++            if not isinstance(input_data["prompt_token_ids"], list | np.ndarray):
++                raise TypeError(
++                    f"prompt_token_ids must be a list or numpy array, got {type(input_data['prompt_token_ids'])}"
++                )
++
++            input_data["prompt_token_ids"] = list(input_data["prompt_token_ids"])
++
++        do_sample = prompts.meta_info.get("do_sample", True)
++        is_validate = prompts.meta_info.get("validate", False)
++        if not do_sample:
++            kwargs = {
++                "best_of": 1,
++                "top_p": 1.0,
++                "top_k": -1,
++                "min_p": 0.0,
++                "temperature": 0,
++                "n": 1,  # if greedy, only 1 response
++            }
++        elif is_validate:
++            # TODO: try **
++            kwargs = {
++                "top_k": self.config.val_kwargs.top_k,
++                "top_p": self.config.val_kwargs.top_p,
++                "temperature": self.config.val_kwargs.temperature,
++                "n": 1,  # if validate, already repeat in ray_trainer
++            }
++
++        lora_requests = None
++        if self.lora_kwargs:
++            lora_int_ids = list(self.inference_engine.llm_engine.list_loras())
++            if len(lora_int_ids) > 0:
++                lora_int_id = lora_int_ids[0]
++                lora_requests = [
++                    LoRARequest(lora_name=f"{lora_int_id}", lora_int_id=lora_int_id, lora_path="/simon-stub-path")
++                ] * batch_size
++
++        # users can customize different sampling_params at different run
++        with self.update_sampling_params(**kwargs):
++            outputs = self.inference_engine.generate(
++                prompts=vllm_inputs,  # because we have already convert it to prompt token id
++                sampling_params=self.sampling_params,
++                lora_request=lora_requests,
++                use_tqdm=False,
++            )
++
++            # TODO(sgm): disable logprob when recompute_log_prob is enable
++            # if n = 1: (bs, response_length) ; if n > 1: (bs * n, response_length)
++
++            response = []
++            rollout_log_probs = []
++            for output in outputs:
++                for sample_id in range(len(output.outputs)):
++                    response_ids = output.outputs[sample_id].token_ids
++                    response.append(response_ids)
++                    if self.config.calculate_log_probs:
++                        curr_log_prob = []
++                        for i, logprob in enumerate(output.outputs[sample_id].logprobs):
++                            curr_log_prob.append(logprob[response_ids[i]].logprob)
++                        rollout_log_probs.append(curr_log_prob)
++
++            response = pad_2d_list_to_length(response, self.pad_token_id, max_length=self.config.response_length).to(
++                idx.device
++            )
++            if self.config.calculate_log_probs:
++                rollout_log_probs = pad_2d_list_to_length(
++                    rollout_log_probs, -1, max_length=self.config.response_length
++                ).to(idx.device)
++                rollout_log_probs = rollout_log_probs.to(torch.float32)
++
++            seq = torch.cat([idx, response], dim=-1)
++
++        response_length = response.size(1)
++        delta_position_id = torch.arange(1, response_length + 1, device=position_ids.device)
++        delta_position_id = delta_position_id.unsqueeze(0).expand(batch_size, -1)
++        if position_ids.dim() == 3:  # qwen2vl mrope (batch size, 4, seq len)
++            delta_position_id = delta_position_id.view(batch_size, 1, -1).expand(batch_size, position_ids.size(1), -1)
++
++        # TODO(sgm): fix position_ids on right_pad
++        # prompt: left pad + response: right pad
++        # attention_mask: [0,0,0,0,1,1,1,1, | 1,1,1,0,0,0,0,0]
++        # position_ids:   [0,0,0,0,0,1,2,3, | 4,5,6,7,8,9,10,11]
++        response_position_ids = position_ids[..., -1:] + delta_position_id
++        position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
++        response_attention_mask = get_response_mask(
++            response_id=response, eos_token=eos_token_id, dtype=attention_mask.dtype
++        )
++        attention_mask = torch.cat((attention_mask, response_attention_mask), dim=-1)
++
++        # all the tp ranks should contain the same data here. data in all ranks are valid
++        batch = TensorDict(
++            {
++                "prompts": idx,
++                "responses": response,
++                "input_ids": seq,  # here input_ids become the whole sentences
++                "attention_mask": attention_mask,
++                "position_ids": position_ids,
++            },
++            batch_size=batch_size,
++        )
++        if self.config.calculate_log_probs:
++            # we will recompute old log prob with actor
++            batch["rollout_log_probs"] = rollout_log_probs
++
++        return DataProto(batch=batch, non_tensor_batch=non_tensor_batch)
++
++    async def resume(self, tags: list[str]):
++        """Resume rollout weights or kv cache in GPU memory.
++
++        Args:
++            tags: weights or kv_cache.
++        """
++        if not self.config.free_cache_engine:
++            return
++
++        if "tags" in inspect.signature(self.inference_engine.wake_up).parameters:
++            self.inference_engine.wake_up(tags=tags)
++        else:
++            self.inference_engine.wake_up()
++
++    async def release(self):
++        """Release weights and kv cache in GPU memory."""
++        self.inference_engine.reset_prefix_cache()
++
++        if not self.config.free_cache_engine:
++            return
++
++        self.inference_engine.sleep(level=self.sleep_level)
++
++    async def update_weights(self, weights: Generator[tuple[str, torch.Tensor], None, None], **kwargs):
++        """Update the weights of the rollout model.
++
++        Args:
++            weights: A generator that yields the name of the weight tensor and the tensor itself.
++        """
++        peft_config, base_sync_done = kwargs.get("peft_config", None), kwargs.get("base_sync_done", False)
++        if peft_config and base_sync_done:
++            lora_int_id = int(time.time_ns() % 0x7FFFFFFF)
++            lora_reqest = TensorLoRARequest(
++                lora_name=f"{lora_int_id}",
++                lora_int_id=lora_int_id,
++                lora_path="simon_lora_path",
++                peft_config=asdict(peft_config),
++                lora_tensors=weights,
++            )
++            self.inference_engine.llm_engine.add_lora(lora_reqest)
++            logger.info(f"vLLM load weights, loaded_params: {len(weights)}")
++        else:
++            from verl.utils.vllm.patch import \
++                patch_vllm_moe_model_weight_loader
++
++            model = self.inference_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model
++            patch_vllm_moe_model_weight_loader(model)
++            model.load_weights(weights)
++
++            

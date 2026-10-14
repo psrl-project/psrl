@@ -42,10 +42,8 @@ class PSResourceSpec:
         attached_gpu_id (Optional[int]): GPU ID to bind the worker to, None for CPU-only
     """
 
-    node_ip: str | None = None  # ip of the node
-    node_id: str | None = None  # ray id of the node
-    # if attached_gpu_id is not None, the actor will be binded to the
-    # attached GPU, otherwise it will be binded to the CPU only
+    node_ip: str | None = None
+    node_id: str | None = None
     attached_gpu_id: int | None = None
 
     def __init__(
@@ -77,14 +75,16 @@ class PSResourceSpec:
         if node_ip is None and node_id is None:
             raise ValueError("node_ip or node_id must be set")
         if node_ip is not None and node_id is None:
-            assert node_ip in ip_to_node_id, f"node_ip {node_ip} not found in ray nodes"
+            assert node_ip in ip_to_node_id, f"Unknown Ray node IP: {node_ip}."
             self.node_id = ip_to_node_id[node_ip]
         if node_id is not None and node_ip is None:
-            assert node_id in node_id_to_ip, f"node_id {node_id} not found in ray nodes"
+            assert node_id in node_id_to_ip, f"Unknown Ray node ID: {node_id}."
             self.node_ip = node_id_to_ip[node_id]
         if node_id is not None and node_ip is not None:
-            assert node_id in node_id_to_ip, f"node_id {node_id} not found in ray nodes"
-            assert node_id_to_ip[node_id] == node_ip, f"node_id {node_id} and node_ip {node_ip} mismatch"
+            assert node_id in node_id_to_ip, f"Unknown Ray node ID: {node_id}."
+            assert node_id_to_ip[node_id] == node_ip, (
+                f"Ray node identity mismatch. Node ID: {node_id}. Node IP: {node_ip}."
+            )
 
 
 @dataclass
@@ -170,7 +170,7 @@ class PSWorkerGroup:
             callable_method: A callable method that takes a worker as input and returns a boolean value.
         """
         candidates = [worker for worker in self._workers if callable_method(worker)]
-        assert len(candidates) == 1, f"Expected 1 worker, but got {len(candidates)} workers that satisfy the condition"
+        assert len(candidates) == 1, f"Expected exactly one matching worker. Match count: {len(candidates)}."
         return candidates[0]
 
     def _init_with_resource_pool(self, resource_pool: PSResourcePool, ps_cls_with_init: PSClassWithInitArgs) -> None:
@@ -183,7 +183,6 @@ class PSWorkerGroup:
                 "PS_NODE_IP": ps_spec.node_ip,
             }
             ps_cls_with_init.update_options({"runtime_env": {"env_vars": env_vars}, "name": f"PSWorker_{rank}"})
-            # create a worker
             worker = ps_cls_with_init(target_node_id=ps_spec.node_id, attached_gpu_id=ps_spec.attached_gpu_id)
             self._workers.append(worker)
 
@@ -201,14 +200,10 @@ class PSWorkerGroup:
         Returns:
             List of remote object references to the method executions
         """
-        # Here, we assume that if all arguments in args and kwargs are lists,
-        # and their lengths match len(self._workers), we'll distribute each
-        # element in these lists to the corresponding worker
-        # print(f"execute_all_async: method {method_name}({args}, {kwargs})")
+        # Per-worker argument lists are sharded only when every list matches the worker count.
         length = len(self._workers)
         if all(isinstance(arg, list) for arg in args) and all(isinstance(kwarg, list) for kwarg in kwargs.values()):
             if all(len(arg) == length for arg in args) and all(len(kwarg) == length for kwarg in kwargs.values()):
-                # print(f"splitting args and kwargs into {length} shards")
                 result = []
                 for i in range(length):
                     sliced_args = tuple(arg[i] for arg in args)

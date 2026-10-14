@@ -4,16 +4,16 @@
 # Topology: 4 nodes (2 train + 2 shared).
 #
 # Switches (env vars):
-#   POLICY=itl_harmonic|rule_based
+#   POLICY=throughput-optimal|rule-based
 #   USE_COST_MODEL=1|0              use fitted ITL cost model for throughput
 #   USE_REBALANCE=1|0               post-scale-up ABORT (request-level simulator)
 #   INTERRUPT_VLLM_WAITING=1|0      periodic waiting-queue ABORT (policy-independent)
 #
-# USE_REBALANCE=1 requires POLICY=itl_harmonic. USE_REBALANCE=0 only skips
+# USE_REBALANCE=1 requires POLICY=throughput-optimal. USE_REBALANCE=0 only skips
 # post-scale-up ABORT; ITL candidate scoring still uses request-level evaluation.
 #
 # Usage:
-#   POLICY=rule_based USE_COST_MODEL=0 USE_REBALANCE=0 INTERRUPT_VLLM_WAITING=1 \
+#   POLICY=rule-based USE_COST_MODEL=0 USE_REBALANCE=0 INTERRUPT_VLLM_WAITING=1 \
 #     bash mode6_ablation_study.sh [smoke_test=0] [extra hydra overrides...]
 set -euo pipefail
 
@@ -30,22 +30,22 @@ _normalize_bool() {
 
 _normalize_policy() {
     case "${1:-}" in
-        itl_harmonic|itl-harmonic|harmonic) echo itl_harmonic ;;
-        rule_based|rule-based|rulebased) echo rule_based ;;
+        throughput-optimal) echo throughput-optimal ;;
+        rule-based) echo rule-based ;;
         *)
-            echo "Invalid POLICY='${1:-}'; expected itl_harmonic or rule_based." >&2
+            echo "Invalid POLICY='${1:-}'. Expected throughput-optimal or rule-based." >&2
             return 1
             ;;
     esac
 }
 
-POLICY=$(_normalize_policy "${POLICY:-rule_based}")
+POLICY=$(_normalize_policy "${POLICY:-rule-based}")
 USE_COST_MODEL=$(_normalize_bool "${USE_COST_MODEL:-0}")
 USE_REBALANCE=$(_normalize_bool "${USE_REBALANCE:-0}")
 INTERRUPT_VLLM_WAITING=$(_normalize_bool "${INTERRUPT_VLLM_WAITING:-1}")
 
-if [[ "${USE_REBALANCE}" == "1" && "${POLICY}" != "itl_harmonic" ]]; then
-    echo "USE_REBALANCE=1 requires POLICY=itl_harmonic (request-level rebalance is ITL-only)." >&2
+if [[ "${USE_REBALANCE}" == "1" && "${POLICY}" != "throughput-optimal" ]]; then
+    echo "USE_REBALANCE=1 requires POLICY=throughput-optimal (request-level rebalance is ITL-only)." >&2
     exit 1
 fi
 
@@ -74,9 +74,9 @@ ROLLOUT_COST_MODEL="${COST_MODEL_DIR}/qwen2.5_7b.json"
 RM_COST_MODEL="${COST_MODEL_DIR}/qwen3_30b_a3b_thinking_2507.json"
 
 if [[ "${USE_COST_MODEL}" == "1" ]]; then
-    COST_MODEL_OVERRIDE="psrl.deployment.elastic_rm.itl_policy.cost_model_path=${COST_MODEL_DIR}"
+    COST_MODEL_OVERRIDE="psrl.deployment.elastic.throughput_optimal.cost_model_path=${COST_MODEL_DIR}"
 else
-    COST_MODEL_OVERRIDE="psrl.deployment.elastic_rm.itl_policy.cost_model_path=null"
+    COST_MODEL_OVERRIDE="psrl.deployment.elastic.throughput_optimal.cost_model_path=null"
 fi
 
 REQUEST_LEVEL_OVERRIDE="true"
@@ -86,43 +86,36 @@ else
     REBALANCE_OVERRIDE="false"
 fi
 
-if [[ "${INTERRUPT_VLLM_WAITING}" == "1" ]]; then
-    INTERRUPT_WAITING_OVERRIDE="true"
-else
-    INTERRUPT_WAITING_OVERRIDE="false"
-fi
-
 export PSRL_DEPLOY_EXTRA="\
-psrl.deployment.elastic_rm.enable_policy=True \
-psrl.deployment.elastic_rm.scaling_policy_variant=${POLICY} \
-psrl.deployment.elastic_rm.enable_trainer_pool=True \
-psrl.deployment.elastic_rm.min_awake_per_role=0 \
-psrl.deployment.elastic_rm.cooldown_ms=10000 \
-psrl.deployment.elastic_rm.hysteresis=0.05 \
-psrl.deployment.elastic_rm.monitor_interval_ms=1000 \
-psrl.deployment.elastic_rm.wakeup_immunity_ms=10000 \
-psrl.deployment.elastic_rm.interrupt_vllm_waiting_when_running_only=${INTERRUPT_WAITING_OVERRIDE} \
-psrl.deployment.elastic_rm.itl_policy.decision_window_s=60.0 \
-psrl.deployment.elastic_rm.itl_policy.throughput_objective=sum \
-psrl.deployment.elastic_rm.itl_policy.max_scale_instances_per_action=32 \
-psrl.deployment.elastic_rm.itl_policy.router_waiting_top_t=-1 \
-psrl.deployment.elastic_rm.itl_policy.role_throughput_weight_enable=true \
-psrl.deployment.elastic_rm.itl_policy.role_throughput_weight_basis=request_count \
-psrl.deployment.elastic_rm.itl_policy.role_throughput_weight_mode=raw \
-psrl.deployment.elastic_rm.itl_policy.enable_heterogeneous_parallelism_candidates=true \
-psrl.deployment.elastic_rm.itl_policy.enable_request_level_candidate_evaluation=${REQUEST_LEVEL_OVERRIDE} \
-psrl.deployment.elastic_rm.itl_policy.rebalance_after_scale_up=${REBALANCE_OVERRIDE} \
+psrl.deployment.elastic.enable_policy=True \
+psrl.deployment.elastic.scaling_policy_variant=${POLICY} \
+psrl.deployment.elastic.enable_trainer_pool=True \
+psrl.deployment.elastic.min_awake_per_role=0 \
+psrl.deployment.elastic.cooldown_ms=10000 \
+psrl.deployment.elastic.throughput_optimal.min_gain=0.05 \
+psrl.deployment.elastic.monitor_interval_ms=1000 \
+psrl.deployment.elastic.wakeup_immunity_ms=10000 \
+psrl.deployment.elastic.throughput_optimal.decision_window_s=60.0 \
+psrl.deployment.elastic.throughput_optimal.throughput_objective=sum \
+psrl.deployment.elastic.throughput_optimal.max_scale_instances_per_action=32 \
+psrl.deployment.elastic.throughput_optimal.router_waiting_top_t=-1 \
+psrl.deployment.elastic.throughput_optimal.role_throughput_weight_enable=true \
+psrl.deployment.elastic.throughput_optimal.role_throughput_weight_basis=request_count \
+psrl.deployment.elastic.throughput_optimal.role_throughput_weight_mode=raw \
+psrl.deployment.elastic.throughput_optimal.enable_heterogeneous_parallelism_candidates=true \
+psrl.deployment.elastic.throughput_optimal.enable_request_level_candidate_evaluation=${REQUEST_LEVEL_OVERRIDE} \
+psrl.deployment.elastic.throughput_optimal.rebalance_after_scale_up=${REBALANCE_OVERRIDE} \
 ${COST_MODEL_OVERRIDE} \
-+reward_models_config.reward_models.2.routing_strategy.method=itl \
-+reward_models_config.reward_models.2.routing_strategy.cost_model_path=${RM_COST_MODEL} \
-+reward_models_config.reward_models.2.routing_strategy.delta_throughput_threshold=0.005 \
-+reward_models_config.reward_models.2.routing_strategy.request_budget=1024 \
-+reward_models_config.reward_models.2.routing_strategy.max_num_waiting_reqs_after_preemption=3 \
-+reward_models_config.reward_models.2.routing_strategy.max_concurrent_seqs_per_instance=128 \
++reward.managers.gen_qwen3_8b.routing_strategy.method=itl \
++reward.managers.gen_qwen3_8b.routing_strategy.cost_model_path=${RM_COST_MODEL} \
++reward.managers.gen_qwen3_8b.routing_strategy.delta_throughput_threshold=0.005 \
++reward.managers.gen_qwen3_8b.routing_strategy.request_budget=1024 \
++reward.managers.gen_qwen3_8b.routing_strategy.max_num_waiting_reqs_after_preemption=3 \
++reward.managers.gen_qwen3_8b.routing_strategy.max_concurrent_seqs_per_instance=128 \
 "
 
 echo "mode6 ablation: POLICY=${POLICY} USE_COST_MODEL=${USE_COST_MODEL} USE_REBALANCE=${USE_REBALANCE} INTERRUPT_VLLM_WAITING=${INTERRUPT_VLLM_WAITING}"
 
 launch_deployment_mode \
-    psrl.routing_strategy.cost_model_path=${ROLLOUT_COST_MODEL} \
+    psrl.rollout_coordination.routing_strategy.cost_model_path=${ROLLOUT_COST_MODEL} \
     "$@"

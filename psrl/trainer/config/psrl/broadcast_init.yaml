@@ -1,0 +1,7 @@
+# Broadcast initialization: rank-0 PS worker reads checkpoint, distributes to others via NIXL.
+
+# Set to true to use rank-0 broadcast initialization instead of each worker reading disk.
+enabled: True
+
+# Broadcast algorithm. Supported: binary_tree. Reserved for future: ring.
+algorithm: binary_tree

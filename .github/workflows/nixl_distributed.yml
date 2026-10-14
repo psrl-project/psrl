@@ -1,0 +1,36 @@
+name: nixl_distributed
+
+on:
+  push:
+    branches: [main, base_agentic_rl]
+    paths:
+      - "tests/nixl/**"
+      - "psrl/utils/nixl/**"
+      - ".github/workflows/nixl_distributed.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  nixl_distributed:
+    runs-on: [self-hosted, gpu, multi-node]
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install psrl
+        run: |
+          pip install -e ".[grpc,test]"
+
+      - name: Run NIXL unit tests (CPU-only subset)
+        run: |
+          pytest -m cpu_test tests/nixl/ -v
+
+      - name: Run NIXL sharding and comm planner tests
+        run: |
+          pytest tests/nixl/test_comm_planner.py tests/nixl/test_nixl_sharding.py -v
+
+      - name: Run NIXL e2e test (Megatron 16-GPU case)
+        run: |
+          bash tests/nixl/scripts/test_nixl_e2e.sh

@@ -1,0 +1,65 @@
+# @package _global_
+defaults:
+  - _self_
+
+# Test configuration
+test:
+  num_train: 2
+  num_gen: 2
+  train_engine_type: fsdp  # fsdp, fsdp_hybrid, megatron
+  
+  # FSDP Hybrid configuration
+  fsdp_hybrid:
+    ddp_size: 1
+    fsdp_size: 2
+  
+  # Megatron configuration
+  megatron:
+    tensor_model_parallel_size: 2
+    pipeline_model_parallel_size: 1
+    virtual_pipeline_model_parallel_size: 1
+    context_parallel_size: 1
+    expert_model_parallel_size: 1
+    expert_tensor_parallel_size: 1
+  
+  # Generation configuration
+  gen:
+    tensor_parallel_size: 2
+    pipeline_parallel_size: 1
+    expert_parallel_size: 1
+    data_parallel_size: 1
+
+# Model configuration
+model:
+  path: models/Qwen2.5-0.5B-Instruct
+  trust_remote_code: false
+  train_dtype: bfloat16
+  gen_dtype: bfloat16
+
+# Logging configuration
+logging:
+  path: logs/test_nixl_e2e
+  level: INFO
+
+# Network configuration
+network:
+  ray_address: auto
+  ray_namespace: psrl-nixl-integration
+  listen_ip: null
+  listen_port: 23459
+  torch_port_train: 29502
+  torch_port_gen: 29503
+  backend: nccl
+
+# NIXL configuration
+nixl:
+  server_mode: meta_server
+  server_ip: ${network.listen_ip}
+  server_port: ${network.listen_port}
+  max_pinned_temp_memory_slots: 4
+  enable_tms_for_temp_buffers: False # TMS (torch_memory_saver) is not used in unit tests
+
+# PS configuration
+ps:
+  mode: nixl_cpu
+  # num_ps will be calculated based on num_gen in the test

@@ -1,0 +1,24 @@
+# Independent replicas isolate failures from the patched vLLM data parallel coordinator.
+# Defaults fit one 8-GPU host with four replicas at TP=2.
+kind: fleet
+
+replicas: 4
+tp: 2
+pp: 1
+
+# In-process data parallelism. Leave at 1: independent replicas are the whole
+# point of this topology, and this repo's vLLM has a broken DP coordinator.
+dp: 1
+
+# Ports start at `base_port` and increment once per replica.
+base_port: 8000
+
+# Empty discovers the local GPUs. Must satisfy len(gpu_ids) == replicas * tp * pp.
+gpu_ids: []
+
+host: 0.0.0.0
+
+wait_ready_sec: 4500
+
+# Require every replica because a local failure usually indicates misconfiguration.
+min_healthy_frac: 1.0

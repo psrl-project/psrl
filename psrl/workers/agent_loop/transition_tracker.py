@@ -16,9 +16,7 @@ class InstanceTransitionTracker:
             self._next_id += 1
             self._targets[transition_id] = set(instance_ids)
             self._pending_request_ids[transition_id] = {
-                int(request_id)
-                for instance_id in instance_ids
-                for request_id in inflight_by_instance[instance_id]
+                int(request_id) for instance_id in instance_ids for request_id in inflight_by_instance[instance_id]
             }
             return transition_id
 

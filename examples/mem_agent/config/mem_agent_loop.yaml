@@ -1,0 +1,8 @@
+- name: mem_agent
+  _target_: examples.mem_agent.agent_loop.MemAgentAgentLoop
+  runtime:
+    chunk_tokens: ${oc.decode:${oc.env:MEM_CHUNK_TOKENS,2048}}
+    max_memory_tokens: ${oc.decode:${oc.env:MEM_MAX_MEMORY,1024}}
+    max_final_tokens: ${oc.decode:${oc.env:MEM_MAX_FINAL,256}}
+    max_chunks: ${oc.decode:${oc.env:MEM_MAX_CHUNKS,64}}
+    allow_context_truncation: ${oc.decode:${oc.env:MEM_ALLOW_CONTEXT_TRUNCATION,false}}

@@ -6,7 +6,7 @@ PSRL_WORKSPACE=/jizhicfs/pkuhetu/yfzhao/psrl
 project_name='psrl_reward_model'
 experiment_name='RM-Qwen2.5-Math-7B-GenLoop-dapo-skywork'
 
-source ${PSRL_WORKSPACE}/env/env_311.sh
+source ${PSRL_WORKSPACE}/env/psrl.sh
 
 PSRL_WORKSPACE=/jizhicfs/pkuhetu/yfzhao/psrl
 
@@ -92,7 +92,6 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config --conf
     reward_model.gen_reward_function=${RM_GEN_REWARD_FUNCTION} \
     reward_model.rollout.task=${RM_VLLM_TASK} \
     \
-    gen_actor_rollout_ref.model.path="${HF_MODEL_PATH}" \
     gen_actor_rollout_ref.rollout.mode=psrl_async \
     gen_actor_rollout_ref.rollout.tensor_model_parallel_size=${ROLL_TP} \
     gen_actor_rollout_ref.rollout.pipeline_model_parallel_size=${ROLL_PP} \

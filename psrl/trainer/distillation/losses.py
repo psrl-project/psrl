@@ -12,12 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any
 
 import torch
 from tensordict import TensorDict
-
 from verl.base_config import BaseConfig
 from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
 from verl.utils.metric import AggregationType, Metric
@@ -37,7 +37,7 @@ DistillationLossFn = Callable[
 ]
 
 
-def is_distillation_enabled(config: Optional[DistillationConfig]) -> bool:
+def is_distillation_enabled(config: DistillationConfig | None) -> bool:
     """Check if distillation is enabled based on the provided configuration."""
     if config is None:
         return False
@@ -164,7 +164,7 @@ def compute_topk_loss(
 
 def distillation_ppo_loss(
     config: ActorConfig,
-    distillation_config: Optional[DistillationConfig],
+    distillation_config: DistillationConfig | None,
     model_output: dict = None,
     data: TensorDict = None,
     dp_group=None,
@@ -252,7 +252,9 @@ def distillation_loss(
     )
     if loss_config.loss_max_clamp is not None:
         # clamping min is for k1 loss which can be negative
-        distillation_losses = distillation_losses.clamp(min=-loss_config.loss_max_clamp, max=loss_config.loss_max_clamp)
+        distillation_losses = distillation_losses.clamp(
+            min=-loss_config.loss_max_clamp, max=loss_config.loss_max_clamp
+        )
 
     if loss_config.use_policy_gradient:
         # Use negative distillation loss as reward, as done by https://thinkingmachines.ai/blog/on-policy-distillation/.

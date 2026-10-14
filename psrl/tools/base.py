@@ -1,19 +1,51 @@
 from __future__ import annotations
 
-import asyncio
 import importlib.util
 import sys
-import threading
+from collections import defaultdict
 
 # Modified from rllm/rllm/tools/tool_base.py
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from omegaconf import OmegaConf
+from pydantic import BaseModel, model_validator
 
 from psrl.tools.utils import function_to_dict
+
+
+class ToolResponse(BaseModel):
+    """
+    Store a structured response from a tool execution.
+
+    Separate `text`, `image`, and `video` values let callers construct
+    multimodal messages without interpreting raw dictionaries.
+    """
+
+    id: str | None = None
+    text: str | None = None
+    image: list[Any] | None = None
+    video: list[Any] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_list_fields(cls, values):
+        for mm_field in ("image", "video"):
+            val = values.get(mm_field)
+            if val is not None and not isinstance(val, list):
+                raise ValueError(
+                    f"ToolResponse.{mm_field} must be a list, got {type(val)}. "
+                    f"Wrap single items: [{mm_field}=obj] → [{mm_field}=[obj]]."
+                )
+        return values
+
+    def is_empty(self) -> bool:
+        return not self.text and not self.image and not self.video
+
+    def is_text_only(self) -> bool:
+        return bool(self.text) and not self.image and not self.video
 
 
 @dataclass
@@ -33,7 +65,7 @@ class ToolCall:
 @dataclass
 class ToolOutput:
     name: str
-    output: str | list | dict | None = None
+    output: dict = field(default_factory=lambda: defaultdict())
     error: str | None = None
     metadata: dict | None = None
 
@@ -360,6 +392,18 @@ class ToolGroup(Tool):
         """
         return list(self.tools.keys())
 
+    def has_tool(self, name: str) -> bool:
+        """
+        Check if a tool with the given name exists in the group.
+
+        Args:
+            name: The name of the tool to check
+
+        Returns:
+            bool: True if the tool exists, False otherwise
+        """
+        return name in self.tools
+
 
 def initialize_tools_from_config(config_path: str) -> list[Tool]:
     """Initialize tools from a configuration file.
@@ -368,9 +412,8 @@ def initialize_tools_from_config(config_path: str) -> list[Tool]:
     the corresponding Tool objects. Supports both dynamic loading from
     Python modules and registry-based tool instantiation.
 
-    This method supports:
-    - native tools (dynamic import or registry)
-    - MCP tools (discover remote tools from MCP servers and wrap as Tool instances)
+    This method supports native PSRL tools, either by dynamic import or by the
+    in-process registry.
 
     Args:
         config_path: Path to the tool configuration file (YAML format)
@@ -388,138 +431,66 @@ def initialize_tools_from_config(config_path: str) -> list[Tool]:
     tools_config = OmegaConf.load(config_path)
     tools: list[Tool] = []
 
-    # Lazy initialization for MCP support (only if needed).
-    tmp_event_loop: asyncio.AbstractEventLoop | None = None
-    thread: threading.Thread | None = None
+    for tool_config in tools_config.tools:
+        tool_param_dict = OmegaConf.to_container(tool_config.get("params", {}), resolve=True)
+        tool_type = tool_param_dict.get("type", "native")
+        if tool_type != "native":
+            raise NotImplementedError(f"Unsupported tool type: {tool_type}")
 
-    def _get_mcp_event_loop() -> asyncio.AbstractEventLoop:
-        nonlocal tmp_event_loop, thread
-        if tmp_event_loop is None:
-            tmp_event_loop = asyncio.new_event_loop()
-            thread = threading.Thread(
-                target=tmp_event_loop.run_forever,
-                name="psrl mcp tool list fetcher",
-                daemon=True,
+        # Dynamic loading from path
+        if "path" in tool_config and "class_name" in tool_config:
+            tool_path = Path(tool_config["path"])
+            class_name = tool_config["class_name"]
+
+            if not tool_path.is_absolute():
+                # Assume path is relative to the config file's directory
+                config_dir = Path(config_path).parent
+                tool_path = config_dir / tool_path
+
+            if not tool_path.exists():
+                raise FileNotFoundError(f"Tool file not found at: {tool_path}")
+
+            # Dynamically import the module
+            spec = importlib.util.spec_from_file_location(tool_path.stem, tool_path)
+            if spec is None or spec.loader is None:
+                raise ImportError(f"Could not create module spec for {tool_path}")
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = module
+            spec.loader.exec_module(module)
+
+            # Get the class and instantiate
+            if not hasattr(module, class_name):
+                raise AttributeError(f"Class '{class_name}' not found in module {tool_path}")
+            tool_cls = getattr(module, class_name)
+            tool = tool_cls(**tool_param_dict)
+        # Fallback to registry
+        else:
+            tool_cls_name = tool_config.get("tool_name")
+            if tool_cls_name is None:
+                raise ValueError(
+                    f"Tool configuration must contain 'tool_name' or 'path' and 'class_name': {tool_config}"
+                )
+            tool = Tool.get_tool(tool_cls_name, **tool_param_dict)
+
+        tools.append(tool)
+    return tools
+
+
+def load_all_tools(tool_config_path: str | None, function_tool_path: str | None) -> list[Tool]:
+    """Load native + function tools, checking that names do not collide."""
+    from psrl.tools.function_tool import load_function_tools_from_path
+
+    native_tools = initialize_tools_from_config(tool_config_path) if tool_config_path else []
+    function_tools = load_function_tools_from_path(function_tool_path) if function_tool_path else []
+
+    if native_tools and function_tools:
+        existing = {tool.name for tool in native_tools}
+        collisions = sorted(tool.name for tool in function_tools if tool.name in existing)
+        if collisions:
+            raise ValueError(
+                f"Function tool name(s) {collisions} collide with tools already declared in "
+                f"'{tool_config_path}'. Each tool name must be unique across tool_config_path "
+                "and function_tool_path."
             )
-            thread.start()
-        return tmp_event_loop
 
-    def _run_coro(coro):
-        loop = _get_mcp_event_loop()
-        future = asyncio.run_coroutine_threadsafe(coro, loop)
-        return future.result()
-
-    # Cache managers per servers_config_path so config can include multiple MCP blocks cheaply.
-    mcp_managers: dict[str, MCPClientManager] = {}
-
-    try:
-        for tool_config in tools_config.tools:
-            tool_param_dict = OmegaConf.to_container(tool_config.get("params", {}), resolve=True)
-            tool_type = tool_param_dict.get("type", "native")
-
-            # ---- MCP tools (discover remote tools and expand into a list of tools) ----
-            if tool_type == "mcp":
-                from psrl.tools.mcp_clients.manager import MCPClientManager
-                from psrl.tools.mcp_tool import MCPTool
-
-                servers_cfg = tool_param_dict.get("mcp_servers_config_path")
-                if not servers_cfg:
-                    raise ValueError(
-                        "MCP tool config missing 'mcp_servers_config_path'. "
-                        "Example: params: {type: mcp, mcp_servers_config_path: ./mcp_server.json}"
-                    )
-
-                servers_cfg_path = Path(servers_cfg)
-                if not servers_cfg_path.is_absolute():
-                    servers_cfg_path = Path(config_path).parent / servers_cfg_path
-
-                tool_selected_list = tool_param_dict.get("tool_selected_list")
-
-                if tool_selected_list is not None and not isinstance(tool_selected_list, list):
-                    raise ValueError("MCP 'tool_selected_list' must be a list of tool names")
-
-                rate_limit = float(tool_param_dict.get("rate_limit", 120.0))
-                timeout = tool_param_dict.get("timeout")
-                timeout_f = float(timeout) if timeout is not None else None
-
-                mgr_key = str(servers_cfg_path)
-                manager = mcp_managers.get(mgr_key, None)
-                if manager is None:
-                    manager = MCPClientManager(
-                        servers_config_path=str(servers_cfg_path),
-                        rate_limit=rate_limit,
-                        timeout=30.0,
-                    )
-                    mcp_managers[mgr_key] = manager
-
-                try:
-                    schemas = _run_coro(manager.fetch_tool_schemas(tool_selected_list))
-                except FileNotFoundError as e:
-                    raise FileNotFoundError(
-                        f"MCP servers config not found: {servers_cfg_path}. "
-                        'Please create a JSON like {"mcpServers": {"name": {"url": "http://..."}}}.'
-                    ) from e
-                except Exception as e:
-                    raise RuntimeError(
-                        "Failed to discover MCP tool schemas. "
-                        "Check MCP server URL/auth_token, server availability, and fastmcp installation. "
-                        f"Root error: {type(e).__name__}: {e}"
-                    ) from e
-
-                if not schemas:
-                    raise ValueError(
-                        "No MCP tools discovered. "
-                        "If you set tool_selected_list, ensure it matches server tool names; "
-                        "otherwise omit it or set it to null."
-                    )
-
-                # Create MCPTool instances for each discovered schema.
-                for schema in schemas:
-                    tools.append(MCPTool(manager=manager, tool_schema=schema, timeout=timeout_f))
-                continue
-
-            # ---- Native tools ----
-            # Dynamic loading from path
-            if "path" in tool_config and "class_name" in tool_config:
-                tool_path = Path(tool_config["path"])
-                class_name = tool_config["class_name"]
-
-                if not tool_path.is_absolute():
-                    # Assume path is relative to the config file's directory
-                    config_dir = Path(config_path).parent
-                    tool_path = config_dir / tool_path
-
-                if not tool_path.exists():
-                    raise FileNotFoundError(f"Tool file not found at: {tool_path}")
-
-                # Dynamically import the module
-                spec = importlib.util.spec_from_file_location(tool_path.stem, tool_path)
-                if spec is None or spec.loader is None:
-                    raise ImportError(f"Could not create module spec for {tool_path}")
-                module = importlib.util.module_from_spec(spec)
-                sys.modules[spec.name] = module
-                spec.loader.exec_module(module)
-
-                # Get the class and instantiate
-                if not hasattr(module, class_name):
-                    raise AttributeError(f"Class '{class_name}' not found in module {tool_path}")
-                tool_cls = getattr(module, class_name)
-                tool = tool_cls(**tool_param_dict)
-            # Fallback to registry
-            else:
-                tool_cls_name = tool_config.get("tool_name")
-                if tool_cls_name is None:
-                    raise ValueError(
-                        f"Tool configuration must contain 'tool_name' or 'path' and 'class_name': {tool_config}"
-                    )
-                tool = Tool.get_tool(tool_cls_name, **tool_param_dict)
-
-            tools.append(tool)
-        return tools
-    finally:
-        # Properly cleanup event loop if it was created.
-        if tmp_event_loop is not None:
-            tmp_event_loop.call_soon_threadsafe(tmp_event_loop.stop)
-            if thread is not None and thread.is_alive():
-                thread.join(timeout=5.0)
-            tmp_event_loop.close()
+    return native_tools + function_tools

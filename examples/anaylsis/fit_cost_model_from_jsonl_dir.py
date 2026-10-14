@@ -1,13 +1,11 @@
 import argparse
 import json
-import math
 import re
 from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
 from scipy.optimize import curve_fit
-
 
 FILE_RE = re.compile(
     r"^(?P<model>.+)_Syn_TP(?P<tp>\d+)_PP(?P<pp>\d+)(?:_EP(?P<ep>\d+))?_B(?P<batch>\d+)_P(?P<prompt>\d+)_R(?P<response>\d+)_disable_attn_(?P<disable>true|false)\.jsonl$"
@@ -81,7 +79,9 @@ def fit_other_params(points: list[dict]) -> tuple[dict, np.ndarray]:
 
     initial_threshold = float(np.min(latencies))
     initial_b = float(np.min(latencies))
-    initial_k = max(float((np.max(latencies) - np.min(latencies)) / max(np.max(request_nums) - np.min(request_nums), 1.0)), 1e-8)
+    initial_k = max(
+        float((np.max(latencies) - np.min(latencies)) / max(np.max(request_nums) - np.min(request_nums), 1.0)), 1e-8
+    )
 
     popt, _ = curve_fit(
         latency_model,

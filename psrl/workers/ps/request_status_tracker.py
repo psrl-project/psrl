@@ -1,19 +1,32 @@
 import enum
+import threading
 from enum import Enum
+from functools import wraps
 
 import ray
 from omegaconf import DictConfig
 
 from psrl.utils.logger import DualOutputHandler, deprecated, get_ps_logger
 from psrl.utils.server.command import Command, CommandType
+from psrl.utils.transferqueue_utils import PayloadState, clear_payload, request_payload_keys
+from psrl.workers.gen.utils import INVALID_ROLLOUT_INSTANCE_ID, RolloutInstanceId
 from psrl.workers.ps.staleness_controller import EntryInfo
 
-# Use the unified PS logger
 psrl_logger = get_ps_logger()
 
 
-# NOTE(lhy): This is the status of the requests in the PSRL system.
-# It is different from the RequestStatus in vLLM, which is the status of the requests in the scheduler.
+def _state_locked(func):
+    """Protect request metadata maps shared across Ray actor and gRPC threads."""
+
+    @wraps(func)
+    def _wrapped(self, *args, **kwargs):
+        lock = self._state_lock
+        with lock:
+            return func(self, *args, **kwargs)
+
+    return _wrapped
+
+
 class PSRL_RequestStatus(Enum):
     """Represents the status of a request in the system.
 
@@ -22,7 +35,8 @@ class PSRL_RequestStatus(Enum):
     ROLLOUT_ROUTING: Request is in the router and is waiting for a specific instance to be dispatched
     ROLLOUT_DISPATCHED: Request is dispatched to the instance engine
     ROLLOUT_RUNNING: Request is in the instance engine and is being rolled out
-    ROLLOUT_INTERRUPTED: Rollout was interrupted by the user for Partial Rollout, put into replay buffer
+    ROLLOUT_INTERRUPTED: Rollout was interrupted (by coordinator for Partial Rollout, or by
+        scheduler via KV cache preemption), put into replay buffer
     REWARD_RUNNING: Request is running in the reward manager
     REWARD_COMPLETED: Request is completed in the reward manager
     COMPLETED: Request is completed (generic completed state)
@@ -34,49 +48,59 @@ class PSRL_RequestStatus(Enum):
     ROLLOUT_DISPATCHED = enum.auto()
     ROLLOUT_RUNNING = enum.auto()
     ROLLOUT_INTERRUPTED = enum.auto()
-    ROLLOUT_INTERRUPTED_BY_SCHEDULER = enum.auto()
     ROLLOUT_COMPLETED = enum.auto()
     REWARD_RUNNING = enum.auto()
     REWARD_COMPLETED = enum.auto()
     COMPLETED = enum.auto()
 
 
+# NOTE(lhy): Status changes and payload commits occur in separate actors. Cleanup filters
+# missing keys because it can race a commit.
+TQ_PAYLOAD_CLEANUP_STATUSES: frozenset = frozenset(
+    {
+        PSRL_RequestStatus.ROLLOUT_COMPLETED,
+        PSRL_RequestStatus.REWARD_RUNNING,
+        PSRL_RequestStatus.REWARD_COMPLETED,
+    }
+)
+
+# Occupancy may observe either state because async reward can finish after `COMPLETED`.
+TRAIN_READY_STATUSES: frozenset = frozenset(
+    {
+        PSRL_RequestStatus.COMPLETED,
+        PSRL_RequestStatus.REWARD_COMPLETED,
+    }
+)
+
+
 class RequestStatusTracker:
     """
-    Manages the status of requests in the system.
-
-    This class provides methods to update and retrieve the status of requests.
-    It is used to track the lifecycle of requests as they move through different stages.
+    Manage request status and metadata across processing stages.
     """
 
     def __init__(self, psrl_config: DictConfig):
         self.psrl_config = psrl_config
-        self._request_id_to_status: dict[int, PSRL_RequestStatus] = {}  # Maps request ID to their statuses
-        self._request_infos = {}  # Maps request IDs to EntryInfo objects
-        # Maps statuses to sets of request IDs for quick access
+        self._state_lock = threading.RLock()
+        self._request_id_to_status: dict[int, PSRL_RequestStatus] = {}
+        self._request_infos = {}
         self._status_to_request_ids = {status: set() for status in PSRL_RequestStatus}
-        self._abort_request_ids = set()  # Set of request IDs that are marked for abortion
-        self._running_min_version = 0  # Minimum version of requests that are currently running
+        self._abort_request_ids = set()
+        self._running_min_version = 0
 
-        if self.psrl_config.redundant_rollout.enable:
-            self.rollout_n = self.psrl_config.redundant_rollout.redundant_rollout_n
-            self.alg_rollout_n = self.psrl_config.redundant_rollout.alg_rollout_n
+        if self.psrl_config.rollout_coordination.redundant_rollout.enable:
+            self.rollout_n = self.psrl_config.rollout_coordination.redundant_rollout.redundant_rollout_n
+            self.alg_rollout_n = self.psrl_config.rollout_coordination.redundant_rollout.alg_rollout_n
         else:
             self.rollout_n = self.psrl_config.rollout_n
             self.alg_rollout_n = self.rollout_n
         self.val_rollout_n = self.psrl_config.val_rollout_n
 
-        # NOTE(lhy): The `rollout_request_buffer` is not used anymore,
-        # we should try to keep the ps_manager/request_status tracker only store the meta data!
-        self.rollout_request_buffer = {}  # deprecated: buffer for storing request data during rollout processing
+        self.rollout_request_buffer = {}
 
-        # Rollout coordinator reference
         self.rollout_coordinator: ray.actor.ActorHandle | None = None
 
-        # Reward manager reference
         self.reward_manager: ray.actor.ActorHandle | None = None
 
-        # Build logger
         self.log_prefix = "RequestStatusTracker"
         psrl_logger.addHandler(DualOutputHandler(self.psrl_config.logging_path, self.log_prefix))
         psrl_logger.info("Initialized RequestStatusTracker.")
@@ -89,12 +113,13 @@ class RequestStatusTracker:
         """Set the reference to the reward manager."""
         self.reward_manager = reward_manager
 
+    @_state_locked
     def update_request_status(
         self,
         request_id: list[int] | int,
         status: list[PSRL_RequestStatus] | PSRL_RequestStatus,
         model_version: list[int] | int = -1,
-        rollout_instance_id: list[int] | int = -1,
+        rollout_instance_id: list[RolloutInstanceId] | RolloutInstanceId = INVALID_ROLLOUT_INSTANCE_ID,
         is_validate: bool = False,
     ) -> list[bool] | bool:
         """Update the status of requests.
@@ -107,14 +132,15 @@ class RequestStatusTracker:
             request_id (Union[List[int], int]): The unique identifier(s) of the request(s)
             status (Union[List[PSRL_RequestStatus], PSRL_RequestStatus]): The new status(es) to set
             model_version (int, optional): The model version of the request. Defaults to -1
-            rollout_instance_id (int, optional): The instance ID of the rollout worker. Defaults to -1
+            rollout_instance_id (RolloutInstanceId, optional):
+                The instance ID of the rollout worker. Defaults to (-1, -1)
             is_validate (bool, optional): Whether the request is for validation. Defaults to False
 
         Returns:
             Union[List[bool], bool]: True if status was updated successfully, False if request was aborted
         """
         if not isinstance(request_id, list):
-            request_id = [request_id]  # Convert single request_id to a list for uniform processing
+            request_id = [request_id]
         if not isinstance(model_version, list):
             model_version = [model_version] * len(request_id)
         if not isinstance(rollout_instance_id, list):
@@ -124,7 +150,6 @@ class RequestStatusTracker:
             "request_id, model_version, and rollout_instance_id must have the same length."
         )
 
-        # Ensure the status is valid
         if not isinstance(status, list):
             status = [status] * len(request_id)
         for s in status:
@@ -133,27 +158,28 @@ class RequestStatusTracker:
 
         request_update_success = [True for _ in range(len(request_id))]
 
+        abort_payload_keys = []
         for i, req_id in enumerate(request_id):
-            # Check if the request is marked for abortion
             if self._check_aborted_request(req_id, remove=True):
                 request_update_success[i] = False
+                # NOTE(linsh): Payload cleanup for aborted requests belongs to `_abort_requests`.
                 continue
 
-            # If the request is stale, we should not update its status
             if req_id in self._request_infos:
-                if rollout_instance_id[i] != -1:
+                if rollout_instance_id[i] != INVALID_ROLLOUT_INSTANCE_ID:
                     self._request_infos[req_id].rollout_instance_id = rollout_instance_id[i]
                 if model_version[i] != -1:
                     self._request_infos[req_id].model_version = model_version[i]
                 request_version = self._request_infos[req_id].model_version
                 if not is_validate and request_version != -1 and request_version < self._running_min_version:
                     psrl_logger.warning(
-                        "Request %d is stale (version %d < %d), cannot update status",
-                        req_id,
-                        request_version,
-                        self._running_min_version,
+                        f"Cannot update stale request. Request ID: {req_id}. "
+                        f"Request version: {request_version}. Minimum running version: {self._running_min_version}."
                     )
                     request_update_success[i] = False
+                    current_status = self._request_id_to_status.get(req_id)
+                    if current_status in TQ_PAYLOAD_CLEANUP_STATUSES:
+                        abort_payload_keys.extend(self._request_tq_keys(req_id))
                     continue
             else:
                 raise KeyError(f"Request ID {req_id} not found in request info map.")
@@ -161,15 +187,24 @@ class RequestStatusTracker:
             if req_id in self._request_id_to_status:
                 new_status = status[i]
                 old_status = self._request_id_to_status[req_id]
+                # `COMPLETED` is the occupy gate. Reward bookkeeping must not regress it.
+                if old_status == PSRL_RequestStatus.COMPLETED and new_status != PSRL_RequestStatus.COMPLETED:
+                    continue
                 if old_status != new_status:
                     self._status_to_request_ids[old_status].discard(req_id)
-                    # psrl_logger.info(f"Changed status of request {req_id}: {old_status.name} -> {new_status.name}")
                 self._status_to_request_ids[new_status].add(req_id)
                 self._request_id_to_status[req_id] = new_status
             else:
                 raise KeyError(f"Request ID {req_id} not found in status map.")
 
-        return request_update_success
+        if abort_payload_keys:
+            clear_payload(
+                keys=abort_payload_keys,
+                partition_id="val" if is_validate else "train",
+                state=PayloadState.DROPPED,
+            )
+
+        return request_update_success[0] if len(request_update_success) == 1 else request_update_success
 
     def get_request_status(self, request_id: list[int] | int):
         """Get the current status of requests.
@@ -192,34 +227,33 @@ class RequestStatusTracker:
 
         return status_list
 
+    @_state_locked
     def remove_train_ready_request(self, request_id: list[int] | int):
-        """Remove requests that are ready for training.
-
-        This method removes completed requests from the tracking system
-        after they have been processed by the reward manager.
-        It is a wrapper function for the `remove_request` method.
+        """Remove occupy-ready requests from the tracker.
 
         Args:
-            request_id (Union[List[int], int]): The unique identifier(s) of the request(s) to remove
+            request_id (list[int] | int): The unique identifier(s) of the request(s) to remove.
 
         Raises:
-            AssertionError: If request is not found or not in correct status
+            AssertionError: If a request is missing or not in a train ready status.
         """
-        psrl_logger.debug(f"Removing train ready request {request_id} from status tracker after reward completion")
+        psrl_logger.debug(f"Removing train-ready requests. Request IDs: {request_id}.")
         if not isinstance(request_id, list):
             request_id = [request_id]
+        if not request_id:
+            return
 
         for req_id in request_id:
-            assert req_id in self._request_id_to_status, f"Request ID {req_id} not found in status map."
-            assert req_id in self._request_infos, f"Request ID {req_id} not found in request infos."
-            assert self._request_id_to_status[req_id] == PSRL_RequestStatus.COMPLETED, (
-                f"Request ID {req_id} is not in COMPLETED status."
+            assert req_id in self._request_id_to_status, f"Request not found in status map. ID: {req_id}."
+            assert req_id in self._request_infos, f"Request not found in request info. ID: {req_id}."
+            current_status = self._request_id_to_status[req_id]
+            assert current_status in TRAIN_READY_STATUSES, (
+                f"Request is not train ready. ID: {req_id}. Status: {current_status!r}."
             )
             assert req_id not in self._abort_request_ids, (
-                f"Request ID {req_id} is marked for abortion but is being removed as train ready."
+                f"Aborted request cannot be removed as train ready. ID: {req_id}."
             )
 
-        # Remove the request from the status tracker
         self.remove_request(request_id)
 
     def get_all_request_statuses(self) -> dict:
@@ -242,10 +276,11 @@ class RequestStatusTracker:
         """
         return self._status_to_request_ids.get(status, set())
 
+    @_state_locked
     def add_request(
         self,
         request_id: list[int] | int,
-        rollout_instance_id: list[int] | int = -1,
+        rollout_instance_id: list[RolloutInstanceId] | RolloutInstanceId = INVALID_ROLLOUT_INSTANCE_ID,
         model_version: list[int] | int = -1,
         status: (list[PSRL_RequestStatus] | PSRL_RequestStatus) = PSRL_RequestStatus.PENDING,
         is_validate: list[bool] | bool = False,
@@ -255,8 +290,8 @@ class RequestStatusTracker:
 
         Args:
             request_id (Union[List[int], int]): The unique identifier(s) of the request(s).
-            rollout_instance_id (Union[List[int], int], optional):
-                The instance ID(s) of the rollout worker(s). Defaults to -1.
+            rollout_instance_id (Union[List[RolloutInstanceId], RolloutInstanceId], optional):
+                The instance ID(s) of the rollout worker(s). Defaults to (-1, -1).
             model_version (Union[List[int], int], optional):
                 The model version(s) of the request(s). Defaults to -1.
             status (Union[List[PSRL_RequestStatus], PSRL_RequestStatus], optional):
@@ -286,6 +321,7 @@ class RequestStatusTracker:
                 request_idx=req_id % rollout_n,
                 rollout_instance_id=rollout_instance_id[i],
                 model_version=model_version[i],
+                n_trajectory=1,
                 is_validate=is_validate[i],
             )
             self._request_id_to_status[req_id] = status[i]
@@ -302,19 +338,33 @@ class RequestStatusTracker:
         """
         if request_id in self._abort_request_ids:
             if remove:
-                self.remove_request(request_id)  # Remove from status and info maps
+                self.remove_request(request_id)
             return True
         if request_id not in self._request_id_to_status:
             assert request_id not in self._request_infos, (
-                f"Request ID {request_id} should not be in request infos but is."
+                f"Untracked request remains in request info. ID: {request_id}."
             )
             return True
         if request_id not in self._request_infos:
             assert request_id not in self._request_id_to_status, (
-                f"Request ID {request_id} should not be in status map but is."
+                f"Request without info remains in status map. ID: {request_id}."
             )
             return True
         return False
+
+    def _request_tq_keys(self, request_id: int) -> list[str]:
+        """Reconstruct the committed payload keys for a tracked request."""
+        n_trajectory = self._request_infos[request_id].n_trajectory
+        return request_payload_keys(request_id, n_trajectory)
+
+    @_state_locked
+    def update_request_n_trajectory(self, request_id: int, n_trajectory: int) -> None:
+        """Keep the status tracker's payload-key metadata in sync with TITO output."""
+        if n_trajectory < 1:
+            raise ValueError(f"n_trajectory must be positive, got {n_trajectory}.")
+        if request_id not in self._request_infos:
+            raise KeyError(f"Request ID {request_id} not found in request infos.")
+        self._request_infos[request_id].n_trajectory = n_trajectory
 
     def _abort_requests(self, request_ids: list[int] | int, blocking: bool = False):
         """
@@ -330,35 +380,32 @@ class RequestStatusTracker:
         if not isinstance(request_ids, list):
             request_ids = [request_ids]
 
-        request_ids = set(request_ids)  # Ensure uniqueness
+        request_ids = set(request_ids)
         filtered_request_ids = [req_id for req_id in request_ids if req_id in self._request_id_to_status]
         if filtered_request_ids:
-            psrl_logger.info(f"Added requests {filtered_request_ids} to abort set")
+            psrl_logger.info(f"Added requests to abort set: {filtered_request_ids}.")
         self._abort_request_ids.update(filtered_request_ids)
 
-        # Classify the requests in `request_ids` into their current statuses
         status_to_req_ids = self.classify_requests_in_status(filtered_request_ids)
 
         abort_requests_for_rollout = set()
         abort_requests_for_reward = set()
         abort_requests_for_completed = set()
+        abort_payload_keys: list[str] = []
 
         for status, req_ids in status_to_req_ids.items():
             psrl_logger.info(f"Classifying aborted requests in status {status}: {req_ids}")
-            # if status in {
-            #     PSRL_RequestStatus.ROLLOUT_ROUTING,
-            #     PSRL_RequestStatus.ROLLOUT_DISPATCHED,
-            #     PSRL_RequestStatus.ROLLOUT_RUNNING
-            # }:
             if status in {PSRL_RequestStatus.ROLLOUT_RUNNING}:
                 abort_requests_for_rollout.update(req_ids)
             elif status in {PSRL_RequestStatus.REWARD_RUNNING}:
                 abort_requests_for_reward.update(req_ids)
             elif status in {PSRL_RequestStatus.COMPLETED}:
                 abort_requests_for_completed.update(req_ids)
+            if status in TQ_PAYLOAD_CLEANUP_STATUSES:
+                for req_id in req_ids:
+                    abort_payload_keys.extend(self._request_tq_keys(req_id))
 
         futures = []
-        # Abort requests in rollout stage (ROLLOUT_RUNNING)
         if abort_requests_for_rollout:
             psrl_logger.debug(f"Aborting requests in rollout stages: {abort_requests_for_rollout}")
             instance_to_request_ids = self.classify_requests_in_instance(list(abort_requests_for_rollout))
@@ -373,7 +420,6 @@ class RequestStatusTracker:
             )
             psrl_logger.debug(f"Abort command sent to rollout coordinator for requests: {abort_requests_for_rollout}")
 
-        # Abort requests in reward stage (REWARD_RUNNING)
         if abort_requests_for_reward:
             psrl_logger.debug(f"Aborting requests in reward stages: {abort_requests_for_reward}")
             futures.append(
@@ -387,13 +433,19 @@ class RequestStatusTracker:
             )
             psrl_logger.debug(f"Abort command sent to reward manager for requests: {abort_requests_for_reward}")
 
-        # Abort requests in completed stage (COMPLETED)
-        # Simply delete the requests since it will not be updated anymore
         if abort_requests_for_completed:
             self.remove_request(list(abort_requests_for_completed))
 
         if futures and blocking:
             ray.get(futures)
+
+        # Clear only payloads known to be committed.
+        if abort_payload_keys:
+            clear_payload(
+                keys=abort_payload_keys,
+                partition_id="train",
+                state=PayloadState.DROPPED,
+            )
 
     def classify_requests_in_status(self, request_ids: list[int] | int) -> dict:
         """
@@ -445,6 +497,7 @@ class RequestStatusTracker:
 
         return classified_requests
 
+    @_state_locked
     def get_recorded_child_requests(self, parent_id: list[int] | int, is_validate: bool = False) -> set[int]:
         """
         Get the recorded child requests for a given parent request ID.
@@ -501,13 +554,11 @@ class RequestStatusTracker:
         if not isinstance(entry_info, list):
             entry_info = [entry_info]
 
-        # Ensure all request IDs in entry_info exist in the manager
         for info in entry_info:
             request_id = info.request_id
             if request_id not in self._request_infos:
                 raise KeyError(f"Request ID {request_id} not found.")
 
-        # Update the EntryInfo for each request ID
         for info in entry_info:
             request_id = info.request_id
             if request_id in self._request_infos:
@@ -522,7 +573,7 @@ class RequestStatusTracker:
         Args:
             request_id (List[int], int): The unique identifier of the request to abort.
         """
-        psrl_logger.debug(f"Removing request {request_id} from status tracker")
+        psrl_logger.debug(f"Removing requests from status tracker. Request IDs: {request_id}.")
         if not isinstance(request_id, list):
             request_id = [request_id]
 
@@ -560,12 +611,12 @@ class RequestStatusTracker:
         assert version >= 0, "Version must be a non-negative integer."
         return {req_id for req_id, info in self._request_infos.items() if info.model_version == version}
 
-    def get_dispatched_requests_of_instance(self, instance_id: int) -> set[int]:
+    def get_dispatched_requests_of_instance(self, instance_id: RolloutInstanceId) -> set[int]:
         """
         Get all dispatched requests associated with a specific rollout instance.
 
         Args:
-            instance_id (int): The ID of the rollout instance to filter requests by.
+            instance_id (RolloutInstanceId): The ID of the rollout instance to filter requests by.
 
         Returns:
             set[int]: A set of requests that are dispatched to the specified instance.
@@ -587,10 +638,8 @@ class RequestStatusTracker:
         abort_request_ids = set()
         for req_id, info in self._request_infos.items():
             if req_id in self._abort_request_ids:
-                # If the request is in the abort set, we will not abort it again
                 continue
             if not info.is_validate and info.model_version == version:
-                # If the request version matches, we will abort it
                 abort_request_ids.add(req_id)
         self._running_min_version = max(self._running_min_version, version + 1)
         return abort_request_ids
@@ -629,9 +678,7 @@ class RequestStatusTracker:
             else:
                 raise KeyError(f"Request ID {req_id} not found.")
 
-    # ------------ Deprecated methods ------------
-    # These methods are not used anymore because
-    # they will impact the performance of the ps_manager/request_status tracker
+    # --- Deprecated methods ---
 
     @deprecated(
         "This method is not used anymore, "
@@ -681,7 +728,7 @@ class RequestStatusTracker:
             dict: The data associated with the request ID, or None if not found.
         """
         assert request_id in self.rollout_request_buffer, (
-            f"Request ID {request_id} not found in rollout request buffer."
+            f"Request not found in rollout request buffer. ID: {request_id}."
         )
         return self.rollout_request_buffer.pop(request_id, None)
 

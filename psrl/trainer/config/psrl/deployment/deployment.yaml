@@ -1,0 +1,54 @@
+defaults:
+  - elastic/elastic_base@elastic
+  - elastic/rule_based@elastic.rule_based
+  - elastic/throughput_optimal@elastic.throughput_optimal
+  - _self_
+
+# Number for rollout instances
+n_rollout_instances: 1
+
+# Number for validation rollout instances
+n_validate_instances: 1
+
+# Node number for each rollout instance
+rollout_nnodes_per_instance: 1
+
+# GPU number for each rollout instance in every node
+rollout_ngpus_per_node_per_instance: 1
+
+# Node number for each validate instance
+validate_nnodes_per_instance: 1
+
+# GPU number for each validate instance in every node
+validate_ngpus_per_node_per_instance: 1
+
+# Node number for trainer
+train_nnodes: 1
+
+# GPU number for trainer in every node
+train_ngpus_per_node: 1
+
+# Restrict scheduling to this many GPU nodes across all roles.
+# Use null for no restriction.
+total_nnodes: null
+
+# Rollout with heterogeneous strategies across different instances
+heterogeneous_rollout:
+
+  # Whether to enable heterogeneous strategies for different rollout instances.
+  enable: False
+
+  # Number for rollout instances
+  n_rollout_instances: ${psrl.deployment.n_rollout_instances}
+
+  # Node number for each rollout instance
+  rollout_nnodes_per_instance: []
+
+  # GPU number for each rollout instance in every node
+  rollout_ngpus_per_node_per_instance: []
+
+  # Tensor model parallel size for each rollout instance.
+  tensor_model_parallel_size_per_instance: []
+
+  # Pipeline model parallel size for each rollout instance.
+  pipeline_model_parallel_size_per_instance: []

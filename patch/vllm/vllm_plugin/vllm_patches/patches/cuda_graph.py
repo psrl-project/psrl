@@ -25,12 +25,12 @@ psrl_logger = logging.getLogger(__file__)
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
 
 
-@min_vllm_version("0.18.1")
+@min_vllm_version("0.22.0")
 class TMSCUDAGraphWrapperPatch(vLLMPatch[CUDAGraphWrapper]):
     """
     Replace `torch.cuda.graph()` with `torch_memory_saver.cuda_graph()`
 
-    Compatible with vLLM 0.18.1+
+    Compatible with vLLM 0.22.0+
     """
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any | None:
@@ -86,8 +86,13 @@ class TMSCUDAGraphWrapperPatch(vLLMPatch[CUDAGraphWrapper]):
                     # across layers will make the cudagraph capture very slow.
                     # therefore, we only run gc for the first graph,
                     # and disable gc for the rest of the graphs.
-                    stack.enter_context(patch("gc.collect", lambda: None))
-                    stack.enter_context(patch("torch.accelerator.empty_cache", lambda: None))
+                    stack.enter_context(patch("gc.collect", lambda *args, **kwargs: None))
+                    stack.enter_context(
+                        patch(
+                            "torch.accelerator.empty_cache",
+                            lambda *args, **kwargs: None,
+                        )
+                    )
 
                 if self.graph_pool is not None:
                     set_graph_pool_id(self.graph_pool)

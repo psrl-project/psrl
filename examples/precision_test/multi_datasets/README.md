@@ -18,14 +18,14 @@ reward_fn:                 # Function `compute_score` used in reward loop.
 Also, we support two levels of granularity in customizing your own functional-based reward model.
 #### Reward Loop Level
 
-You should define your own `Reward Loop Manager` like following codes:
+You should define your own `RewardLoop` like following codes:
 ```python
 from psrl.workers.reward.reward_loop import register
-from psrl.workers.reward.reward_loop.base import RewardLoopManagerBase
+from psrl.workers.reward.reward_loop.base import RewardLoopBase
 
 @register("custom_loop")   # use your own cutomized name to register
-class CustomizedRewardLoopManager(RewardLoopManagerBase):
-    """The reward manager."""
+class CustomizedRewardLoop(RewardLoopBase):
+    """The reward loop."""
 
     def __init__(
         self,
@@ -235,5 +235,5 @@ val_datas:
 
 ## 3. Example
 
-See `examples/precision_test/multi_dataset/multi_datasets_stream_megatron_qwen_7b.sh`.
-See default configs in `psrl/trainer/config/data/multi_datasets.yaml` and `psrl/trainer/config/reward_model/multi_rewards.yaml`.
+See `examples/precision_test/multi_datasets/multi_datasets_stream_megatron_qwen_7b.sh`.
+See `psrl/trainer/config/data/data.yaml` for the dataset spec schema.

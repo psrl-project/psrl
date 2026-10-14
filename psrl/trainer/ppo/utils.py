@@ -1,8 +1,11 @@
-import json
 import enum
-import warnings
+import json
+import logging
+import os
+from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any
 
 import numpy as np
 import ray
@@ -11,12 +14,89 @@ from omegaconf import DictConfig
 from verl import DataProto
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, register
-from verl.single_controller.ray import RayResourcePool
+from verl.single_controller.ray import RayResourcePool, SubRayResourcePool
 from verl.trainer.config import AlgoConfig
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import AdvantageEstimator
-from verl.trainer.ppo.utils import WorkerType
-from verl.utils.torch_functional import masked_mean
+
+from psrl.utils.reward_token_metrics import extract_reward_model_token_counts
+from psrl.workers.elastic.pool_layout import ReplicaPlacement
+
+psrl_logger = logging.getLogger(__file__)
+psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
+
+# from verl.trainer.ppo.ray_trainer import compute_response_mask
+
+
+def _compute_termination_metrics(
+    terminate_reasons: list[str],
+    parent_ids: list[str],
+    scores: list[float],
+    trained_tokens: list[float],
+) -> dict[str, float]:
+    """Break the batch down by why each episode stopped, and by group degeneracy.
+
+    Two failure modes are invisible in the aggregate metrics and were only found by
+    post-hoc log parsing. Splitting the reward by termination separates "the policy
+    solved it" from "the harness cut it off", which move in opposite directions while
+    `critic/score/mean` reports a single blended number. The zero-variance group
+    fraction tracks how much of the batch produces no learning signal at all, since a
+    GRPO group whose rollouts all score alike yields an advantage of exactly zero.
+
+    Args:
+        terminate_reasons (list[str]): Per-sample `TerminateReason` values.
+        parent_ids (list[str]): Per-sample GRPO group key.
+        scores (list[float]): Per-sample sequence-level score.
+        trained_tokens (list[float]): Per-sample count of unmasked tokens, which is
+            zero for a trajectory dropped by overlong filtering.
+
+    Returns:
+        dict[str, float]: Metrics under the `termination/` and `group/` prefixes.
+    """
+    total = len(terminate_reasons)
+    if total == 0:
+        return {}
+
+    metrics: dict[str, float] = {}
+    by_reason: dict[str, list[float]] = defaultdict(list)
+    for reason, score in zip(terminate_reasons, scores, strict=True):
+        by_reason[reason].append(score)
+    for reason, reason_scores in by_reason.items():
+        metrics[f"termination/{reason}/fraction"] = len(reason_scores) / total
+        metrics[f"termination/{reason}/score_mean"] = float(np.mean(reason_scores))
+
+    # The share of the batch that reaches the optimiser. Overlong filtering removes the
+    # truncated episodes, so a collapse here means the batch is nearly all truncation
+    # and the step is learning from very little. `token-mean` divides by exactly this
+    # token count, so it also says how much the surviving tokens are being scaled up.
+    metrics["termination/trained_tokens"] = float(np.sum(trained_tokens))
+    metrics["termination/masked_sample_fraction"] = sum(1 for t in trained_tokens if t == 0) / total
+
+    groups: dict[str, list[float]] = defaultdict(list)
+    for parent_id, score in zip(parent_ids, scores, strict=True):
+        groups[parent_id].append(score)
+    degenerate = sum(1 for group in groups.values() if len(group) > 1 and float(np.std(group)) < 1e-6)
+    metrics["group/zero_variance_fraction"] = degenerate / len(groups) if groups else 0.0
+    metrics["group/count"] = float(len(groups))
+    return metrics
+
+
+def compute_response_mask(data: DataProto):
+    """Compute the attention mask for the response part of the sequence.
+
+    This function extracts the portion of the attention mask that corresponds to the model's response,
+    which is used for masking computations that should only apply to response tokens.
+
+    Args:
+        data (DataProto): The data containing batched model outputs and inputs.
+
+    Returns:
+        torch.Tensor: The attention mask for the response tokens.
+    """
+    responses = data.batch["responses"]
+    response_length = responses.size(1)
+    attention_mask = data.batch["attention_mask"]
+    return attention_mask[:, -response_length:]
 
 
 class PSRL_Role(Enum):
@@ -28,6 +108,7 @@ class PSRL_Role(Enum):
     RewardModel = enum.auto()
     ActorRolloutRef = enum.auto()
     Validate = enum.auto()
+    TeacherModel = enum.auto()
     DummyPolicy = enum.auto()
 
 
@@ -41,8 +122,9 @@ class ResourcePoolManager:
     mapping: dict[PSRL_Role, list[str]]
     resource_num_per_bundle: dict[str, int] = field(default_factory=dict)
     resource_pool_dict: dict[str, RayResourcePool] = field(default_factory=dict)
+    elastic_replica_placements: dict[str, ReplicaPlacement] = field(default_factory=dict)
 
-    def create_resource_pool(self):
+    def create_resource_pool(self, device_name: str = "cuda"):
         """Create Ray resource pools for distributed training.
 
         Initializes resource pools based on the resource pool specification,
@@ -50,15 +132,11 @@ class ResourcePoolManager:
         For FSDP backend, uses max_colocate_count=4 so three colocated roles
         plus one spare CPU for WorkerGroup init helpers can share a bundle.
         For Megatron backend, uses max_colocate_count>1 for different models.
+        Elastic replica tags in `mapping` are sliced from parent pools after
+        the physical placement groups exist.
         """
         for resource_pool_name, process_on_nodes in self.resource_pool_spec.items():
-            # max_colocate_count is the CPU quota per bundle and also the GPU fraction
-            # denominator (num_gpus = resource_num_per_bundle / max_colocate_count).
-            # Three colocated roles (actor, rollout, reward) need 3 CPUs; keep +1 spare
-            # so WorkerGroup init helper tasks (get_master_addr_port) can still schedule
-            # when all three roles already occupy a bundle.
-            # NOTE(claude): without the spare CPU, SubRayResourcePool init can deadlock
-            # because every helper task is pinned to pgs[0] bundle 0
+            # PSRL assigns one worker group to each resource pool.
             resource_pool = RayResourcePool(
                 process_on_nodes=process_on_nodes,
                 use_gpu=True,
@@ -69,10 +147,45 @@ class ResourcePoolManager:
             self.resource_pool_dict[resource_pool_name] = resource_pool
 
         self._check_resource_available()
+        self._create_elastic_replica_pools(device_name=device_name)
 
-    def get_resource_pool(self, role: PSRL_Role, instance_id: int = 0) -> RayResourcePool:
-        """Get the resource pool of the worker_cls for the given instance_id."""
-        return self.resource_pool_dict[self.mapping[role][instance_id]]
+    def _create_elastic_replica_pools(self, device_name: str) -> None:
+        """Slice parent elastic pools into per-replica `SubRayResourcePool` objects."""
+        if not self.elastic_replica_placements:
+            return
+
+        parent_ids = {placement.pool_id for placement in self.elastic_replica_placements.values()}
+        for pool_id in parent_ids:
+            parent = self.resource_pool_dict[pool_id]
+            parent.get_placement_groups(strategy="STRICT_PACK", device_name=device_name)
+
+        for tag, placement in self.elastic_replica_placements.items():
+            if tag in self.resource_pool_spec:
+                raise ValueError(f"Elastic replica tag {tag!r} collides with a physical resource pool name.")
+            parent = self.resource_pool_dict[placement.pool_id]
+            self.resource_pool_dict[tag] = SubRayResourcePool(
+                process_on_nodes=parent.store,
+                use_gpu=parent.use_gpu,
+                name_prefix=f"{parent.name_prefix}_{tag}",
+                max_colocate_count=parent.max_colocate_count,
+                detached=parent.detached,
+                accelerator_type=parent.accelerator_type,
+                resource_num_per_bundle=parent.resource_num_per_bundle,
+                placement_groups=parent.pgs,
+                start_bundle_index=placement.start_bundle_index,
+                subgroup_world_size=placement.world_size,
+            )
+            psrl_logger.info(
+                "Elastic replica placement: tag=%r, pool=%r, start_bundle_index=%s, world_size=%s.",
+                tag,
+                placement.pool_id,
+                placement.start_bundle_index,
+                placement.world_size,
+            )
+
+    def get_resource_pool(self, role: PSRL_Role, replica_idx: int = 0) -> RayResourcePool:
+        """Get the resource pool of the worker_cls for the given replica_idx."""
+        return self.resource_pool_dict[self.mapping[role][replica_idx]]
 
     def get_n_gpus(self) -> int:
         """Get the number of gpus in this cluster."""
@@ -86,9 +199,7 @@ class ResourcePoolManager:
             for node, node_info in node_available_resources.items()
         }
 
-        # check total required gpus can be satisfied
-        # Use a small epsilon to avoid false failure from float precision (e.g. 64.0 vs 64.00000000000004)
-        # when resource_num_per_bundle has floats like 0.9/0.1; real shortages (e.g. 64.9) still fail.
+        # Tolerate floating-point noise in fractional bundle resources without masking real shortages.
         _GPU_EPS = 1e-9
         total_available_gpus = sum(node_available_gpus.values())
         total_required_gpus = sum(
@@ -113,94 +224,6 @@ class PSRL_DummyWorker(Worker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def init_model(self):
         return
-
-
-def need_reference_policy(
-    role_worker_mapping: dict[PSRL_Role, WorkerType],
-) -> bool:
-    """Given a role worker mapping, do we need ref policy."""
-    return PSRL_Role.RefPolicy in role_worker_mapping
-
-
-def need_reward_model(
-    role_worker_mapping: dict[PSRL_Role, WorkerType],
-) -> bool:
-    """Given a role worker mapping, do we need reward model."""
-    return PSRL_Role.RewardModel in role_worker_mapping
-
-
-def need_critic(config: DictConfig) -> bool:
-    """Given a config, do we need critic."""
-    if config.critic.enable is not None:
-        return bool(config.critic.enable)
-    elif config.algorithm.adv_estimator == AdvantageEstimator.GAE:
-        return True
-    else:
-        warnings.warn(
-            "Disabled critic as algorithm.adv_estimator != gae. If it is not intended, please set critic.enable=True",
-            stacklevel=2,
-        )
-        return False
-
-
-def compute_response_mask(data: DataProto):
-    """Compute the attention mask for the response part of the sequence.
-
-    This function extracts the portion of the attention mask that corresponds to the model's response,
-    which is used for masking computations that should only apply to response tokens.
-
-    Args:
-        data (DataProto): The data containing batched model outputs and inputs.
-
-    Returns:
-        torch.Tensor: The attention mask for the response tokens.
-    """
-    responses = data.batch["responses"]
-    response_length = responses.size(1)
-    attention_mask = data.batch["attention_mask"]
-    return attention_mask[:, -response_length:]
-
-
-def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty="kl"):
-    """Apply KL penalty to the token-level rewards.
-
-    This function computes the KL divergence between the reference policy and current policy,
-    then applies a penalty to the token-level rewards based on this divergence.
-
-    Args:
-        data (DataProto): The data containing batched model outputs and inputs.
-        kl_ctrl (core_algos.AdaptiveKLController): Controller for adaptive KL penalty.
-        kl_penalty (str, optional): Type of KL penalty to apply. Defaults to "kl".
-
-    Returns:
-        tuple: A tuple containing:
-            - The updated data with token-level rewards adjusted by KL penalty
-            - A dictionary of metrics related to the KL penalty
-    """
-    response_mask = data.batch["response_mask"]
-    token_level_scores = data.batch["token_level_scores"]
-    batch_size = data.batch.batch_size[0]
-
-    # compute kl between ref_policy and current policy
-    # When apply_kl_penalty, algorithm.use_kl_in_reward=True, so the reference model has been enabled.
-    kld = core_algos.kl_penalty(
-        data.batch["old_log_probs"], data.batch["ref_log_prob"], kl_penalty=kl_penalty
-    )  # (batch_size, response_length)
-    kld = kld * response_mask
-    beta = kl_ctrl.value
-
-    token_level_rewards = token_level_scores - beta * kld
-
-    current_kl = masked_mean(kld, mask=response_mask, axis=-1)  # average over sequence
-    current_kl = torch.mean(current_kl, dim=0).item()
-
-    # according to https://github.com/huggingface/trl/blob/951ca1841f29114b969b57b26c7d3e80a39f75a0/trl/trainer/ppo_trainer.py#L837
-    kl_ctrl.update(current_kl=current_kl, n_steps=batch_size)
-    data.batch["token_level_rewards"] = token_level_rewards
-
-    metrics = {"actor/reward_kl_penalty": current_kl, "actor/reward_kl_penalty_coeff": beta}
-
-    return data, metrics
 
 
 def PSRL_compute_advantage(
@@ -230,7 +253,8 @@ def PSRL_compute_advantage(
     Returns:
         DataProto: The updated data with computed advantages and returns.
     """
-    # Back-compatible with trainers that do not compute response mask in fit
+    # AGENT(VERL): PSRL uses `parent_id` instead of `uid` to index each GRPO response group and prompt.
+    # Remain compatible with trainers that do not compute a response mask in fit.
     if "response_mask" not in data.batch:
         data.batch["response_mask"] = compute_response_mask(data)
     # prepare response group
@@ -280,16 +304,109 @@ def PSRL_compute_advantage(
             adv_kwargs["index"] = data.non_tensor_batch["parent_id"]
         elif "uid" in data.non_tensor_batch:  # optional
             adv_kwargs["index"] = data.non_tensor_batch["uid"]
-        else:
-            pass
         if "reward_baselines" in data.batch:  # optional
             adv_kwargs["reward_baselines"] = data.batch["reward_baselines"]
+        # GDPO: pass raw data for per-dimension reward extraction
+        if adv_estimator in (AdvantageEstimator.GDPO, "gdpo"):
+            adv_kwargs["non_tensor_batch"] = data.non_tensor_batch
+            adv_kwargs["batch"] = data.batch
+        # Add sum_pi_squared for Optimal Token Baseline
+        if adv_estimator in (AdvantageEstimator.OPTIMAL_TOKEN_BASELINE, AdvantageEstimator.TIR_OPTIMAL_TOKEN_BASELINE):
+            # Check if sum_pi_squared is available
+            assert "sum_pi_squared" in data.batch, (
+                "Step-dependent optimal baseline requires sum_pi_squared from actor. "
+                "Please set actor.calculate_sum_pi_squared=True in config."
+            )
+            adv_kwargs["sum_pi_squared"] = data.batch["sum_pi_squared"]
+            # `old_log_probs` provides the path variance proxy for the baseline.
+            adv_kwargs["old_log_probs"] = data.batch["old_log_probs"]
+            # Get pre-computed rollout IS weights if available
+            rollout_is_weights = data.batch.get("rollout_is_weights", None)
+            adv_kwargs["rollout_is_weights"] = rollout_is_weights
 
         # calculate advantage estimator
         advantages, returns = adv_estimator_fn(**adv_kwargs)
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
     return data
+
+
+def compute_advantage_for_multi_trajectories(
+    data: DataProto,
+    batch_keys: list[str],
+    adv_estimator,
+    gamma: float = 1.0,
+    lam: float = 1.0,
+    num_repeat: int = 1,
+    norm_adv_by_std_in_grpo: bool = True,
+    config: Any = None,
+) -> DataProto:
+    """Compute GRPO advantages from each session's final output. For non-GRPO
+    estimators, such as GAE, are delegated to the original compute_advantage() unchanged.
+
+    For GRPO, only the final output in each ``{uid}_{session_id}`` group participates
+    in advantage computation, and the result is broadcast to the other outputs in
+    the same session. Sessions whose AgentLoop returns ``None`` simply do not appear
+    in ``batch_keys``. Non-GRPO estimators, such as GAE, are delegated to the
+    original ``compute_advantage()`` unchanged.
+    """
+    if adv_estimator != core_algos.AdvantageEstimator.GRPO:
+        return PSRL_compute_advantage(
+            data,
+            adv_estimator=adv_estimator,
+            gamma=gamma,
+            lam=lam,
+            num_repeat=num_repeat,
+            norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+            config=config,
+        )
+
+    # final session of each agent loop: uid => (index, row_index)
+    final_sessions: dict[str, tuple[int, int]] = {}
+    row_session_keys = []
+    for i, key in enumerate(batch_keys):
+        # A padding key ends in a UUID, not a trajectory index.
+        # Its unique `parent_id` and zero mask keep the standalone sample at zero advantage.
+        fields = [key] if key.startswith("pad_") else key.rsplit("_", 1)
+        if len(fields) == 2:
+            uid, index = fields[0], int(fields[1])
+            session_key = uid
+            if session_key not in final_sessions or final_sessions[session_key][0] < index:
+                final_sessions[session_key] = (index, i)
+        else:
+            session_key = key
+            final_sessions[session_key] = (0, i)
+        row_session_keys.append(session_key)
+
+    # final session indices in batch data
+    final_indices = []
+    session_key_to_local_index = {}
+    for session_key, (_, row_index) in final_sessions.items():
+        final_indices.append(row_index)
+        session_key_to_local_index[session_key] = len(final_indices) - 1
+    row_to_local_index = [session_key_to_local_index[session_key] for session_key in row_session_keys]
+
+    # select final sessions from batch data for group relative advantage computation
+    final_data = PSRL_compute_advantage(
+        data.select_idxs(final_indices),
+        adv_estimator=adv_estimator,
+        gamma=gamma,
+        lam=lam,
+        num_repeat=num_repeat,
+        norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+        config=config,
+    )
+    first_nnz_indices = final_data.batch["response_mask"].argmax(dim=1)
+    final_scores = final_data.batch["advantages"][torch.arange(len(final_data)), first_nnz_indices]
+
+    # scatter final scores to all rows in batch data
+    scores = final_scores[row_to_local_index]
+    scores = scores.unsqueeze(-1) * data.batch["response_mask"]
+
+    data.batch["advantages"] = scores
+    data.batch["returns"] = scores
+    return data
+
 
 def _stats_to_timestamps(stats) -> dict | None:
     if stats is None:
@@ -327,6 +444,51 @@ def _stats_to_timestamps(stats) -> dict | None:
     }
 
 
+def compute_rm_token_metrics(
+    reward_extra_infos,
+    global_token_num,
+    timing_raw: dict[str, float],
+    n_gpus: int,
+) -> dict[str, float]:
+    """
+    Combine policy tokens with reward-model tokens for one training batch.
+
+    `rm_input_length` and `rm_output_length` sum every nested `rm_input_len` and
+    `rm_output_len` in per-sample `reward_extra_info`. `overall_token_num` is
+    `sum(global_token_num)` plus those two totals. `perf/overall_throughput` uses
+    the same GPU-normalized formula as `perf/throughput`.
+
+    Args:
+        reward_extra_infos (list): Per-sample `reward_extra_info` payloads.
+        global_token_num (list): Per-sample policy prompt plus response token counts.
+        timing_raw (dict[str, float]): Stage timings. Must contain `step`.
+        n_gpus (int): GPU count used to normalize throughput.
+
+    Returns:
+        dict[str, float]: `rm_input_length`, `rm_output_length`, `overall_token_num`,
+            and `perf/overall_throughput`.
+    """
+    extra_infos = list(reward_extra_infos)
+    policy_tokens = [int(token_num) for token_num in global_token_num]
+    assert len(extra_infos) == len(policy_tokens), (
+        f"Reward extra info count {len(extra_infos)!r} does not match global_token_num count {len(policy_tokens)!r}."
+    )
+    rm_input_length = 0
+    rm_output_length = 0
+    for extra_info in extra_infos:
+        input_tokens, output_tokens = extract_reward_model_token_counts(extra_info)
+        rm_input_length += input_tokens
+        rm_output_length += output_tokens
+    overall_token_num = float(sum(policy_tokens) + rm_input_length + rm_output_length)
+    step_time = timing_raw["step"]
+    return {
+        "rm_input_length": float(rm_input_length),
+        "rm_output_length": float(rm_output_length),
+        "overall_token_num": overall_token_num,
+        "perf/overall_throughput": overall_token_num / (step_time * n_gpus),
+    }
+
+
 def record_rollout_rm_metrics(data: DataProto, output_path: str | None = None) -> list[dict]:
     """Extract rollout/reward timestamps from DataProto and optionally write to jsonl.
 
@@ -338,7 +500,8 @@ def record_rollout_rm_metrics(data: DataProto, output_path: str | None = None) -
         }
 
     Args:
-        data: DataProto containing meta_info['rollout_metrics'], meta_info['reward_metrics'] and non_tensor_batch['uid'].
+        data: DataProto containing meta_info['rollout_metrics'],
+            meta_info['reward_metrics'] and non_tensor_batch['uid'].
         output_path: If provided, append each record of this batch to the jsonl file.
 
     Returns:
@@ -377,7 +540,6 @@ def record_rollout_rm_metrics(data: DataProto, output_path: str | None = None) -
                 rec["reward_metrics"] = None
         else:
             rec["reward_metrics"] = None
- 
         records.append(rec)
 
     if output_path:

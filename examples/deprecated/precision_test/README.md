@@ -1,3 +1,11 @@
-Scripts in this directory are guaranteed to run successfully end-to-end and converge as expected. Additionally, results will be uploaded to [wandb.ai](https://wandb.ai/) website.
+# Precision Test (Deprecated)
 
-In contrast, scripts located in `*_trainer` folders are currently under testing and may contain bugs. They are primarily used for profiling and performance experiments.
+Scripts in this directory are **deprecated** historical precision / profiling experiments.
+
+For supported end-to-end training recipes (DAPO / PPO / GRPO and others marked Ready), use the top-level example folders instead:
+
+- [`examples/dapo_trainer/`](../../dapo_trainer/)
+- [`examples/ppo_trainer/`](../../ppo_trainer/)
+- [`examples/grpo_trainer/`](../../grpo_trainer/)
+
+See the root [README](../../../README.md) examples table for the full list of ready recipes.

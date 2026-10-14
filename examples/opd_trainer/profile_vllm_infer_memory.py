@@ -23,6 +23,7 @@ import time
 import uuid
 
 import torch
+from psrl.utils.logger.memory_logger import format_memory_message, get_all_gpu_memory_info, log_gpu_memory_now
 from transformers import AutoConfig, AutoTokenizer
 from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -30,15 +31,15 @@ from vllm.inputs import TokensPrompt
 from vllm.outputs import RequestOutput
 from vllm.v1.engine.async_llm import AsyncLLM
 
-from psrl.utils.logger.memory_logger import format_memory_message, get_all_gpu_memory_info, log_gpu_memory_now
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Profile vLLM TP/EP inference memory (OPD teacher path).")
     parser.add_argument("--model-path", type=str, required=True, help="HuggingFace model path or hub id.")
     parser.add_argument("--seq-len", type=int, default=4096, help="Fixed random prompt length (token ids).")
     parser.add_argument("--topk", type=int, default=16, help="Top-k logprobs per scored token (prompt_logprobs).")
-    parser.add_argument("--prompt-len", type=int, default=0, help="Leading prompt tokens (not scored); see --response-len.")
+    parser.add_argument(
+        "--prompt-len", type=int, default=0, help="Leading prompt tokens (not scored); see --response-len."
+    )
     parser.add_argument(
         "--response-len",
         type=int,
@@ -46,7 +47,9 @@ def parse_args() -> argparse.Namespace:
         help="Trailing tokens to score via prompt_logprobs. Default: seq_len - prompt_len (or seq_len-1 if prompt_len=0).",
     )
     parser.add_argument("--tp-size", type=int, default=1, help="vLLM tensor_parallel_size.")
-    parser.add_argument("--ep-size", type=int, default=1, help="vLLM expert parallel (enable_expert_parallel when > 1).")
+    parser.add_argument(
+        "--ep-size", type=int, default=1, help="vLLM expert parallel (enable_expert_parallel when > 1)."
+    )
     parser.add_argument("--pp-size", type=int, default=1, help="vLLM pipeline_parallel_size.")
     parser.add_argument("--dtype", type=str, default="bfloat16", choices=("bfloat16", "float16", "float32", "auto"))
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.65)
@@ -92,13 +95,9 @@ def resolve_response_len(seq_len: int, prompt_len: int, response_len: int | None
     else:
         resolved = response_len
     if resolved <= 0 or resolved >= seq_len:
-        raise ValueError(
-            f"response_len must be in (0, seq_len), got {resolved=} {seq_len=} {prompt_len=}."
-        )
+        raise ValueError(f"response_len must be in (0, seq_len), got {resolved=} {seq_len=} {prompt_len=}.")
     if prompt_len > 0 and prompt_len + resolved > seq_len:
-        raise ValueError(
-            f"prompt_len + response_len exceeds seq_len: {prompt_len=} {resolved=} {seq_len=}."
-        )
+        raise ValueError(f"prompt_len + response_len exceeds seq_len: {prompt_len=} {resolved=} {seq_len=}.")
     return resolved
 
 
@@ -164,9 +163,7 @@ def extract_teacher_topk_from_output(
 
 def build_async_llm(args: argparse.Namespace) -> AsyncLLM:
     max_model_len = args.max_model_len if args.max_model_len is not None else args.seq_len + 1
-    max_num_batched_tokens = (
-        args.max_num_batched_tokens if args.max_num_batched_tokens is not None else max_model_len
-    )
+    max_num_batched_tokens = args.max_num_batched_tokens if args.max_num_batched_tokens is not None else max_model_len
 
     llm_kwargs: dict = {
         "model": args.model_path,
@@ -208,9 +205,7 @@ def build_async_llm(args: argparse.Namespace) -> AsyncLLM:
         }
 
     async_engine_params = inspect.signature(AsyncEngineArgs.__init__).parameters
-    supports_var_keyword = any(
-        param.kind == inspect.Parameter.VAR_KEYWORD for param in async_engine_params.values()
-    )
+    supports_var_keyword = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in async_engine_params.values())
     if not supports_var_keyword:
         supported_keys = {key for key, param in async_engine_params.items() if key != "self"}
         llm_kwargs = {key: value for key, value in llm_kwargs.items() if key in supported_keys}

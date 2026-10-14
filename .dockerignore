@@ -1,0 +1,28 @@
+.git
+.github
+.claude
+.agents
+.codex
+.idea
+.vscode
+
+# Vendored development trees are cloned at pinned revisions by the Dockerfiles.
+third_party
+third_party_old*
+
+# Local outputs and caches.
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.ruff_cache
+**/.mypy_cache
+**/.DS_Store
+.coverage
+htmlcov
+build
+dist
+outputs
+wandb
+
+# Documentation and test data are not needed to install the runtime package.
+docs/_build

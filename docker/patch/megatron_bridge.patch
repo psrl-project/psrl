@@ -1,0 +1,884 @@
+diff --git a/src/megatron/bridge/models/common/base.py b/src/megatron/bridge/models/common/base.py
+index 8342dabc..67b9454e 100644
+--- a/src/megatron/bridge/models/common/base.py
++++ b/src/megatron/bridge/models/common/base.py
+@@ -1,22 +1,149 @@
+-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
++# Copyright (c) 2025-2026, NVIDIA CORPORATION.  All rights reserved.
+ #
+ # Licensed under the Apache License, Version 2.0 (the "License");
+ # you may not use this file except in compliance with the License.
+-# You may obtain a copy of the License at
+-#
+-#     http://www.apache.org/licenses/LICENSE-2.0
+-#
+-# Unless required by applicable law or agreed to in writing, software
+-# distributed under the License is distributed on an "AS IS" BASIS,
+-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ 
+-from megatron.training.models.base import (
+-    BuildConfigT,  # noqa: F401
+-    ModelBuilder,  # noqa: F401
+-    ModelConfig,  # noqa: F401
+-    ModelT,  # noqa: F401
+-    Serializable,  # noqa: F401
+-    compose_hooks,  # noqa: F401
+-)
++import abc
++import importlib
++from dataclasses import dataclass, field, is_dataclass
++from dataclasses import fields as dataclass_fields
++from typing import Any, Callable, ClassVar, Generic, Protocol, TypeVar, runtime_checkable
++
++from megatron.core.distributed import DistributedDataParallelConfig
++from megatron.core.enums import ModelType
++from megatron.core.process_groups_config import ProcessGroupCollection
++from megatron.core.transformer import MegatronModule
++from megatron.core.transformer.module import Float16Module
++
++
++@runtime_checkable
++class Serializable(Protocol):
++    """Protocol for serializable configurations."""
++
++    def as_dict(self) -> dict[str, Any]:
++        """Serialize to dictionary with target metadata."""
++        ...
++
++    @classmethod
++    def from_dict(cls, data: dict[str, Any]) -> "Serializable":
++        """Deserialize from dictionary with target metadata."""
++        ...
++
++
++@dataclass
++class ModelConfig:
++    """Base class for model configurations."""
++
++    builder: ClassVar[str]
++    restore_modelopt_state: bool = False
++    extra_checkpoint_metadata: dict[str, Any] | None = None
++    pre_wrap_hooks: list[Callable[[list[MegatronModule]], list[MegatronModule]]] = field(default_factory=list)
++    post_wrap_hooks: list[Callable[[list[MegatronModule]], list[MegatronModule]]] = field(default_factory=list)
++
++    def get_builder_cls(self) -> type:
++        """Get the builder class for this model config."""
++        module_path, class_name = self.builder.rsplit(".", 1)
++        module = importlib.import_module(module_path)
++        return getattr(module, class_name)
++
++    def as_dict(self) -> dict[str, Any]:
++        """Serialize config to a plain dictionary."""
++
++        def _as_dict(config):
++            result = {"_target_": f"{config.__class__.__module__}.{config.__class__.__qualname__}"}
++            for f in dataclass_fields(config):
++                value = getattr(config, f.name)
++                if callable(value) or f.name.startswith("_") or f.name in ("pre_wrap_hooks", "post_wrap_hooks"):
++                    continue
++
++                if is_dataclass(value):
++                    result[f.name] = _as_dict(value)
++                else:
++                    result[f.name] = value
++
++            return result
++
++        result = _as_dict(self)
++        result["_builder_"] = self.builder
++        return result
++
++    @classmethod
++    def from_dict(cls, data: dict[str, Any]) -> "ModelConfig":
++        """Deserialize a config from a dictionary produced by :meth:`as_dict`."""
++
++        def _from_dict(subdata):
++            target = subdata.get("_target_")
++            if target is None:
++                raise ValueError("Cannot deserialize: missing '_target_' field")
++
++            module_path, class_name = target.rsplit(".", 1)
++            module = importlib.import_module(module_path)
++            config_cls = getattr(module, class_name)
++
++            valid_fields = {f.name for f in dataclass_fields(config_cls)}
++            filtered_data = {k: v for k, v in subdata.items() if k in valid_fields and not k.startswith("_")}
++
++            subconfigs = {}
++            for key, value in filtered_data.items():
++                if isinstance(value, dict) and "_target_" in value:
++                    subconfigs[key] = _from_dict(value)
++            filtered_data.update(subconfigs)
++
++            return config_cls(**filtered_data)
++
++        result = _from_dict(data)
++        result.builder = data["_builder_"]
++        return result
++
++
++ModelT = TypeVar("ModelT", bound=MegatronModule)
++BuildConfigT = TypeVar("BuildConfigT", bound=ModelConfig)
++
++
++class ModelBuilder(abc.ABC, Generic[ModelT, BuildConfigT]):
++    """Abstract base class for model builders."""
++
++    def __init__(self, model_config: ModelConfig):
++        self._model_config = model_config
++
++    @abc.abstractmethod
++    def build_model(
++        self,
++        pg_collection: ProcessGroupCollection,
++        pre_process: bool | None = None,
++        post_process: bool | None = None,
++        vp_stage: int | None = None,
++    ) -> ModelT:
++        """Build a single model stage."""
++        ...
++
++    @abc.abstractmethod
++    def build_distributed_models(
++        self,
++        pg_collection: ProcessGroupCollection,
++        ddp_config: DistributedDataParallelConfig | None = None,
++        overlap_param_gather_with_optimizer_step: bool = False,
++        use_megatron_fsdp: bool = False,
++        use_torch_fsdp2: bool = False,
++        wrap_with_ddp: bool = True,
++        data_parallel_random_init: bool = False,
++        mixed_precision_wrapper: Callable[[Any, MegatronModule], MegatronModule] | None = Float16Module,
++        model_type: ModelType = ModelType.encoder_or_decoder,
++    ) -> list[ModelT]:
++        """Build and wrap distributed model stages."""
++        ...
++
++
++def compose_hooks(
++    hooks: list[Callable[[list[MegatronModule]], list[MegatronModule]]],
++) -> Callable[[list[MegatronModule]], list[MegatronModule]]:
++    """Compose pre/post-wrap hooks into a single function."""
++
++    def composed_hook(model: list[MegatronModule]) -> list[MegatronModule]:
++        for hook in hooks:
++            model = hook(model)
++        return model
++
++    return composed_hook
+\ No newline at end of file
+diff --git a/src/megatron/bridge/models/common/unimodal.py b/src/megatron/bridge/models/common/unimodal.py
+index efa91628..b11742ed 100644
+--- a/src/megatron/bridge/models/common/unimodal.py
++++ b/src/megatron/bridge/models/common/unimodal.py
+@@ -1,22 +1,261 @@
+-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
++# Copyright (c) 2025-2026, NVIDIA CORPORATION.  All rights reserved.
+ #
+ # Licensed under the Apache License, Version 2.0 (the "License");
+ # you may not use this file except in compliance with the License.
+-# You may obtain a copy of the License at
+-#
+-#     http://www.apache.org/licenses/LICENSE-2.0
+-#
+-# Unless required by applicable law or agreed to in writing, software
+-# distributed under the License is distributed on an "AS IS" BASIS,
+-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ 
+-from megatron.training.models.dist_utils import (
+-    _ddp_wrap,  # noqa: F401
+-    _print_num_params,  # noqa: F401
+-    _wrap_with_mp_wrapper,  # noqa: F401
+-    build_virtual_pipeline_stages,  # noqa: F401
+-    to_empty_if_meta_device,  # noqa: F401
+-    unimodal_build_distributed_models,  # noqa: F401
++import logging
++from typing import Any, Callable
++
++import torch
++from megatron.core import tensor_parallel
++from megatron.core.distributed import (
++    DistributedDataParallel,
++    DistributedDataParallelConfig,
++    FullyShardedDataParallel,
+ )
++from megatron.core.enums import ModelType
++from megatron.core.optimizer.distrib_optimizer import DistributedOptimizer
++from megatron.core.process_groups_config import ProcessGroupCollection
++from megatron.core.transformer import MegatronModule, TransformerConfig
++from megatron.core.transformer.module import Float16Module
++from megatron.core.utils import get_model_config
++
++
++try:
++    from megatron.core.distributed import TorchFullyShardedDataParallel
++
++    HAVE_FSDP2 = True
++except ImportError:
++    HAVE_FSDP2 = False
++
++try:
++    from megatron.core.fp8_utils import correct_amax_history_if_needed
++except ImportError:
++    correct_amax_history_if_needed = None
++
++
++logger = logging.getLogger(__name__)
++
++
++def unimodal_build_distributed_models(
++    build_model_func: Callable,
++    transformer_config: TransformerConfig,
++    pg_collection: ProcessGroupCollection,
++    ddp_config: DistributedDataParallelConfig | None = None,
++    overlap_param_gather_with_optimizer_step: bool = False,
++    use_megatron_fsdp: bool = False,
++    use_torch_fsdp2: bool = False,
++    wrap_with_ddp: bool = True,
++    data_parallel_random_init: bool = False,
++    mixed_precision_wrapper: Callable[[Any, MegatronModule], MegatronModule] | None = Float16Module,
++    pre_wrap_hook: Callable[[list[MegatronModule]], list[MegatronModule]] | None = None,
++    model_type: ModelType = ModelType.encoder_or_decoder,
++) -> list[MegatronModule]:
++    """Build model stages and wrap them for distributed training."""
++    if wrap_with_ddp and not ddp_config:
++        raise ValueError("ddp_config is required when wrap_with_ddp is True")
++
++    vp_size = transformer_config.virtual_pipeline_model_parallel_size
++    init_model_with_meta_device = transformer_config.init_model_with_meta_device
++    if init_model_with_meta_device:
++        with torch.device("meta"):
++            model_list = build_virtual_pipeline_stages(build_model_func, pg_collection, vp_size, model_type)
++    else:
++        model_list = build_virtual_pipeline_stages(build_model_func, pg_collection, vp_size, model_type)
++
++    if pre_wrap_hook is not None:
++        if not callable(pre_wrap_hook):
++            raise TypeError("pre_wrap_hook must be a callable")
++        new_model_list = pre_wrap_hook(model_list)
++        if new_model_list is not None:
++            model_list = new_model_list
++        else:
++            logger.warning("Final pre-wrap hook returned None; keeping original model list.")
++
++    for model_module in model_list:
++        for param in model_module.parameters():
++            tensor_parallel.set_defaults_if_not_set_tensor_model_parallel_attributes(param)
++
++    _print_num_params(model_list, pg_collection=pg_collection)
++
++    use_cpu_initialization = transformer_config.use_cpu_initialization
++    if not use_torch_fsdp2 and not use_cpu_initialization and not init_model_with_meta_device:
++        for model_module in model_list:
++            model_module.cuda(torch.cuda.current_device())
++
++    model_list = _wrap_with_mp_wrapper(model_list, transformer_config, mixed_precision_wrapper)
++
++    if init_model_with_meta_device and not use_torch_fsdp2 and not use_megatron_fsdp:
++        model_list = [
++            to_empty_if_meta_device(model_module, device=torch.device("cuda")) for model_module in model_list
++        ]
++
++    if correct_amax_history_if_needed is not None:
++        correct_amax_history_if_needed(model_list)
++
++    if wrap_with_ddp:
++        model_list = _ddp_wrap(
++            model_list,
++            data_parallel_random_init,
++            ddp_config,
++            overlap_param_gather_with_optimizer_step,
++            use_megatron_fsdp=use_megatron_fsdp,
++            use_torch_fsdp2=use_torch_fsdp2,
++            pg_collection=pg_collection,
++        )
++
++    return model_list
++
++
++def _print_num_params(model: list[MegatronModule], pg_collection: ProcessGroupCollection) -> None:
++    """Print model parameter count on data-parallel and context-parallel rank 0."""
++    if (pg_collection.dp.rank() == 0) and (pg_collection.cp.rank() == 0):
++        print(
++            " > number of parameters on (tensor, pipeline) model parallel rank ({}, {}): {}".format(
++                pg_collection.tp.rank(),
++                pg_collection.pp.rank(),
++                sum([sum([p.nelement() for p in model_module.parameters()]) for model_module in model]),
++            ),
++            flush=True,
++        )
++
++def _wrap_with_mp_wrapper(
++    model_list: list[MegatronModule],
++    transformer_config: TransformerConfig,
++    mixed_precision_wrapper: Callable[[Any, MegatronModule], MegatronModule] | None = Float16Module,
++) -> list[MegatronModule]:
++    """Apply mixed-precision wrapper when configured."""
++    if (transformer_config.fp16 or transformer_config.bf16) and mixed_precision_wrapper is not None:
++        model_list = [mixed_precision_wrapper(transformer_config, model_module) for model_module in model_list]
++
++        for model_module in model_list:
++            for submodule in model_module.modules():
++                if hasattr(submodule, "_maintain_float32_expert_bias"):
++                    submodule._maintain_float32_expert_bias()
++
++    return model_list
++
++
++def _ddp_wrap(
++    model: list[MegatronModule],
++    data_parallel_random_init: bool,
++    ddp_config: DistributedDataParallelConfig,
++    overlap_param_gather_with_optimizer_step: bool,
++    use_megatron_fsdp: bool = False,
++    use_torch_fsdp2: bool = False,
++    *,
++    pg_collection: ProcessGroupCollection,
++) -> list[MegatronModule]:
++    """Wrap model chunks with DDP, Megatron FSDP, or Torch FSDP2."""
++    if use_megatron_fsdp:
++        data_parallel_cls = FullyShardedDataParallel
++        if use_torch_fsdp2:
++            raise ValueError("Using use_megatron_fsdp and use_torch_fsdp2 at the same time is not supported.")
++    elif use_torch_fsdp2:
++        assert HAVE_FSDP2, "Torch FSDP2 requires torch>=2.4.0"
++        data_parallel_cls = TorchFullyShardedDataParallel
++    else:
++        data_parallel_cls = DistributedDataParallel
++
++    if not use_torch_fsdp2:
++        if ddp_config.num_buckets is not None:
++            num_parameters = sum([sum([p.nelement() for p in model_module.parameters()]) for model_module in model])
++            ddp_config.bucket_size = num_parameters // ddp_config.num_buckets
++
++        if ddp_config.bucket_size is None:
++            ddp_config.bucket_size = max(40000000, 1000000 * pg_collection.dp_cp.size())
++        if not ddp_config.overlap_grad_reduce:
++            ddp_config.bucket_size = None
++
++    ddp_stream = torch.cuda.Stream()
++    ddp_stream.wait_stream(torch.cuda.current_stream())
++    with torch.cuda.stream(ddp_stream):
++        dp_init_kwargs = {}
++        if not use_torch_fsdp2:
++            dp_init_kwargs["pg_collection"] = pg_collection
++
++        wrapped_model = []
++        for model_chunk_idx, model_chunk in enumerate(model):
++            chunk_kwargs = dict(dp_init_kwargs)
++            disable_bucketing = model_chunk_idx > 0 or overlap_param_gather_with_optimizer_step
++
++            if ddp_config.use_distributed_optimizer and data_parallel_cls is DistributedDataParallel:
++                all_params = [p for p in model_chunk.parameters() if p.requires_grad]
++                pp_rank = pg_collection.pp.rank()
++                effective_bucket_size = None if disable_bucketing or pp_rank > 0 else ddp_config.bucket_size
++                chunk_kwargs["full_param_layout"] = DistributedOptimizer.compute_full_param_layout(
++                    all_params,
++                    effective_bucket_size,
++                    pg_collection.dp_cp.size(),
++                    ddp_config,
++                    expert_data_parallel_world_size=pg_collection.expt_dp.size(),
++                )
++
++            wrapped_chunk = data_parallel_cls(
++                config=get_model_config(model_chunk),
++                ddp_config=ddp_config,
++                module=model_chunk,
++                disable_bucketing=disable_bucketing,
++                **chunk_kwargs,
++            )
++            wrapped_model.append(wrapped_chunk)
++        model = wrapped_model
++
++    torch.cuda.current_stream().wait_stream(ddp_stream)
++
++    if data_parallel_random_init:
++        for model_module in model:
++            model_module.broadcast_params()
++
++    return model
++
++
++def build_virtual_pipeline_stages(
++    build_model_func: Callable,
++    pg_collection: ProcessGroupCollection,
++    vp_size: int | None,
++    model_type: ModelType = ModelType.encoder_or_decoder,
++) -> list[MegatronModule]:
++    """Build virtual pipeline stages if virtual pipeline parallelism is enabled."""
++    from megatron.core.pipeline_parallel.utils import (
++        is_pp_first_stage,
++        is_pp_last_stage,
++        is_vp_first_stage,
++        is_vp_last_stage,
++    )
++
++    pp_group = pg_collection.pp
++    if pp_group.size() > 1 and vp_size is not None:
++        model_list = []
++        for vp_stage in range(vp_size):
++            pre_process = is_vp_first_stage(vp_stage=vp_stage, vp_size=vp_size) and is_pp_first_stage(pp_group)
++            post_process = is_vp_last_stage(vp_stage=vp_stage, vp_size=vp_size) and is_pp_last_stage(pp_group)
++            model = build_model_func(
++                pg_collection,
++                pre_process=pre_process,
++                post_process=post_process,
++                vp_stage=vp_stage,
++            )
++            model.model_type = model_type
++            model_list.append(model)
++    else:
++        pre_process = is_pp_first_stage(pp_group)
++        post_process = is_pp_last_stage(pp_group)
++        model = build_model_func(pg_collection, pre_process=pre_process, post_process=post_process)
++        model.model_type = model_type
++        model_list = [model]
++
++    return model_list
++
++
++def to_empty_if_meta_device(module: torch.nn.Module, *, device: torch.device, recurse=True):
++    """Move tensors to ``device`` while materializing meta-device tensors with empty storage."""
++
++    def _empty_like_if_meta(tensor: torch.Tensor, *, device: torch.device):
++        if tensor.device == torch.device("meta"):
++            return torch.empty_like(tensor, device=device)
++        return tensor.to(device)
++
++    return module._apply(lambda t: _empty_like_if_meta(t, device=device), recurse=recurse)
+\ No newline at end of file
+diff --git a/src/megatron/bridge/training/utils/log_utils.py b/src/megatron/bridge/training/utils/log_utils.py
+index fabf5409..107cfc57 100644
+--- a/src/megatron/bridge/training/utils/log_utils.py
++++ b/src/megatron/bridge/training/utils/log_utils.py
+@@ -12,16 +12,40 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ 
++import logging
+ import os
++from datetime import datetime
++from functools import partial
++from logging import Filter, LogRecord
++from typing import Callable
+ 
+-from megatron.training.utils.log_utils import (
+-    add_filter_to_all_loggers,  # noqa: F401
+-    append_to_progress_log,  # noqa: F401
+-    barrier_and_log,  # noqa: F401
+-    module_filter,  # noqa: F401
+-    warning_filter,  # noqa: F401
+-)
+-from megatron.training.utils.log_utils import setup_logging as _mlm_setup_logging
++import torch
++
++from megatron.bridge.utils.common_utils import get_rank_safe, get_world_size_safe, print_rank_0
++
++
++def warning_filter(record: LogRecord) -> bool:
++    """Filter out warning-level log records."""
++    return record.levelno != logging.WARNING
++
++
++def module_filter(record: LogRecord, modules_to_filter: list[str]) -> bool:
++    """Filter out log records whose logger name starts with configured modules."""
++    for module in modules_to_filter:
++        if record.name.startswith(module):
++            return False
++    return True
++
++
++def add_filter_to_all_loggers(log_filter: Filter | Callable[[LogRecord], bool]) -> None:
++    """Add a filter to the root logger and all existing loggers.
++
++    Args:
++        log_filter: Logging filter instance or callable.
++    """
++    logging.getLogger().addFilter(log_filter)
++    for logger_name in logging.root.manager.loggerDict:
++        logging.getLogger(logger_name).addFilter(log_filter)
+ 
+ 
+ def setup_logging(
+@@ -32,9 +56,8 @@ def setup_logging(
+ ) -> None:
+     """Set up logging level and filters for the application.
+ 
+-    Thin wrapper around :func:`megatron.training.utils.log_utils.setup_logging`
+-    that also honors the legacy Bridge env var ``MEGATRON_BRIDGE_LOGGING_LEVEL``
+-    by promoting it to ``MEGATRON_LOGGING_LEVEL`` when the latter is unset.
++    This mirrors the former Megatron-LM logging helper and also honors the legacy
++    Bridge env var ``MEGATRON_BRIDGE_LOGGING_LEVEL``.
+ 
+     Logging Level Precedence (matches MLM):
+     1. ``logging_level`` argument
+@@ -49,15 +72,54 @@ def setup_logging(
+                                    loggers. If False (default), only sets the level
+                                    for the root logger and loggers starting with 'megatron.bridge'.
+     """
+-    bridge_env = os.getenv("MEGATRON_BRIDGE_LOGGING_LEVEL")
+-    if bridge_env is not None:
+-        os.environ.setdefault("MEGATRON_LOGGING_LEVEL", bridge_env)
+-    _mlm_setup_logging(
+-        logging_level=logging_level,
+-        filter_warning=filter_warning,
+-        modules_to_filter=modules_to_filter,
+-        set_level_for_all_loggers=set_level_for_all_loggers,
+-    )
++    env_logging_level = os.getenv("MEGATRON_LOGGING_LEVEL")
++    if bridge_env is not None and env_logging_level is None:
++        os.environ["MEGATRON_LOGGING_LEVEL"] = bridge_env
++        env_logging_level = bridge_env
++
++    selected_level = logging.INFO
++    if env_logging_level is not None:
++        selected_level = int(env_logging_level)
++    elif bridge_env is not None:
++        selected_level = int(bridge_env)
++    if logging_level is not None:
++        selected_level = logging_level
++
++    logging.getLogger().setLevel(selected_level)
++    for logger_name in logging.root.manager.loggerDict:
++        if set_level_for_all_loggers or logger_name.startswith("megatron.bridge"):
++            logging.getLogger(logger_name).setLevel(selected_level)
++
++    if filter_warning:
++        add_filter_to_all_loggers(warning_filter)
++    if modules_to_filter:
++        add_filter_to_all_loggers(partial(module_filter, modules_to_filter=modules_to_filter))
++
++
++def append_to_progress_log(save_dir: str, string: str, barrier: bool = True) -> None:
++    """Append a formatted rank-0 message to ``progress.txt`` under ``save_dir``."""
++    if save_dir is None:
++        return
++
++    progress_log_filename = os.path.join(save_dir, "progress.txt")
++    if barrier and torch.distributed.is_initialized():
++        torch.distributed.barrier()
++    if get_rank_safe() == 0:
++        os.makedirs(os.path.dirname(progress_log_filename), exist_ok=True)
++        with open(progress_log_filename, "a+") as progress_log:
++            job_id = os.getenv("SLURM_JOB_ID", "")
++            num_gpus = get_world_size_safe()
++            progress_log.write(
++                f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\tJob ID: {job_id}\t# GPUs: {num_gpus}\t{string}\n"
++            )
++
++
++def barrier_and_log(string: str) -> None:
++    """Synchronize initialized distributed workers and log a rank-0 timestamp."""
++    if torch.distributed.is_initialized():
++        torch.distributed.barrier()
++    time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
++    print_rank_0(f"[{string}] datetime: {time_str} ")
+ 
+ 
+ def safe_serialize(obj) -> str:
+diff --git a/src/megatron/bridge/utils/common_utils.py b/src/megatron/bridge/utils/common_utils.py
+index dfcf78a4..f89e43fd 100644
+--- a/src/megatron/bridge/utils/common_utils.py
++++ b/src/megatron/bridge/utils/common_utils.py
+@@ -1,4 +1,4 @@
+-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
++# Copyright (c) 2025-2026, NVIDIA CORPORATION.  All rights reserved.
+ #
+ # Licensed under the Apache License, Version 2.0 (the "License");
+ # you may not use this file except in compliance with the License.
+@@ -21,15 +21,15 @@ from pathlib import Path
+ import torch
+ import torch.distributed
+ from megatron.core import DistributedDataParallel as DDP
+-from megatron.core._rank_utils import safe_get_rank as get_rank_safe  # noqa: F401
+-from megatron.core._rank_utils import safe_get_world_size as get_world_size_safe  # noqa: F401
+ from megatron.core.transformer.module import Float16Module
+ from megatron.core.utils import get_batch_on_this_cp_rank
+-from megatron.training.utils.common_utils import get_local_rank_preinit  # noqa: F401
+ 
+ from megatron.bridge.utils.slurm_utils import (
++    resolve_slurm_local_rank,
+     resolve_slurm_master_addr,
+     resolve_slurm_master_port,
++    resolve_slurm_rank,
++    resolve_slurm_world_size,
+ )
+ 
+ 
+@@ -41,6 +41,76 @@ except ImportError:
+     ALL_MODULE_WRAPPER_CLASSNAMES = (DDP, Float16Module)
+ 
+ 
++def get_rank_safe() -> int:
++    """Get the current distributed rank without requiring initialized torch.distributed.
++
++    Fallback order is initialized torch.distributed, ``RANK``, ``SLURM_PROCID``,
++    then rank 0.
++
++    Returns:
++        The current global rank.
++    """
++    if torch.distributed.is_initialized():
++        return torch.distributed.get_rank()
++
++    try:
++        if "RANK" in os.environ:
++            return int(os.environ["RANK"])
++
++        slurm_rank = resolve_slurm_rank()
++        if slurm_rank is not None:
++            return slurm_rank
++
++        warnings.warn("Could not determine rank from torch.distributed, RANK, or SLURM_PROCID. Defaulting to rank 0.")
++        return 0
++    except (TypeError, ValueError):
++        return 0
++
++
++def get_world_size_safe() -> int:
++    """Get world size without requiring initialized torch.distributed.
++
++    Fallback order is initialized torch.distributed, ``WORLD_SIZE``,
++    ``SLURM_NTASKS``, then 1.
++
++    Returns:
++        The current world size.
++    """
++    if torch.distributed.is_initialized():
++        return torch.distributed.get_world_size()
++
++    if "WORLD_SIZE" in os.environ:
++        return int(os.environ["WORLD_SIZE"])
++
++    slurm_world_size = resolve_slurm_world_size()
++    if slurm_world_size is not None:
++        return slurm_world_size
++
++    warnings.warn(
++        "Could not determine world size from torch.distributed, WORLD_SIZE, or SLURM_NTASKS. "
++        "Defaulting to world size 1."
++    )
++    return 1
++
++
++def get_local_rank_preinit() -> int:
++    """Get the local rank before full distributed initialization.
++
++    Fallback order is ``LOCAL_RANK``, ``SLURM_LOCALID``, then 0.
++
++    Returns:
++        The current node-local rank.
++    """
++    if "LOCAL_RANK" in os.environ:
++        return int(os.environ["LOCAL_RANK"])
++
++    slurm_local_rank = resolve_slurm_local_rank()
++    if slurm_local_rank is not None:
++        return slurm_local_rank
++
++    warnings.warn("Could not determine local rank from LOCAL_RANK or SLURM_LOCALID. Defaulting to local rank 0.")
++    return 0
++
+ def get_last_rank() -> int:
+     """Get the last rank in the distributed group"""
+     if not torch.distributed.is_initialized():
+diff --git a/src/megatron/bridge/utils/slurm_utils.py b/src/megatron/bridge/utils/slurm_utils.py
+index 35435b11..61316dc3 100644
+--- a/src/megatron/bridge/utils/slurm_utils.py
++++ b/src/megatron/bridge/utils/slurm_utils.py
+@@ -1,4 +1,4 @@
+-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
++# Copyright (c) 2025-2026, NVIDIA CORPORATION.  All rights reserved.
+ #
+ # Licensed under the Apache License, Version 2.0 (the "License");
+ # you may not use this file except in compliance with the License.
+@@ -21,13 +21,46 @@ distributed training configuration from SLURM environment variables.
+ import os
+ import warnings
+ 
+-from megatron.core._slurm_utils import (
+-    is_slurm_job,  # noqa: F401
+-    resolve_slurm_local_rank,  # noqa: F401
+-    resolve_slurm_rank,  # noqa: F401
+-    resolve_slurm_world_size,  # noqa: F401
+-)
++def is_slurm_job() -> bool:
++    """Detect whether the current process is running under SLURM.
+ 
++    Returns:
++        True if SLURM job variables are present, otherwise False.
++    """
++    return "SLURM_NTASKS" in os.environ
++
++
++def resolve_slurm_rank() -> int | None:
++    """Get the global rank from SLURM environment variables.
++
++    Returns:
++        The global rank, or None if SLURM rank information is unavailable.
++    """
++    if not is_slurm_job():
++        return None
++    return int(os.environ["SLURM_PROCID"]) if "SLURM_PROCID" in os.environ else None
++
++
++def resolve_slurm_world_size() -> int | None:
++    """Get the world size from SLURM environment variables.
++
++    Returns:
++        The SLURM task count, or None if SLURM world-size information is unavailable.
++    """
++    if not is_slurm_job():
++        return None
++    return int(os.environ["SLURM_NTASKS"]) if "SLURM_NTASKS" in os.environ else None
++
++
++def resolve_slurm_local_rank() -> int | None:
++    """Get the local rank from SLURM environment variables.
++
++    Returns:
++        The node-local rank, or None if SLURM local-rank information is unavailable.
++    """
++    if not is_slurm_job():
++        return None
++    return int(os.environ["SLURM_LOCALID"]) if "SLURM_LOCALID" in os.environ else None
+ 
+ def resolve_slurm_master_addr() -> str | None:
+     """Parse SLURM_NODELIST to get the master node address.
+diff --git a/src/megatron/bridge/utils/vocab_utils.py b/src/megatron/bridge/utils/vocab_utils.py
+index 1f12607b..ae9929a5 100644
+--- a/src/megatron/bridge/utils/vocab_utils.py
++++ b/src/megatron/bridge/utils/vocab_utils.py
+@@ -1,4 +1,4 @@
+-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
++# Copyright (c) 2025-2026, NVIDIA CORPORATION.  All rights reserved.
+ #
+ # Licensed under the Apache License, Version 2.0 (the "License");
+ # you may not use this file except in compliance with the License.
+@@ -12,7 +12,56 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ 
+-from megatron.training.vocab_utils import (
+-    _calculate_padded_vocab_size_cached,  # noqa: F401
+-    calculate_padded_vocab_size,  # noqa: F401
+-)
++import math
++from functools import lru_cache
++
++from megatron.bridge.utils.common_utils import print_rank_0
++
++
++def calculate_padded_vocab_size(
++    vocab_size: int,
++    make_vocab_size_divisible_by: int,
++    tensor_model_parallel_size: int,
++    logging_enabled: bool = True,
++) -> int:
++    """Calculate padded vocab size for tensor parallelism.
++
++    Args:
++        vocab_size: The original vocabulary size.
++        make_vocab_size_divisible_by: Base divisibility requirement.
++        tensor_model_parallel_size: Number of tensor-parallel ranks.
++        logging_enabled: Whether to log the padding decision.
++
++    Returns:
++        The padded vocabulary size.
++    """
++    padded_size = _calculate_padded_vocab_size_cached(
++        vocab_size, make_vocab_size_divisible_by, tensor_model_parallel_size
++    )
++    if logging_enabled:
++        print_rank_0(
++            " > padded vocab (size: {}) with {} dummy tokens (new size: {})".format(
++                vocab_size,
++                padded_size - vocab_size,
++                padded_size,
++            )
++        )
++    return padded_size
++
++
++@lru_cache(maxsize=128)
++def _calculate_padded_vocab_size_cached(
++    vocab_size: int,
++    make_vocab_size_divisible_by: int,
++    tensor_model_parallel_size: int,
++) -> int:
++    """Calculate padded vocab size with argument validation and caching."""
++    if vocab_size <= 0:
++        raise ValueError(f"vocab_size must be positive, got {vocab_size}")
++    if make_vocab_size_divisible_by <= 0:
++        raise ValueError(f"make_vocab_size_divisible_by must be positive, got {make_vocab_size_divisible_by}")
++    if tensor_model_parallel_size <= 0:
++        raise ValueError(f"tensor_model_parallel_size must be positive, got {tensor_model_parallel_size}")
++
++    multiple = make_vocab_size_divisible_by * tensor_model_parallel_size
++    return int(math.ceil(vocab_size / multiple) * multiple)
+diff --git a/tests/unit_tests/models/test_model_instantiation.py b/tests/unit_tests/models/test_model_instantiation.py
+index abb1af4f..e68c3aa0 100644
+--- a/tests/unit_tests/models/test_model_instantiation.py
++++ b/tests/unit_tests/models/test_model_instantiation.py
+@@ -209,7 +209,7 @@ class TestCreateModel:
+ class TestDDPWrap:
+     """Test cases for _ddp_wrap function."""
+ 
+-    @patch("megatron.training.models.dist_utils.DistributedDataParallel")
++    @patch("megatron.bridge.models.common.unimodal.DistributedDataParallel")
+     def test_ddp_wrap_standard(self, mock_ddp):
+         """Test wrapping models with standard DDP."""
+         # Setup
+@@ -246,7 +246,7 @@ class TestDDPWrap:
+         for ddp_instance in mock_ddp_instances:
+             ddp_instance.broadcast_params.assert_called_once()
+ 
+-    @patch("megatron.training.models.dist_utils.TorchFullyShardedDataParallel")
++    @patch("megatron.bridge.models.common.unimodal.TorchFullyShardedDataParallel")
+     def test_ddp_wrap_fsdp2(self, mock_fsdp):
+         """Test wrapping models with FSDP2."""
+         # Setup
+@@ -274,7 +274,7 @@ class TestDDPWrap:
+ 
+     def test_ddp_wrap_overlap_param_gather(self):
+         """Test DDP wrapping with overlap_param_gather_with_optimizer_step."""
+-        with patch("megatron.training.models.dist_utils.DistributedDataParallel") as mock_ddp:
++        with patch("megatron.bridge.models.common.unimodal.DistributedDataParallel") as mock_ddp:
+             # Setup
+             config = create_test_config()
+             models = [MockMegatronModule(config)]
+diff --git a/tests/unit_tests/training/utils/test_log_utils.py b/tests/unit_tests/training/utils/test_log_utils.py
+index 65a4b27f..7af6f841 100644
+--- a/tests/unit_tests/training/utils/test_log_utils.py
++++ b/tests/unit_tests/training/utils/test_log_utils.py
+@@ -146,7 +146,7 @@ class TestSetupLogging:
+ 
+     def test_setup_logging_with_filter_warnings_true(self):
+         """Test that setup_logging adds warning filter when filter_warning=True."""
+-        with patch("megatron.training.utils.log_utils.add_filter_to_all_loggers") as mock_add_filter:
++        with patch("megatron.bridge.training.utils.log_utils.add_filter_to_all_loggers") as mock_add_filter:
+             setup_logging(filter_warning=True)
+ 
+             # Should call add_filter_to_all_loggers once for the warning filter
+@@ -160,7 +160,7 @@ class TestSetupLogging:
+ 
+     def test_setup_logging_with_filter_warnings_false(self):
+         """Test that setup_logging doesn't add warning filter when filter_warning=False."""
+-        with patch("megatron.training.utils.log_utils.add_filter_to_all_loggers") as mock_add_filter:
++        with patch("megatron.bridge.training.utils.log_utils.add_filter_to_all_loggers") as mock_add_filter:
+             setup_logging(filter_warning=False, modules_to_filter=None)
+ 
+             # Should not call add_filter_to_all_loggers for warning filter
+@@ -170,7 +170,7 @@ class TestSetupLogging:
+         """Test that setup_logging adds module filter when modules_to_filter is provided."""
+         modules = ["test_module1", "test_module2"]
+ 
+-        with patch("megatron.training.utils.log_utils.add_filter_to_all_loggers") as mock_add_filter:
++        with patch("megatron.bridge.training.utils.log_utils.add_filter_to_all_loggers") as mock_add_filter:
+             setup_logging(filter_warning=False, modules_to_filter=modules)
+ 
+             # Should call add_filter_to_all_loggers once for the module filter

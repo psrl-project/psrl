@@ -1,11 +1,14 @@
 import hashlib
 import json
+import logging
 import time
 from collections.abc import Mapping
 from typing import Any
 
 import torch
 from omegaconf import OmegaConf
+
+_PRECISION_SENSITIVE_PATTERNS = ("linear_attn.norm.weight", "A_log")
 
 
 def resolve_weight_fingerprint_options(
@@ -121,9 +124,7 @@ def _tensor_content_digest(
     sample_count: int,
     chunk_bytes: int,
 ) -> str:
-    metadata = (
-        f"{_logical_name(key, shard_idx)}\0{tensor.dtype}\0{tuple(tensor.shape)}\0{tensor.numel()}"
-    ).encode()
+    metadata = (f"{_logical_name(key, shard_idx)}\0{tensor.dtype}\0{tuple(tensor.shape)}\0{tensor.numel()}").encode()
     hasher = hashlib.sha256(metadata)
     if mode == "sampled":
         positions = _sample_positions(tensor.numel(), sample_count)
@@ -229,3 +230,73 @@ def fingerprint_log_record(
     if not include_tensor_digests:
         record.pop("tensor_digests", None)
     return record
+
+
+def precision_sensitive_parameter_stats(
+    state_dict: dict[str, torch.Tensor],
+) -> dict[str, dict[str, object]]:
+    """Summarize small tensors that are sensitive to parameter-sync transforms."""
+    stats: dict[str, dict[str, object]] = {}
+    for pattern in _PRECISION_SENSITIVE_PATTERNS:
+        matches = [(key, tensor) for key, tensor in state_dict.items() if pattern in key]
+        if not matches:
+            continue
+        values = torch.cat([tensor.detach().float().reshape(-1) for _, tensor in matches])
+        stats[pattern] = {
+            "tensor_count": len(matches),
+            "element_count": values.numel(),
+            "dtypes": sorted({str(tensor.dtype) for _, tensor in matches}),
+            "min": values.min().item(),
+            "max": values.max().item(),
+            "mean": values.mean().item(),
+        }
+    return stats
+
+
+def report_precision_sensitive_parameters(
+    state_dict: dict[str, torch.Tensor],
+    *,
+    logger: logging.Logger,
+    role: str,
+    rank: int,
+    pull_times: int,
+    tp_rank: int | None = None,
+) -> dict[str, dict[str, object]]:
+    """Log precision stats for GDN tensors after a weight pull."""
+    stats = precision_sensitive_parameter_stats(state_dict)
+    if not stats:
+        return stats
+    if tp_rank is None:
+        logger.info(
+            "[WEIGHT_SYNC_PRECISION] role=%s rank=%d pull=%d stats=%s.",
+            role,
+            rank,
+            pull_times,
+            stats,
+        )
+    else:
+        logger.info(
+            "[WEIGHT_SYNC_PRECISION] role=%s rank=%d tp_rank=%d pull=%d stats=%s.",
+            role,
+            rank,
+            tp_rank,
+            pull_times,
+            stats,
+        )
+    return stats
+
+
+def assert_positive_standard_gamma_mean(
+    stats: dict[str, dict[str, object]],
+    *,
+    rank: int,
+) -> None:
+    """Reject a pull whose linear-attn gamma still looks zero-centered."""
+    gamma_stats = stats.get("linear_attn.norm.weight")
+    if gamma_stats is None or gamma_stats["mean"] > 0:
+        return
+    raise RuntimeError(
+        "Qwen3.5 actor weight pull produced non-positive standard gamma mean: "
+        f"rank={rank}, stats={gamma_stats!r}. "
+        "The FSDP/HF actor must not apply Megatron zero-centered-gamma conversion."
+    )

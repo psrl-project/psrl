@@ -56,7 +56,6 @@ def log_tensor(
         tensor_flat = tensor_float.flatten()
         tensor_head = tensor_flat[:max_elements]
         try:
-            # Prefer tolist() for local tensors; DTensor may not support it.
             first_vals = tensor_head.tolist()
         except Exception:
             first_vals = str(tensor_head)

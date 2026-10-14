@@ -4,11 +4,11 @@ export VLLM_WORKER_MULTIPROC_METHOD="spawn"
 
 PSRL_PATH=$(python -c "import psrl; import os; print(os.path.dirname(os.path.dirname(psrl.__file__)))")
 
-HF_MODEL_PATH=/jizhicfs/pkuhetu/zym/Qwen3-8B
-train_files=/jizhicfs/pkuhetu/zym/verl/data/retool_dapo/train.parquet
-test_files=/jizhicfs/pkuhetu/zym/verl/data/retool_aime2024/train.parquet
+HF_MODEL_PATH=${PSRL_WORKSPACE}/models/Qwen3-8B
+train_files=${PSRL_WORKSPACE}/data/retool_dapo/train.parquet
+test_files=${PSRL_WORKSPACE}/data/retool_aime2024/train.parquet
 
-OUTPUT_DIR=/jizhicfs/pkuhetu/zym/psrl-new/psrl/tx-output
+OUTPUT_DIR=${PSRL_PATH}/examples/tx/output
 mkdir -p "$OUTPUT_DIR"
 project_name=tx
 experiment_name=qwen3_8b_megatron_resp_10240_lr1e-6_grpo-psrl-staleness2-2+2-partial
@@ -22,7 +22,7 @@ mkdir -p "$CKPTS_DIR"
 
 train_batch_size=64
 # train_batch_size=60
-tensor_model_parallel_size=2
+tensor_model_parallel_size=4
 pipeline_model_parallel_size=1
 rollout_tensor_model_parallel_size=1
 rollout_N=8
@@ -45,26 +45,21 @@ TRAIN_NGPUS_PER_NODE=8
 VAL_INSTANCES=$(( (${TRAIN_NNODES} * ${TRAIN_NGPUS_PER_NODE}) / ( ${VAL_TP} * ${VAL_PP} ) )) # Number of validation instances
 VAL_NGPUS_PER_NODE_PER_INSTANCE=$(( ${VAL_TP} * ${VAL_PP} )) # Number of GPUs per node for validation per instance
 
-# dependency: vllm>=0.11.0, megatron-lm>=0.13, mbridge with qwen3vl_cp branch
-# environment option1: use a stable container later than docker://verlai/verl:vllm011.dev6 
-    # and install mbridge in it by following the instruction in the container
-            # pip remove mbridge if you have installed it
-            # pip install git+https://github.com/ISEEKYAN/mbridge.git@qwen3vl_cp # for correct mbridge
-# environment option2: use container docker://verlai/verl:vllm011.dev_qwenvl_cp
+# Requires vLLM 0.11 or newer, Megatron-LM 0.13 or newer, and the `qwen3vl_cp` MBridge branch.
  
 
 export VLLM_ALLREDUCE_USE_SYMM_MEM=0 # for vllm0.11.0 with TP
-# 避免过多的idle进程
+# Avoid excessive idle processes.
 export RAY_prestart_worker_first_driver=false
 export RAY_num_workers_soft_limit=0
-# 关闭 raylet oom killer
+# Disable the Raylet OOM killer.
 export RAY_memory_monitor_refresh_ms=0
-# 调整水位线，剩余 10% 内存开始回收
+# Reclaim memory when 10 percent remains.
 sysctl vm.watermark_scale_factor=1000
 sysctl vm.compaction_proactiveness=20
 sysctl vm.min_free_kbytes=9437184
 
-python3 -m psrl.trainer.main_ppo --config-path=./config \
+python3 -m psrl.trainer.main_ppo --config-path="${PSRL_PATH}/psrl/trainer/config" \
     --config-name='ppo_megatron_trainer' \
     psrl.ps_manager_ip=${LOCAL_IP} \
     psrl.rollout_n=${rollout_N} \
@@ -86,8 +81,8 @@ python3 -m psrl.trainer.main_ppo --config-path=./config \
     psrl.group_post_process.name=dynamic_sampling_filter \
     \
     algorithm.adv_estimator=grpo \
-    data.train_files="$train_files" \
-    data.val_files="$test_files" \
+    +data.train_files="$train_files" \
+    +data.val_files="$test_files" \
     data.train_batch_size=$train_batch_size \
     data.max_prompt_length=1024 \
     data.max_response_length=10240 \
@@ -103,7 +98,7 @@ python3 -m psrl.trainer.main_ppo --config-path=./config \
     train_actor_rollout_ref.actor.kl_loss_coef=0.01 \
     train_actor_rollout_ref.actor.kl_loss_type=low_var_kl \
     train_actor_rollout_ref.actor.entropy_coeff=0 \
-    +train_actor_rollout_ref.actor.rollout_n=$rollout_N \
+    train_actor_rollout_ref.actor.rollout_n=$rollout_N \
     train_actor_rollout_ref.actor.use_dynamic_bsz=True \
     train_actor_rollout_ref.actor.ppo_max_token_len_per_gpu=45056 \
     +train_actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_offload_fraction=0 \
@@ -124,6 +119,7 @@ python3 -m psrl.trainer.main_ppo --config-path=./config \
     train_actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=$pipeline_model_parallel_size \
     train_actor_rollout_ref.actor.megatron.context_parallel_size=1 \
     train_actor_rollout_ref.actor.megatron.use_mbridge=True \
+    train_actor_rollout_ref.actor.megatron.vanilla_mbridge=False \
     \
     train_actor_rollout_ref.rollout.val_kwargs.n=1 \
     train_actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
@@ -134,7 +130,6 @@ python3 -m psrl.trainer.main_ppo --config-path=./config \
     train_actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
     train_actor_rollout_ref.rollout.max_num_batched_tokens=40960 \
     \
-    gen_actor_rollout_ref.model.path="$HF_MODEL_PATH" \
     gen_actor_rollout_ref.rollout.name=vllm \
     gen_actor_rollout_ref.rollout.tensor_model_parallel_size=${GEN_TP} \
     gen_actor_rollout_ref.rollout.pipeline_model_parallel_size=${GEN_PP} \
@@ -147,18 +142,19 @@ python3 -m psrl.trainer.main_ppo --config-path=./config \
     train_actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
     train_actor_rollout_ref.ref.megatron.param_offload=False \
     \
-    psrl.routing_strategy.method="request_num_balance" \
-    psrl.routing_strategy.enable_group_sampling_on_multi_instances=True \
-    psrl.routing_strategy.max_num_waiting_reqs_after_preemption=10000 \
-    psrl.routing_strategy.max_concurrent_seqs_per_instance=1024 \
+    psrl.rollout_coordination.routing_strategy.method="request_num_balance" \
+    psrl.rollout_coordination.routing_strategy.enable_group_sticky=False \
+    psrl.rollout_coordination.routing_strategy.max_num_waiting_reqs_after_preemption=10000 \
+    psrl.rollout_coordination.routing_strategy.max_concurrent_seqs_per_instance=1024 \
     \
-    psrl.sync_and_mig_strategy.method="greedy" \
+    psrl.rollout_coordination.sync_and_mig_strategy.method="greedy" \
     \
-    psrl.partial_rollout.enable=True \
+    psrl.rollout_coordination.partial_rollout.enable=True \
     \
     psrl.colocate_validate_and_train=False \
+    psrl.fuse_rollout_with_validate=True \
     \
-    reward_model.launch_reward_fn_async=True \
+    reward.launch_reward_fn_async=True \
     \
     algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \

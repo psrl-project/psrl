@@ -161,9 +161,7 @@ def _allocate_tensors(torch_module, device, sizes: list[int]) -> list[Any]:
     _sync_device(torch_module, device)
     storage_addresses = {tensor.untyped_storage().data_ptr() for tensor in tensors}
     if len(storage_addresses) != len(tensors):
-        raise RuntimeError(
-            f"expected {len(tensors)} distinct tensor storages, found {len(storage_addresses)}"
-        )
+        raise RuntimeError(f"expected {len(tensors)} distinct tensor storages, found {len(storage_addresses)}")
     return tensors
 
 
@@ -552,9 +550,7 @@ def _wait_for_ready(process: subprocess.Popen[Any], ready_file: Path, timeout_s:
         time.sleep(0.05)
 
 
-def _wait_for_process_pair(
-    source: subprocess.Popen[Any], initiator: subprocess.Popen[Any], timeout_s: float
-) -> None:
+def _wait_for_process_pair(source: subprocess.Popen[Any], initiator: subprocess.Popen[Any], timeout_s: float) -> None:
     deadline = time.monotonic() + timeout_s
     while source.poll() is None or initiator.poll() is None:
         if source.poll() not in (None, 0):
@@ -622,9 +618,10 @@ def _run_case(
 
     source_process = None
     initiator_process = None
-    with source_log.open("w", encoding="utf-8") as source_stream, initiator_log.open(
-        "w", encoding="utf-8"
-    ) as initiator_stream:
+    with (
+        source_log.open("w", encoding="utf-8") as source_stream,
+        initiator_log.open("w", encoding="utf-8") as initiator_stream,
+    ):
         try:
             source_process = subprocess.Popen(
                 _worker_command(args, "source", region_count, port, source_output, ready_file),
@@ -649,9 +646,7 @@ def _run_case(
     source_report = _read_json(source_output)
     initiator_report = _read_json(initiator_output)
     if source_report.get("error") or initiator_report.get("error"):
-        raise RuntimeError(
-            f"worker error for region_count={region_count}; see {source_log} and {initiator_log}"
-        )
+        raise RuntimeError(f"worker error for region_count={region_count}; see {source_log} and {initiator_log}")
     return _combine_case(region_count, source_report, initiator_report, source_log, initiator_log)
 
 

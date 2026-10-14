@@ -1,25 +1,48 @@
 import asyncio
+import atexit
 import logging
 import os
+import traceback
+import uuid
 from collections import deque
 
 import hydra
-import numpy as np
 import ray
 import torch
+import transfer_queue as tq
 from omegaconf import DictConfig, OmegaConf
 from tensordict import TensorDict
-from verl import DataProto
-from verl.utils import hf_processor, hf_tokenizer
-from verl.utils.fs import copy_to_local
+from verl.trainer.distillation import is_distillation_enabled
+from verl.utils import tensordict_utils as tu
+from verl.utils.config import omega_conf_to_dataclass
+from verl.utils.dataset.rl_dataset import get_dataset_class
 from verl.utils.model import compute_position_id_with_mask
+from verl.utils.tensordict_utils import list_of_dict_to_tensordict
+from verl.utils.tokenizer import (
+    build_multimodal_processor_inputs,
+    get_processor_token_id,
+)
+from verl.workers.config.model import HFModelConfig
 
-from psrl.utils.common.http_utils import init_http_client
-from psrl.utils.dataset.utils import _pre_process_inputs
+from psrl.utils.common.chat_template import resolve_chat_template_value
+from psrl.utils.common.docker_utils import (
+    force_remove_containers_by_label,
+    spawn_actor_reaper,
+)
+from psrl.utils.common.http_io_thread import init_http_io_thread
+from psrl.utils.common.http_utils import configure_distributed_post, init_http_client
 from psrl.utils.logger import DualOutputHandler, EventType, log_dual_events
 from psrl.utils.rollout.rollout_trace import RolloutTraceConfig, rollout_trace_attr
-from psrl.workers.agent_loop.loops.utils import AGENT_LOOP_REGISTRY, DummyConfig, TerminateReason
+from psrl.workers.agent_loop.context import AgentLoopContext
+from psrl.workers.agent_loop.loops.utils import (
+    AGENT_LOOP_REGISTRY,
+    DictConfigWrap,
+    TerminateReason,
+    get_agent_loop_config,
+)
+from psrl.workers.gen.utils import TokenOutput
 from psrl.workers.ps.request_status_tracker import PSRL_RequestStatus
+from psrl.workers.reward.client import RewardManagerClient, reward_producer_concurrency
 
 psrl_logger = logging.getLogger(__file__)
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
@@ -32,35 +55,97 @@ class PSRL_AgentLoopWorker:
     def __init__(
         self,
         config: DictConfig,
-        ps_manager_handle,
-        rollout_router,
-        rollout_wg_list,
+        ps_manager_handle: ray.actor.ActorHandle,
+        rollout_gateway_url: str,
+        session_router_url: str,
+        worker_id: int = 0,
+        worker_num: int = 1,
     ):
         """Initialize agent loop worker.
 
         Args:
             config (DictConfig): Configuration containing model and rollout settings.
-            ps_manager_handle: Handle to the parameter server manager.
-            rollout_router: Handle to the rollout router actor.
-            rollout_wg_list: List of rollout worker groups.
-            rollout_queue: Queue for storing completed rollout results.
+            ps_manager_handle (ray.actor.ActorHandle): Handle to the parameter server manager.
+            rollout_gateway_url (str): HTTP base URL of the SMG rollout gateway.
+            session_router_url (str): URL of the session router.
+            worker_id (int): Unique identifier for this worker instance.
+            worker_num (int): Total number of worker instances.
         """
-        self.config = config
-        model_path = config.gen_actor_rollout_ref.model.path
-        self.model_name = "/".join(model_path.split("/")[-2:])
-        local_path = copy_to_local(config.gen_actor_rollout_ref.model.path)
-        self.tokenizer = hf_tokenizer(local_path, trust_remote_code=True)
-        self.processor = hf_processor(local_path, trust_remote_code=True)
 
-        self.rollout_router = rollout_router
+        # Actor-scoped labels let the reaper reclaim only containers owned by this
+        # process after abnormal termination.
+        self._actor_id = f"w{worker_id}-{os.uname().nodename}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+        os.environ["PSRL_ACTOR_ID"] = self._actor_id
+        # Use the config parameter directly (self.config is set below) so the
+        # reaper log lands next to the AgentLoopWorker_N.log files.
+        _reaper_log_dir = getattr(getattr(config, "psrl", None), "logging_path", None)
+        self._reaper_proc = spawn_actor_reaper(
+            self._actor_id,
+            log_dir=_reaper_log_dir,
+        )
+        # Graceful shutdown reaps containers before stopping the sidecar.
+        atexit.register(self._terminate_reaper)
+        psrl_logger.info(
+            f"PSRL_AgentLoopWorker {worker_id}: actor_id={self._actor_id!r}, "
+            f"reaper pid={self._reaper_proc.pid}, "
+            f"reaper log_dir={_reaper_log_dir!r}."
+        )
+
+        self.config = config
+        model_config = config.gen_actor_rollout_ref.model
+        self.model_config: HFModelConfig = omega_conf_to_dataclass(model_config)
+        self.overlong_filtering = bool(config.gen_actor_rollout_ref.rollout.agent.get("overlong_filtering", False))
+        if self.overlong_filtering:
+            psrl_logger.warning("Overlong filtering enabled: budget-truncated trajectories contribute no gradient.")
+
+        # TransferQueue bootstrap (connects to controller/storage spun up by the driver).
+        tq.init()
+
+        self.distillation_config = config.get("distillation", None)
+        self.distillation_enabled = is_distillation_enabled(self.distillation_config)
+        if self.distillation_enabled:
+            raise NotImplementedError("Distillation is not supported in PSRL yet.")
+
+        self.dataset_cls = get_dataset_class(config.data)
+
+        self.tokenizer = self.model_config.tokenizer
+        self.processor = self.model_config.processor
+
+        self.rollout_gateway_url = rollout_gateway_url
+        self.session_router_url = session_router_url
         self.ps_manager_handle = ps_manager_handle
-        self.rollout_wg_list = rollout_wg_list
         self.agent_loop_manager = None
         self.reward_manager = None
+        self.reward_rpc_capacity = reward_producer_concurrency(
+            config.reward.reward_loop_worker,
+            producer_count=worker_num,
+            producer_index=worker_id,
+        )
+
+        n_rollout_instances = self.config.psrl.deployment.n_rollout_instances
+        n_validate_instances = (
+            self.config.psrl.deployment.n_validate_instances if self.config.psrl.colocate_validate_and_train else 0
+        )
+        server_max_concurrency = self.config.psrl.rollout_gateway.server_max_concurrency
+
+        init_http_client(
+            server_concurrency=server_max_concurrency,
+            rollout_engine_num=n_rollout_instances + n_validate_instances,
+            producer_count=worker_num,
+            producer_index=worker_id,
+        )
+
+        # Dedicated HTTP I/O thread (event loop isolation).
+        init_http_io_thread(
+            server_concurrency=server_max_concurrency,
+            rollout_engine_num=n_rollout_instances + n_validate_instances,
+            producer_count=worker_num,
+            producer_index=worker_id,
+        )
 
         self.agent_programs = set()
+        self.put_tasks = set()
         self.pending_program_queue = deque()
-
         self.running_loop = None
         self.busy_loop_task = None
         self.stop_busy_loop_task = False
@@ -71,6 +156,15 @@ class PSRL_AgentLoopWorker:
             agent_loop_configs = OmegaConf.load(agent_loop_config_path)
             for agent_loop_config in agent_loop_configs:
                 AGENT_LOOP_REGISTRY[agent_loop_config.name] = agent_loop_config
+        # Fail at worker start if the default loop is neither built-in nor listed in YAML.
+        get_agent_loop_config(config.gen_actor_rollout_ref.rollout.agent.default_agent_loop)
+        custom_template_value = config.gen_actor_rollout_ref.model.get("custom_chat_template", None)
+        resolved_template = resolve_chat_template_value(custom_template_value)
+        if resolved_template is not None:
+            if self.model_config.processor is not None:
+                self.model_config.processor.chat_template = resolved_template
+            self.model_config.tokenizer.chat_template = resolved_template
+            psrl_logger.info(f"Applied custom chat template: source={custom_template_value!r}.")
 
         # Initialize rollout trace config
         trace_config = self.config.gen_actor_rollout_ref.rollout.get("trace", {})
@@ -79,19 +173,37 @@ class PSRL_AgentLoopWorker:
             self.config.trainer.experiment_name,
             trace_config.get("backend"),
             trace_config.get("token2text", False),
+            trace_config.get("max_samples_per_step_per_worker", None),
         )
 
-        if self.config.psrl.server_rollout.enable:
-            # Initialize HTTP client
-            init_http_client(
-                server_concurrency=self.config.psrl.server_rollout.server_concurrency,
-                rollout_engine_num=len(self.rollout_wg_list),
-            )
-
         # Build logger
-        # TODO(lhy): support >1 workers
-        self.log_prefix = "AgentLoopWorker"
-        psrl_logger.addHandler(DualOutputHandler(self.config.psrl.logging_path, self.log_prefix))
+        self.log_prefix = f"AgentLoopWorker_I{worker_id}"
+        handler = DualOutputHandler(self.config.psrl.logging_path, self.log_prefix)
+        logging.getLogger("psrl").addHandler(handler)
+        psrl_logger.addHandler(handler)
+
+    def _terminate_reaper(self) -> None:
+        """Belt-and-suspenders cleanup on graceful actor shutdown.
+
+        Belt: synchronously force-remove our actor's containers from the
+              actor process itself. Takes ~5-30 s for hundreds of containers,
+              well within Ray's SIGTERM grace period. This is the fast path
+              that wins the race against the bash sidecar.
+        Suspenders: also signal the bash sidecar to terminate so it does not
+                    run a redundant (and harmless) post-mortem sweep after we
+                    already cleaned up here.
+        """
+        try:
+            force_remove_containers_by_label("psrl.actor_id", self._actor_id)
+        except Exception as e:
+            psrl_logger.debug(f"Synchronous atexit reap failed: {e}.")
+        proc = getattr(self, "_reaper_proc", None)
+        if proc is None or proc.poll() is not None:
+            return
+        try:
+            proc.terminate()
+        except Exception as e:
+            psrl_logger.debug(f"Failed to terminate reaper sidecar: {e}.")
 
     def set_agent_loop_manager(self, agent_loop_manager: ray.actor.ActorHandle):
         """Set the agent loop manager handle for communication.
@@ -107,24 +219,37 @@ class PSRL_AgentLoopWorker:
         Args:
             reward_manager: Handle to the reward manager actor.
         """
-        self.reward_manager = reward_manager
+        self.reward_manager = RewardManagerClient(reward_manager, self.reward_rpc_capacity)
 
-    def add_agent_program(self, data: DataProto):
+    def set_distributed_post_actors(
+        self,
+        actors: list[ray.actor.ActorHandle] | None,
+        enabled: bool,
+        producer_index: int = 0,
+    ):
+        """Install distributed HTTP POST actors for this worker process."""
+        configure_distributed_post(
+            actors,
+            enabled=enabled,
+            start_index=producer_index,
+        )
+
+    def add_agent_program(self, batch: TensorDict | None):
         """Add a new agent program to the pending queue for processing.
 
         Args:
-            data (DataProto or None): Data to process, or None to signal termination.
+            batch (TensorDict or None): Data to process, or None to signal termination.
         """
-        if isinstance(data, DataProto):
-            # Prioritize retry requests
-            if "min_version_limit" in data.non_tensor_batch:
-                self.pending_program_queue.appendleft(data)
-            else:
-                self.pending_program_queue.append(data)
-        elif data is None:
+        if batch is None:
             self.pending_program_queue.append(None)
-        else:
-            raise TypeError(f"Unsupported data type: {type(data)}. Expected DataProto or None.")
+            return
+
+        n = len(batch)
+        if n == 0:
+            return
+        requests = batch.chunk(n)
+        for request in requests:
+            self.pending_program_queue.append(request)
 
     def start_busy_loop(self):
         """Start the busy loop to continuously process agent programs from the queue."""
@@ -132,18 +257,24 @@ class PSRL_AgentLoopWorker:
             return
 
         # Start the background task to process data
+        self.stop_busy_loop_task = False
         self.running_loop = asyncio.get_running_loop()
         self.busy_loop_task = self.running_loop.create_task(self._launch_agent_loop())
         self.busy_loop_task.add_done_callback(lambda f: f.result())  # To avoid silent error in async tasks
 
-    def stop_busy_loop(self):
+    async def stop_busy_loop(self):
         """Stop the busy loop and wait for the current task to complete."""
         if not self.busy_loop_task or self.busy_loop_task.done():
             return
 
         self.stop_busy_loop_task = True
         # Wait for the background task to finish
-        self.running_loop.run_until_complete(self.busy_loop_task)
+        # Note: This is now async-safe and won't deadlock when called from Ray actors
+        try:
+            await asyncio.wait_for(self.busy_loop_task, timeout=10.0)
+        except asyncio.TimeoutError:
+            psrl_logger.warning("Timeout waiting for busy loop task to complete")
+            self.busy_loop_task.cancel()
 
     async def _launch_agent_loop(self):
         """Main loop that processes agent programs from the pending queue."""
@@ -153,7 +284,7 @@ class PSRL_AgentLoopWorker:
                 if program is None:
                     self.stop_busy_loop_task = True
                     continue
-                await self.generate_trajectories(program)
+                await self.generate_trajectory(program)
             await asyncio.sleep(0)
 
     def _create_task_done_callback(self, task):
@@ -163,33 +294,26 @@ class PSRL_AgentLoopWorker:
             try:
                 future.result()  # This will raise an exception if the task failed
             except Exception as e:
-                psrl_logger.error(f"Task {task} failed with exception: {e}")
+                tb_str = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+                psrl_logger.error(f"Task failed: task={task!r}, error={e!r}.\nTraceback:\n{tb_str}")
             finally:
                 self.agent_programs.discard(task)
 
         return task_done_callback
 
-    async def generate_trajectories(self, batch: DataProto) -> DataProto:
+    async def generate_trajectory(self, batch: TensorDict):
         """Generate trajectories using the specified agent type based on configuration.
 
         This method only create the task (agent_loop) and add the task to the agent_programs set.
         But the task is not await here so different agent_loop can be run in parallel.
 
         Args:
-            batch (DataProto): Input batch containing prompts and metadata.
-
-        Returns:
-            DataProto: Generated trajectories and associated data.
+            batch (TensorDict): Input batch metadata containing prompts and metadata.
         """
-        # by default, we assume it's a generation-only agent
-        default_agent_name = "generate_only_agent"
+        assert len(batch) == 1, "Only support single request for generation"
 
-        agent_names = batch.non_tensor_batch.pop(
-            "agent_name", np.array([default_agent_name] * len(batch), dtype=object)
-        )
-        assert np.all(agent_names == agent_names[0]), "All agent names must be the same for generation-only agents."
-        agent_name = agent_names[0]
-
+        default_agent_name = self.config.gen_actor_rollout_ref.rollout.agent.default_agent_loop
+        agent_name = tu.get(batch, "agent_name", [default_agent_name])[0]
         task = asyncio.create_task(self._run_agent_loop(agent_name, batch))
         task.add_done_callback(self._create_task_done_callback(task))
         self.agent_programs.add(task)
@@ -197,7 +321,7 @@ class PSRL_AgentLoopWorker:
     async def _run_agent_loop(
         self,
         agent_name: str,
-        requests: DataProto,
+        batch: TensorDict,
     ):
         """Execute the specified agent loop on the given requests.
 
@@ -206,92 +330,138 @@ class PSRL_AgentLoopWorker:
 
         Args:
             agent_name (str): Name of the agent loop to run.
-            requests (DataProto): Input requests to process.
+            batch (TensorDict): Input batch metadata containing prompts and metadata.
         """
-        if "parent_id" in requests.non_tensor_batch:
-            prompt_index = requests.non_tensor_batch["parent_id"].tolist()[0]
-            request_index = requests.non_tensor_batch["uid"].tolist()[0]
+        assert len(batch) == 1, "Only support single request for generation"
+
+        if "parent_id" in batch:
+            prompt_index = tu.get(batch, "parent_id")[0]
+            request_index = tu.get(batch, "uid")[0]
         else:
-            prompt_index = requests.non_tensor_batch["uid"].tolist()[0]
-            request_index = requests.non_tensor_batch["uid"].tolist()[0]
+            prompt_index = tu.get(batch, "uid")[0]
+            request_index = tu.get(batch, "uid")[0]
+
+        try:
+            await self._run_agent_loop_inner(agent_name, batch, prompt_index, request_index)
+        except Exception as e:
+            tb_str = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+            psrl_logger.error(
+                f"Agent loop failed: name={agent_name!r}, request_id={request_index}, "
+                f"prompt_id={prompt_index}, error={e!r}.\n"
+                f"Full traceback:\n{tb_str}"
+            )
+            raise
+
+    async def _run_agent_loop_inner(
+        self,
+        agent_name: str,
+        batch: TensorDict,
+        prompt_index,
+        request_index,
+    ):
+        """Inner implementation of the agent loop execution."""
+        request_ids = tu.get(batch, "uid")
+
+        global_steps = tu.get(batch, "global_steps", -1)
+        validate = tu.get(batch, "validate", False)[0]
 
         with rollout_trace_attr(
             prompt_index=prompt_index,
             request_index=request_index,
-            step=requests.meta_info.get("global_steps", -1),
+            step=global_steps,
             name=agent_name,
-            validate=requests.meta_info.get("validate", False),
+            validate=validate,
         ):
-            assert agent_name in AGENT_LOOP_REGISTRY, (
-                f"Agent loop {agent_name} not registered, registered agent loops: {AGENT_LOOP_REGISTRY.keys()}"
-            )
-            agent_loop_config = AGENT_LOOP_REGISTRY[agent_name]
+            agent_loop_config = get_agent_loop_config(agent_name)
 
-            agent_loop = hydra.utils.instantiate(
-                config=agent_loop_config,
-                trainer_config=DummyConfig(config=self.config),
-                rollout_router=self.rollout_router,
+            context = AgentLoopContext(
+                config=self.config,
+                rollout_gateway_url=self.rollout_gateway_url,
+                session_router_url=self.session_router_url,
                 reward_manager=self.reward_manager,
                 ps_manager_handle=self.ps_manager_handle,
                 tokenizer=self.tokenizer,
+                processor=self.processor,
+                dataset_cls=self.dataset_cls,
+                data_config=DictConfigWrap(self.config.data),
             )
+            # Keep framework objects out of Hydra's dataclass conversion path.
+            agent_loop_factory = hydra.utils.instantiate(
+                config=agent_loop_config,
+                _partial_=True,
+            )
+            agent_loop = agent_loop_factory(context=context)
 
             with log_dual_events(
-                f"Agent loop with requests {requests.non_tensor_batch['uid']}",
+                f"Agent loop with requests {request_ids}",
                 psrl_logger,
                 level=logging.DEBUG,
                 event_type=EventType.GEN,
             ):
                 retry_limit = self.config.gen_actor_rollout_ref.rollout.agent.retry_limit
+                raised_error = None
                 for retry_attempt in range(1, retry_limit + 1):
                     raise_on_error = (
                         retry_attempt == retry_limit
                     ) and self.config.gen_actor_rollout_ref.rollout.agent.raise_on_error
-                    output, terminate_reason = await agent_loop.run_with_termination_handling(
-                        requests, raise_on_error=raise_on_error
-                    )
+                    try:
+                        output, terminate_reason = await agent_loop.run_with_termination_handling(
+                            batch, raise_on_error=raise_on_error
+                        )
+                    except Exception as e:
+                        # Log the traceback before cleanup and propagation.
+                        tb_str = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+                        psrl_logger.error(
+                            f"Agent loop failed before cleanup: request_ids={request_ids!r}.\nTraceback:\n{tb_str}"
+                        )
+                        raised_error = e
+                        terminate_reason = TerminateReason.ROLLOUT_ERROR
+                        output = None
 
-                    if terminate_reason not in (
-                        TerminateReason.TIMEOUT,
-                        TerminateReason.ENV_TIMEOUT,
-                        TerminateReason.ERROR,
-                        TerminateReason.UNKNOWN,
-                    ):
+                    if not terminate_reason.needs_worker_retry():
                         break
 
                     # Retry if applicable
                     if retry_attempt < retry_limit:
                         psrl_logger.warning(
-                            f"Agent loop for requests {requests.non_tensor_batch['uid']} "
-                            f"terminated with reason {terminate_reason.value} on "
-                            f"attempt {retry_attempt}/{retry_limit}, retrying..."
+                            f"Retrying agent loop: request_ids={request_ids!r}, "
+                            f"reason={terminate_reason.value!r}, "
+                            f"attempt={retry_attempt}/{retry_limit}."
                         )
                         continue
 
-                if terminate_reason in (
-                    TerminateReason.TIMEOUT,
-                    TerminateReason.ENV_TIMEOUT,
-                    TerminateReason.ERROR,
-                    TerminateReason.UNKNOWN,
-                    TerminateReason.ABORTED,
-                ):
+                if terminate_reason.needs_worker_retry() or terminate_reason.is_aborted:
                     psrl_logger.warning(
-                        f"Agent loop for requests {requests.non_tensor_batch['uid']} "
-                        f"terminated with reason {terminate_reason.value} "
-                        f"after {retry_limit} attempts."
+                        f"Agent loop exhausted retries: request_ids={request_ids!r}, "
+                        f"reason={terminate_reason.value!r}, attempts={retry_limit}."
                     )
                     output = None
+
+                # Only the manager can purge the partial group and dispatch a replacement
+                # prompt, and it owns the breaker that ends a deterministically failing run.
+                if terminate_reason.needs_manager_retry():
+                    # `validate` must remain scalar or training failures enter the
+                    # validation recovery branch.
+                    failed_uid = tu.get(batch, "uid")[0]
+                    parent_id = tu.get(batch, "parent_id")[0] if "parent_id" in batch else failed_uid
+                    psrl_logger.warning(
+                        f"Group slot lost for uid={failed_uid} parent_id={parent_id} "
+                        f"(terminate_reason={terminate_reason.value}, validate={validate}), notifying manager."
+                    )
+                    await self.agent_loop_manager.notify_group_failed.remote(
+                        parent_id=parent_id,
+                        failed_uid=failed_uid,
+                        is_validate=validate,
+                        terminate_reason=terminate_reason,
+                    )
                 else:
                     psrl_logger.debug(
-                        f"Agent loop for requests {requests.non_tensor_batch['uid']} "
-                        f"terminated with reason {terminate_reason.value}."
+                        f"Agent loop terminated: request_ids={request_ids!r}, reason={terminate_reason.value!r}."
                     )
 
-            # Put the output into the result queue
+            # Put the output into the TransferQueue and notify PSManager
+            # + AgentLoopManager via metadata-only RPCs.
             if output is not None:
-                assert isinstance(output, DataProto), f"Output must be a DataProto for now (got {type(output)})"
-                request_ids = requests.non_tensor_batch["uid"]
-                is_validate = requests.meta_info.get("validate", False)
                 with log_dual_events(
                     "Update request status",
                     psrl_logger,
@@ -299,151 +469,223 @@ class PSRL_AgentLoopWorker:
                     event_type=EventType.OTHER,
                 ):
                     update_status_success = await self.ps_manager_handle.update_request_status.remote(
-                        request_ids.tolist(),
+                        request_ids,
                         PSRL_RequestStatus.COMPLETED,
-                        is_validate=is_validate,
+                        is_validate=validate,
                     )
 
-                with log_dual_events(
-                    f"Put requests {request_ids} into result queue",
-                    psrl_logger,
-                    level=logging.DEBUG,
-                    event_type=EventType.OTHER,
-                ):
-                    dispatch_request_idxs = [i for i, success in enumerate(update_status_success) if success]
-                    if dispatch_request_idxs:
-                        output = output.select_idxs(dispatch_request_idxs)
-                        # NOTE(lhy): The DataProto will be huge and slow to transfer when putting into
-                        # the result queue, so we process the data inside the reward manager
-                        # output = self._post_process(output)
-                        await self.agent_loop_manager.put_result.remote(output)
+                if update_status_success:
+                    with log_dual_events(
+                        f"Put requests {request_ids} into TransferQueue",
+                        psrl_logger,
+                        level=logging.DEBUG,
+                        event_type=EventType.OTHER,
+                    ):
+                        await self.postprocess_output(output, batch, terminate_reason)
+            elif terminate_reason != TerminateReason.ABORTED:
+                # Abort the reserved inventory entry after an unreported generation
+                # failure so the buffer can progress.
+                psrl_logger.warning(
+                    f"Aborting failed generation: request_ids={request_ids!r}, reason={terminate_reason.value!r}."
+                )
+                await self.ps_manager_handle.abort_requests.remote(request_ids)
 
-    # NOTE(lhy): This method is moved to the reward manager
-    def _post_process(self, inputs: DataProto) -> DataProto:
-        """Post-process the generated outputs to create properly formatted tensors.
+            # After ALL cleanup is complete (notify_group_failed + abort_requests),
+            # re-raise the original error so it propagates to the task callback.
+            if raised_error is not None:
+                raise raised_error
 
-        This method handles padding, attention masks, position IDs, and multi-modal inputs
-        to ensure compatibility with the training pipeline.
+    async def postprocess_output(
+        self,
+        output: TokenOutput | list[TokenOutput],
+        batch: TensorDict,
+        terminate_reason: TerminateReason = TerminateReason.FINISHED,
+    ):
+        """Commit generation output to TQ and notify the manager.
+
+        Tensor payloads stay in TQ. Only compact request metadata is sent to the
+        manager for group occupation.
 
         Args:
-            inputs (DataProto): Raw generation outputs.
-
-        Returns:
-            DataProto: Formatted data ready for training.
+            output (TokenOutput | list[TokenOutput]): Trajectories to commit.
+            batch (TensorDict): The originating prompt batch.
+            terminate_reason (TerminateReason): Why the episode stopped. Carried into
+                the committed fields so the trainer can drop budget-truncated
+                trajectories from the loss.
         """
-        # NOTE: consistent with batch version of generate_sequences in vllm_rollout_spmd.py
-        # prompts: left pad
-        # responses: right pad
-        # input_ids: prompt + response
-        # attention_mask: [0,0,0,0,1,1,1,1, | 1,1,1,0,0,0,0,0]
-        # position_ids:   [0,0,0,0,0,1,2,3, | 4,5,6,7,8,9,10,11]
+        uid = tu.get(batch, "uid")[0]
+        is_validate = tu.get(batch, "validate")[0]
+        version_tag = tu.get(batch, "version_tag")[0]
+        partition_id = "val" if tu.get(batch, "validate")[0] else "train"
+        prompt_id = tu.get(batch, "parent_id")[0] if "parent_id" in batch else tu.get(batch, "uid")[0]
 
-        # prompts
-        self.tokenizer.padding_side = "left"
-        if "raw_prompt_ids" not in inputs.non_tensor_batch:
-            batch_size = len(inputs)
-            raw_prompt_ids = np.array(
-                [
-                    _pre_process_inputs(self.tokenizer.pad_token_id, inputs.batch["input_ids"][i])
-                    for i in range(batch_size)
-                ],
-                dtype=object,
-            )
-        else:
-            raw_prompt_ids = inputs.non_tensor_batch["raw_prompt_ids"]
+        outputs = output if isinstance(output, list) else [output]
 
-        prompt_output = self.tokenizer.pad(
-            [{"input_ids": raw_prompt_id} for raw_prompt_id in raw_prompt_ids],
-            padding="max_length",
-            max_length=self.config.gen_actor_rollout_ref.rollout.prompt_length,
-            return_tensors="pt",
-            return_attention_mask=True,
-        )
-        prompt_ids, prompt_attention_mask = (
-            prompt_output["input_ids"],
-            prompt_output["attention_mask"],
+        keys, fields = self._build_output_fields(outputs, batch, uid, version_tag, terminate_reason)
+
+        await tq.async_kv_batch_put(
+            keys=keys,
+            partition_id=partition_id,
+            fields=list_of_dict_to_tensordict(fields),
+            tags=[{"status": "success"}] * len(keys),
         )
 
-        # responses
-        raw_response_ids = inputs.non_tensor_batch.pop("raw_response_ids", None)
-        assert raw_response_ids is not None, "raw_response_ids must be provided in the input batch"
-        self.tokenizer.padding_side = "right"
-        outputs = self.tokenizer.pad(
-            [{"input_ids": raw_response_id} for raw_response_id in raw_response_ids],
-            padding="max_length",
-            max_length=self.config.gen_actor_rollout_ref.rollout.response_length,
-            return_tensors="pt",
-            return_attention_mask=True,
-        )
-        response_ids, response_attention_mask = (
-            outputs["input_ids"],
-            outputs["attention_mask"],
-        )
-
-        # response_mask
-        response_masks = inputs.non_tensor_batch.pop("response_mask", None)
-        assert response_masks is not None, "response_masks must be provided in the input batch"
-        outputs = self.tokenizer.pad(
-            [{"input_ids": response_mask} for response_mask in response_masks],
-            padding="max_length",
-            max_length=self.config.gen_actor_rollout_ref.rollout.response_length,
-            return_tensors="pt",
-            return_attention_mask=False,
-        )
-        response_mask = outputs["input_ids"]
-
-        assert response_ids.shape == response_mask.shape, (
-            f"mismatch in response_ids and response_mask shape: {response_ids.shape} vs {response_mask.shape}"
-        )
-
-        response_mask = response_mask * response_attention_mask
-        attention_mask = torch.cat([prompt_attention_mask, response_attention_mask], dim=1)
-        input_ids = torch.cat([prompt_ids, response_ids], dim=1)
-        # Handle multi-modal inputs and position_ids calculation
-        # Only support Qwen2VLImageProcessor for multi-modal processing currently
-        # TODO(verl): support other multi-modal inputs
-        multi_modal_inputs = None
-        if self.processor is not None and "Qwen2VLImageProcessor" in self.processor.image_processor.__class__.__name__:
-            from verl.models.transformers.qwen2_vl import get_rope_index
-
-            images = inputs.non_tensor_batch["multi_modal_data"].get("image", None)
-            current_text = self.tokenizer.decode(input_ids.squeeze(0), skip_special_tokens=True)
-            multi_modal_inputs = self.processor(text=[current_text], images=images, return_tensors="pt")
-            multi_modal_inputs.pop("input_ids", None)
-            multi_modal_inputs.pop("attention_mask", None)
-
-            # We must use dict(multi_modal_inputs) to convert BatchFeature values to a new dict
-            # because np.array() only keeps the keys for BatchFeature.
-            multi_modal_inputs = dict(multi_modal_inputs)
-
-            image_grid_thw = multi_modal_inputs.get("image_grid_thw")
-            video_grid_thw = multi_modal_inputs.get("video_grid_thw")
-            second_per_grid_ts = multi_modal_inputs.get("second_per_grid_ts")
-
-            position_ids = get_rope_index(
-                self.processor,
-                input_ids=input_ids.squeeze(0),
-                image_grid_thw=image_grid_thw,
-                video_grid_thw=video_grid_thw,
-                second_per_grid_ts=second_per_grid_ts,
-                attention_mask=attention_mask.squeeze(0),
-            ).unsqueeze(0)  # (1, 3, seq_len)
-        else:
-            position_ids = compute_position_id_with_mask(attention_mask)  # (1, seq_len)
-
-        batch = TensorDict(
+        # Notify manager with metadata only after output commit.
+        await self.agent_loop_manager.put_result.remote(
             {
-                "prompts": prompt_ids,  # [bsz, prompt_length]
-                "responses": response_ids,  # [bsz, response_length]
-                "response_mask": response_mask,  # [bsz, response_length]
-                "input_ids": input_ids,  # [bsz, prompt_length + response_length]
-                "attention_mask": attention_mask,  # [bsz, prompt_length + response_length]
-                "position_ids": position_ids,  # [bsz, prompt_length + response_length]
-            },
-            batch_size=len(input_ids),
+                "request_id": uid,
+                "prompt_id": prompt_id,
+                "rollout_instance_id": outputs[0].rollout_instance_id,
+                "version_tag": version_tag,
+                "n_trajectory": len(outputs),
+                "is_validate": is_validate,
+            }
         )
-        non_tensor_batch = inputs.non_tensor_batch
-        if multi_modal_inputs is not None:
-            non_tensor_batch["multi_modal_inputs"] = multi_modal_inputs
 
-        return DataProto(batch=batch, non_tensor_batch=non_tensor_batch, meta_info=inputs.meta_info)
+    def _build_output_fields(
+        self,
+        outputs: list,
+        batch: TensorDict,
+        uid: int,
+        version_tag: int,
+        terminate_reason: TerminateReason = TerminateReason.FINISHED,
+    ) -> tuple[list[str], list[dict]]:
+        """Build output keys and field dicts with tensor operations.
+
+        Designed for ``run_in_executor`` so that CPU-bound torch operations
+        (tensor creation, concatenation, position-ID computation) do not block
+        the asyncio event loop.
+        """
+        keys, fields = [], []
+        for i, out in enumerate(outputs):
+            prompts = torch.tensor(out.prompt_ids, dtype=torch.int64)
+            responses = torch.tensor(out.response_ids, dtype=torch.int64)
+            input_ids = torch.cat([prompts, responses], dim=0)
+            attention_mask = torch.ones_like(input_ids, dtype=torch.int64)
+            multi_modal_inputs = self._compute_multi_modal_inputs(out, input_ids)
+            position_ids = self._compute_position_ids(
+                input_ids.unsqueeze(0), attention_mask.unsqueeze(0), multi_modal_inputs
+            ).squeeze(0)
+            # `images_seqlens` is training metadata, so retain only its top-level copy.
+            images_seqlens = multi_modal_inputs.pop("images_seqlens", None)
+            if images_seqlens is None:
+                images_seqlens = torch.empty(0, dtype=torch.int64)
+            multi_modal_inputs.pop("mm_token_type_ids", None)
+
+            if len(outputs) > 1:
+                keys.append(f"{uid}_{i}")
+            else:
+                keys.append(str(uid))
+
+            field = batch[0].to_dict()
+            field.update(out.as_dict())
+            # do not store raw image/video
+            field.pop("multi_modal_data", None)
+            field = {k: v for k, v in field.items() if v is not None}
+            # NOTE(lhy): DAPO overlong filtering. A truncated reward reports the cutoff
+            # and an ungraded one was never measured, so neither may steer the policy.
+            # Zero only the VALUES: the mask carries the nested per-row length contract.
+            if self.overlong_filtering and (terminate_reason.is_budget_truncated or terminate_reason.is_ungraded):
+                field["response_mask"] = torch.zeros_like(field["response_mask"])
+            field["loss_mask"] = field["response_mask"]
+            field["input_ids"] = input_ids
+            field["position_ids"] = position_ids
+            field["multi_modal_inputs"] = multi_modal_inputs
+            field["images_seqlens"] = images_seqlens
+            prompt_len, response_len = field["prompts"].size(0), field["responses"].size(0)
+            # Merged batch fields can carry a stale `response_mask`, so recheck the
+            # response-length invariant after assembly.
+            mask_len = field["response_mask"].size(0)
+            if mask_len != response_len:
+                raise AssertionError(
+                    f"[uid={uid} trajectory={i}/{len(outputs)}] responses has {response_len} "
+                    f"tokens but response_mask has {mask_len} after merging the batch fields "
+                    f"with this trajectory's output (prompt_len={prompt_len}). The merge picked "
+                    "up a mask that does not belong to this trajectory."
+                )
+            field["seq_len"] = prompt_len + response_len
+            field["prompt_len"] = prompt_len
+            field["response_len"] = response_len
+            field["uid"] = uid
+            field.setdefault("version_tag", version_tag)
+            if "parent_id" in batch:
+                field["parent_id"] = tu.get(batch, "parent_id")[0]
+            field["trajectory_index"] = i
+            field["trajectory_num"] = len(outputs)
+            # Carried for metrics so the trainer can report reward and gradient share per
+            # termination without re-deriving them from the rollout logs.
+            field["terminate_reason"] = terminate_reason.value
+            fields.append(field)
+        return keys, fields
+
+    def _compute_multi_modal_inputs(self, output, input_ids: torch.Tensor) -> dict[str, torch.Tensor]:
+        """Compute multi-modal inputs with image and video."""
+        multi_modal_inputs = {}
+        if self.processor is None:
+            return multi_modal_inputs
+
+        multi_modal_data = output.multi_modal_data or {}
+        images = multi_modal_data.get("images")
+        videos = multi_modal_data.get("videos")
+        audios = multi_modal_data.get("audios")
+        current_text = self.tokenizer.decode(input_ids.squeeze(0), skip_special_tokens=True)
+
+        multi_modal_inputs = build_multimodal_processor_inputs(
+            self.processor,
+            text=[current_text],
+            images=images,
+            videos=videos,
+            audio=audios,
+            mm_processor_kwargs=getattr(output, "mm_processor_kwargs", None),
+        )
+        multi_modal_inputs.pop("input_ids", None)
+        multi_modal_inputs.pop("attention_mask", None)
+
+        # We must use dict(multi_modal_inputs) to convert BatchFeature values to a new dict
+        # because np.array() only keeps the keys for BatchFeature.
+        multi_modal_inputs = dict(multi_modal_inputs.convert_to_tensors("pt"))
+        image_grid_thw = multi_modal_inputs.get("image_grid_thw")
+        if image_grid_thw is not None:
+            images_seqlens = torch.repeat_interleave(image_grid_thw[:, 1] * image_grid_thw[:, 2], image_grid_thw[:, 0])
+            multi_modal_inputs["images_seqlens"] = images_seqlens
+        return multi_modal_inputs
+
+    def _compute_position_ids(
+        self,
+        input_ids,
+        attention_mask,
+        multi_modal_inputs,
+    ) -> torch.Tensor:
+        """Compute position ids for multi-modal inputs."""
+        if self.processor is None or not hasattr(self.processor, "get_rope_index"):
+            return compute_position_id_with_mask(attention_mask)  # (1, seq_len)
+
+        multi_modal_kwargs = {
+            "image_grid_thw": multi_modal_inputs.get("image_grid_thw"),
+            "video_grid_thw": multi_modal_inputs.get("video_grid_thw"),
+        }
+        # For transformers>=5.3.0, mm_token_type_ids is only used to calculate position ids.
+        if multi_modal_inputs.pop("mm_token_type_ids", None) is not None:
+            mm_token_type_ids = torch.zeros_like(input_ids)
+            image_token_id = get_processor_token_id(self.processor, "image")
+            video_token_id = get_processor_token_id(self.processor, "video")
+            if image_token_id is not None:
+                mm_token_type_ids[0][input_ids[0] == image_token_id] = 1
+            if video_token_id is not None:
+                mm_token_type_ids[0][input_ids[0] == video_token_id] = 2
+            multi_modal_kwargs["mm_token_type_ids"] = mm_token_type_ids
+
+        # Model's get_rope_index has been dynamically bind to the processor.
+        vision_position_ids, _ = self.processor.get_rope_index(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            **multi_modal_kwargs,
+        )
+        vision_position_ids = vision_position_ids.transpose(0, 1)  # (3, 1, seq_len) => (1, 3, seq_len)
+
+        valid_mask = attention_mask[0].bool()
+        text_position_ids = torch.ones((1, len(input_ids[0])), dtype=torch.long)
+        text_position_ids[0, valid_mask] = torch.arange(valid_mask.sum().item())
+        text_position_ids = text_position_ids.unsqueeze(0)
+        position_ids = torch.cat((text_position_ids, vision_position_ids), dim=1)  # (1, 4, seq_length)
+        return position_ids

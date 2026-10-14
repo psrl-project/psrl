@@ -1,0 +1,13 @@
+# NIXL config for `nixl_cpu` weight synchronization
+
+# Server IP address
+server_ip: ${psrl.ps_manager_ip}
+
+# Server port
+server_port: 23456
+
+# Pinned temp memory slots num for non-contiguous transfer
+max_pinned_temp_memory_slots: 16
+
+# Enable TMS management for NIXL temp buffers
+enable_tms_for_temp_buffers: ${psrl.tms.enable_nixl}

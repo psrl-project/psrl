@@ -1,17 +1,16 @@
 from psrl.utils.converter.model_mappings import ParameterMapping, register_model
 
 
-# Megatron (all models)
-# NOTE(lhy): the name transformation is done by mbridge
-# That's why it is a class already been *bridged*, and it is not used for name transformation
+# NOTE(lhy): Megatron Bridge handles name transformation, so this mapping only
+# carries bridged model metadata.
 @register_model(["Megatron"])
 class BridgedMegatronParameterMapping(ParameterMapping):
-    """Parameter mapping for Megatron model after mbridge."""
+    """Parameter mapping for Megatron model after Megatron-Bridge."""
 
     def __init__(self, config):
         super().__init__(config)
-        # NOTE(lhy): this is a hack to ensure the lm_head can be transformed separately
-        # Otherwise we need to handle the complex logic of sharding weight for lm_head and embedding layer
+        # NOTE(lhy): Keeping `lm_head` separate avoids sharing its sharding logic
+        # with the embedding layer.
         self.original_tie_word_embeddings = getattr(self.config, "tie_word_embeddings", False)
 
     def disable_tie_word_embeddings(self):
@@ -19,5 +18,5 @@ class BridgedMegatronParameterMapping(ParameterMapping):
 
     def get_mappings(self):
         raise ValueError(
-            "BridgedMegatronParameterMapping is not used for name transformation, please use mbrige instead"
+            "BridgedMegatronParameterMapping is not used for name transformation, please use Megatron-Bridge instead"
         )

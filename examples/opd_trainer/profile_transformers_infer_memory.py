@@ -25,11 +25,10 @@ import time
 
 import torch
 import torch.distributed as dist
+from psrl.utils.logger.memory_logger import format_memory_message, get_all_gpu_memory_info, log_gpu_memory_now
 from torch.distributed.device_mesh import init_device_mesh
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 from transformers.distributed import DistributedConfig
-
-from psrl.utils.logger.memory_logger import format_memory_message, get_all_gpu_memory_info, log_gpu_memory_now
 
 
 def parse_args() -> argparse.Namespace:
@@ -51,7 +50,9 @@ def parse_args() -> argparse.Namespace:
         help="Number of trailing tokens to score (teacher response length). "
         "Default: seq_len - prompt_len (score all non-prompt tokens).",
     )
-    parser.add_argument("--tp-size", type=int, default=1, help="Tensor parallel size (must equal torchrun world_size).")
+    parser.add_argument(
+        "--tp-size", type=int, default=1, help="Tensor parallel size (must equal torchrun world_size)."
+    )
     parser.add_argument("--ep-size", type=int, default=1, help="Expert parallel size; must equal tp-size when > 1.")
     parser.add_argument("--dtype", type=str, default="bfloat16", choices=("bfloat16", "float16", "float32", "auto"))
     parser.add_argument("--use-kv-cache", action="store_true", help="Pass use_cache=True to the model forward.")
@@ -121,9 +122,7 @@ def validate_parallel_args(tp_size: int, ep_size: int, world_size: int) -> None:
     if world_size != tp_size:
         raise ValueError(f"world_size ({world_size}) must equal --tp-size ({tp_size}).")
     if ep_size > 1 and ep_size != tp_size:
-        raise ValueError(
-            f"When --ep-size > 1 it must equal --tp-size; got ep_size={ep_size}, tp_size={tp_size}."
-        )
+        raise ValueError(f"When --ep-size > 1 it must equal --tp-size; got ep_size={ep_size}, tp_size={tp_size}.")
 
 
 def load_model(
@@ -149,8 +148,7 @@ def load_model(
         if ep_size > 1:
             if not getattr(hf_config, "base_model_ep_plan", None):
                 raise NotImplementedError(
-                    "ep_size > 1 requires a model config with base_model_ep_plan "
-                    f"(model={model_path!r})."
+                    f"ep_size > 1 requires a model config with base_model_ep_plan (model={model_path!r})."
                 )
             kwargs["distributed_config"] = DistributedConfig(enable_expert_parallel=True)
         else:
@@ -190,13 +188,9 @@ def resolve_response_len(seq_len: int, prompt_len: int, response_len: int | None
     else:
         resolved = response_len
     if resolved <= 0 or resolved >= seq_len:
-        raise ValueError(
-            f"response_len must be in (0, seq_len), got {resolved=} {seq_len=} {prompt_len=}."
-        )
+        raise ValueError(f"response_len must be in (0, seq_len), got {resolved=} {seq_len=} {prompt_len=}.")
     if prompt_len > 0 and prompt_len + resolved > seq_len:
-        raise ValueError(
-            f"prompt_len + response_len exceeds seq_len: {prompt_len=} {resolved=} {seq_len=}."
-        )
+        raise ValueError(f"prompt_len + response_len exceeds seq_len: {prompt_len=} {resolved=} {seq_len=}.")
     return resolved
 
 
@@ -367,7 +361,9 @@ def main() -> None:
 
             # Prefer sorting by self_cuda_memory_usage (peak-ish for the op itself), fallback to total.
             rows.sort(
-                key=lambda x: (x["self_cuda_memory_usage_bytes"] if x["self_cuda_memory_usage_bytes"] is not None else -1),
+                key=lambda x: (
+                    x["self_cuda_memory_usage_bytes"] if x["self_cuda_memory_usage_bytes"] is not None else -1
+                ),
                 reverse=True,
             )
             rows = rows[: args.torch_profiler_top_events]
@@ -402,7 +398,7 @@ def main() -> None:
         peak_gb = torch.cuda.max_memory_allocated(device) / (1024**3)
         log_phase(
             rank,
-            f"after_forward iter={i} ({times[-1]*1000:.2f}ms peak_alloc={peak_gb:.2f}GB)",
+            f"after_forward iter={i} ({times[-1] * 1000:.2f}ms peak_alloc={peak_gb:.2f}GB)",
             args.log_dir,
             args.log_prefix,
         )

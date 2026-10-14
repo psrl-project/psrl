@@ -1,0 +1,28 @@
+name: smoke_cpu_tests
+
+on:
+  pull_request:
+  push:
+    branches: [main, base_agentic_rl]
+
+permissions:
+  contents: read
+
+jobs:
+  smoke_cpu_tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install pytest
+        run: python -m pip install "pytest>=8.0"
+
+      - name: Run minimal CPU smoke test
+        run: python -m pytest --confcutdir=tests/elastic_rm tests/elastic_rm/test_scaling_policy_instance_id.py

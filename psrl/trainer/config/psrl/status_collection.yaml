@@ -1,0 +1,29 @@
+# Collect rollout instance status to rollout coordinator for global dp load balance
+
+# whether to enable the status collection.
+enable: True
+
+# The level of logging to file
+# Available options: "none", "partial_rollout", "prompt", "generation", "all"
+dump_logging_to_file_level: all
+
+# Logging interval in milliseconds
+dump_logging_to_file_interval_in_ms: 500
+
+# Engine status sync interval in millisecond (each vllm engine -> rollout coordinator)
+# Here 10 means sync every 0.1 second
+engine_sync_interval_in_ms: 100
+
+# Coordinator sync interval in millisecond (rollout coordinator after collecting engine status from all vllm engines -> router)
+# Here 10 means sync every 0.1 second
+coordinator_sync_interval_in_ms: 100
+
+# Stats recorder config
+stats_recorder:
+
+  # Whether to enable periodic per-replica JSONL stats dump.
+  # When enabled, writes one file per (replica_id, dp_rank) to psrl.logging_path.
+  enable: True
+
+  # Snapshot interval in seconds
+  interval_in_s: 1.0

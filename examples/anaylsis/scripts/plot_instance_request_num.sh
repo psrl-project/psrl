@@ -42,10 +42,10 @@ python plot.py /jizhicfs/lhy/verl/lhy_exp/ablation_new \
 --processor instance_request_num_indexed_by_time
 '''
 
-python plot.py /jizhicfs/lhy/psrl_agent/examples/dapo_trainer/logs/DAPO-Qwen3-30B-A3B-megatron-staleness_3 \
---substring StatCollector \
+python plot.py /apdcephfs_zwfy10_303541817/share_303541817/lhy/psrl/examples/dapo_trainer/megatron_psrl_log/qwen3_8b_megatron_dcp_preempt \
+--substring stats_r \
 --xlabel "time(s)" \
 --ylabel "instance request num" \
---out ablation_ours.png \
+--out preempt_qwen3_8b_megatron_dcp_request_num.png \
 --mode subplot \
---processor instance_request_num_indexed_by_time
+--processor instance_request_num_indexed_by_time_smg

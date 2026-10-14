@@ -119,8 +119,7 @@ class CommunicationPlanner:
 
     def __init__(self, restrict_client_group_comm: bool = False):
         """Initialize the communication planner"""
-        # NOTE(lhy): if restrict_client_group_comm is True,
-        # we will restrict communciation only happens between client groups
+        # NOTE(lhy): Restrict communication to matching client groups when enabled.
         self.restrict_client_group_comm = restrict_client_group_comm
 
     def make_comm_plan(self, clients: dict[str, NIXLClientInfo]) -> NIXLCommPlan:
@@ -333,9 +332,8 @@ class CommunicationPlanner:
 
         restrict_target_to_source_client_group_mapping = {}
         if self.restrict_client_group_comm:
-            # NOTE(lhy): for pull we don't have any restriction
-            # for push, we currently use round robin to map target client groups to source client groups
-            # this should be improved to use a more intelligent mapping
+            # NOTE(lhy): Push traffic uses round robin group pairing, while pull
+            # traffic remains unrestricted.
             if is_push_to_ps:
                 for target_client_group_id in target_client_groups.keys():
                     source_client_group_ids = [
@@ -361,10 +359,7 @@ class CommunicationPlanner:
                     source_client_groups.keys()
                 )
 
-        # Precompute key -> list of source clients once per unique restriction-group set,
-        # rather than re-scanning for every (target_client, key) pair: O(G × C_s) total
-        # instead of O(N_targets × N_keys × G × C_s).
-        # key_to_sources_by_restriction[restriction_key] = {key: [src_client, ...]}
+        # Cache source clients by restriction set to avoid rescanning every target key.
         key_to_sources_by_restriction: dict[tuple, dict[str, list[str]]] = {}
         for target_client_group_id in target_client_groups.keys():
             restrict_ids = restrict_target_to_source_client_group_mapping[target_client_group_id]
@@ -437,6 +432,7 @@ class CommunicationPlanner:
                     # optimal network connection and least data volume
                     while assigned_shards != needed_shards:
                         source_selection_steps += 1
+
                         # Custom sorting: first by link type (LOCAL > NVLINK > PCIE > IB > ETH), then by data volume
                         def sort_key(source_client, target_client=target_client):
                             # Get link priority (higher is better)
@@ -494,21 +490,11 @@ class CommunicationPlanner:
                         if not available_source_clients:
                             break
 
-                    if assigned_shards != needed_shards:
-                        source_shards = {
-                            source_client: self._summarize_shards(
-                                clients[source_client].tensor_infos[key].sharding.shard_indices
-                            )
-                            for source_client in key_to_srcs[key]
-                        }
-                        raise RuntimeError(
-                            f"Communication plan cannot cover target shards: phase={phase_name}, "
-                            f"target={target_client}, key={key!r}, "
-                            f"needed_shards={self._summarize_shards(needed_shards)}, "
-                            f"assigned_shards={self._summarize_shards(assigned_shards)}, "
-                            f"missing_shards={self._summarize_shards(needed_shards - assigned_shards)}, "
-                            f"source_shards={source_shards}"
-                        )
+                    # Verify all shards are assigned
+                    assert assigned_shards == needed_shards, (
+                        f"Not all shards assigned for key {key} on target client {target_client}. "
+                        f"Needed shards: {needed_shards}. Assigned shards: {assigned_shards}."
+                    )
 
                     now = time.monotonic()
                     if now - last_progress_time >= 5.0:

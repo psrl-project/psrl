@@ -1,0 +1,23 @@
+# Suspend whole TITO sessions while their instances exceed KV cache capacity.
+# In-flight work is not aborted.
+thunder_agent:
+
+  # Master switch for session hang/continue.
+  enable: False
+
+  # Scheduler tick interval in milliseconds.
+  check_interval_in_ms: 1000
+
+  # Reserve this fraction of between-turn session tokens missing from measured engine usage.
+  env_token_weight: 1.0
+
+  # Decode headroom (tokens) reserved per running session.
+  buffer_per_session: 100
+
+  # `bucketed` preserves the current instance. `global` may select an emptier instance.
+  # Trajectory sticky routing requires `bucketed`.
+  continue_scope: bucketed
+
+  # Force the selected continue instance for one turn before normal routing resumes.
+  continue_force_pin: False
+

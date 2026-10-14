@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -xeuo pipefail
 
-project_name='retool'
-experiment_name='DAPO-Qwen2.5-7B-AIME-fsdp2-stream-nixl-staleness_0'
+staleness=${1:-2}
+project_name=psrl_example
+experiment_name=DAPO-Qwen2.5-7B-AIME-fsdp2-retool-staleness_${staleness}
 
 source ${PSRL_WORKSPACE}/env/psrl.sh
 
@@ -23,24 +24,26 @@ default_local_dir=$CKPT_ROOT/checkpoint/$experiment_name
 
 tool_config_path=${PSRL_PATH}/examples/retool/sandbox_fusion_tool_config.yaml
 
-GEN_TP=2 # TP in the generation side
+GEN_DP=1 # DP in the generation side
+GEN_TP=1 # TP in the generation side
 GEN_PP=1 # PP in the generation side
 
-VAL_TP=2 # TP in the training side for validation
+VAL_DP=1 # DP in the training side for validation
+VAL_TP=1 # TP in the training side for validation
 VAL_PP=1 # PP in the training side for validation
 
-TRAIN_SP=4 # SP in the training side
+TRAIN_SP=2 # SP in the training side
 TRAIN_FSDP=8 # FSDP in the training side
 
-NNODES=8
+NNODES=4
 NGPUS_PER_NODE=8
 
-GEN_NNODES=4 # Number of nodes for generation
+GEN_NNODES=2 # Number of nodes for generation
 GEN_NGPUS_PER_NODE=${NGPUS_PER_NODE} # Number of GPUs per node for generation
 GEN_INSTANCES=$(( (${GEN_NNODES} * ${GEN_NGPUS_PER_NODE}) / ( ${GEN_TP} * ${GEN_PP} ) )) # Number of generation instances
 GEN_NGPUS_PER_NODE_PER_INSTANCE=$(( ${GEN_TP} * ${GEN_PP} )) # Number of GPUs per node for generation per instance
 
-TRAIN_NNODES=4 # Number of nodes for training
+TRAIN_NNODES=2 # Number of nodes for training
 TRAIN_NGPUS_PER_NODE=${NGPUS_PER_NODE}
 
 VAL_INSTANCES=$(( (${TRAIN_NNODES} * ${TRAIN_NGPUS_PER_NODE}) / ( ${VAL_TP} * ${VAL_PP} ) )) # Number of validation instances
@@ -53,18 +56,18 @@ use_kl_loss=False
 kl_loss_coef=0.0
 clip_ratio_low=0.2
 clip_ratio_high=0.28
-max_turns=16
+max_turns=64
 max_prompt_length=2048
-max_response_length=30720
+max_response_length=16384
 actor_lr=1e-6
 enable_overlong_buffer=True
 overlong_buffer_len=$((1024 * 10))
 overlong_penalty_factor=1.0
 loss_agg_mode="token-mean"
-train_prompt_bsz=32
+train_prompt_bsz=64
 n_resp_per_prompt=8
 n_resp_per_prompt_val=8
-train_prompt_mini_bsz=32
+train_prompt_mini_bsz=64
 
 # Algorithm
 temperature=1.0
@@ -79,18 +82,16 @@ rollout_is_threshold=2.0
 # Performance Related Parameter
 use_dynamic_bsz=True
 packing_length=$(( (max_prompt_length + max_response_length) * 1 ))
-# NOTE(lhy): parameters of the actor cannot be offloaded when using nixl_cpu mode
-# May support this in the future
+# NOTE(lhy): Actor parameters cannot be offloaded in `nixl_cpu` mode.
 offload=False
 
-# Rollout Trace Configuration (precision may be affected)
 # gen_actor_rollout_ref.rollout.trace.backend=weave
 # gen_actor_rollout_ref.rollout.trace.token2text=True
 
-PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config --config-name='ppo_trainer' \
+PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path="${PSRL_PATH}/psrl/trainer/config" --config-name='ppo_trainer' \
     psrl.ps_manager_ip=${LOCAL_IP} \
     psrl.rollout_n=${n_resp_per_prompt} \
-    psrl.staleness=0 \
+    psrl.staleness=${staleness} \
     psrl.staleness_buffer_entries=${train_prompt_bsz} \
     psrl.ps_mode=nixl_cpu \
     psrl.logging_path=${PSRL_PATH}/examples/retool/fsdp_psrl_log/${experiment_name} \
@@ -103,14 +104,13 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config --conf
     psrl.deployment.validate_ngpus_per_node_per_instance=${VAL_NGPUS_PER_NODE_PER_INSTANCE} \
     psrl.deployment.train_nnodes=${TRAIN_NNODES} \
     psrl.deployment.train_ngpus_per_node=${TRAIN_NGPUS_PER_NODE} \
-    psrl.nixl.server_port=23456 \
+    psrl.deployment.total_nnodes=${NNODES} \
     \
-    gen_actor_rollout_ref.model.path="$MODEL_PATH" \
-    +gen_actor_rollout_ref.model.override_config.max_position_embeddings=32768 \
-    gen_actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
+    gen_actor_rollout_ref.rollout.gpu_memory_utilization=0.9 \
+    gen_actor_rollout_ref.rollout.data_parallel_size=${GEN_DP} \
     gen_actor_rollout_ref.rollout.tensor_model_parallel_size=${GEN_TP} \
     gen_actor_rollout_ref.rollout.pipeline_model_parallel_size=${GEN_PP} \
-    gen_actor_rollout_ref.rollout.enable_chunked_prefill=False \
+    gen_actor_rollout_ref.rollout.enable_chunked_prefill=True \
     gen_actor_rollout_ref.rollout.max_num_batched_tokens=$((max_prompt_length + max_response_length)) \
     gen_actor_rollout_ref.rollout.temperature=${temperature} \
     gen_actor_rollout_ref.rollout.top_p=${top_p} \
@@ -130,6 +130,7 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config --conf
     train_actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=${use_dynamic_bsz} \
     train_actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
     train_actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${packing_length} \
+    train_actor_rollout_ref.rollout.data_parallel_size=${VAL_DP} \
     train_actor_rollout_ref.rollout.tensor_model_parallel_size=${VAL_TP} \
     train_actor_rollout_ref.rollout.pipeline_model_parallel_size=${VAL_PP} \
     train_actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
@@ -166,19 +167,24 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config --conf
     algorithm.rollout_correction.rollout_is=${rollout_is} \
     algorithm.rollout_correction.rollout_is_threshold=${rollout_is_threshold} \
     \
-    data.train_files="$train_files" \
-    data.val_files="$test_files" \
-    data.prompt_key=prompt \
+    reward.active_managers='[naive]' \
+    reward.managers.naive.reward_fn.0.path=${PSRL_PATH}/examples/retool/retool.py \
+    reward.managers.naive.reward_fn.0.name=compute_score \
+    \
+    +data.train_files="$train_files" \
+    data.reward_model_dicts.0.reward_loop_type=naive \
+    data.reward_model_dicts.0.reward_fn=compute_score \
+    +data.val_files="$test_files" \
+    +data.prompt_key=prompt \
     data.truncation='error' \
     data.max_prompt_length=${max_prompt_length} \
     data.max_response_length=${max_response_length} \
     data.train_batch_size=${train_prompt_bsz} \
     data.return_raw_chat=True \
     data.filter_overlong_prompts=True \
-    data.custom_cls.path=${PSRL_PATH}/examples/retool/retool.py \
-    data.custom_cls.name=CustomRLHFDataset \
-    custom_reward_function.path=${PSRL_PATH}/examples/retool/retool.py \
-    custom_reward_function.name=compute_score \
+    +data.custom_cls.path=${PSRL_PATH}/examples/retool/retool.py \
+    +data.custom_cls.name=CustomRLHFDataset \
+    \
     algorithm.adv_estimator=${adv_estimator} \
     algorithm.use_kl_in_reward=${use_kl_in_reward} \
     algorithm.kl_ctrl.kl_coef=${kl_coef} \

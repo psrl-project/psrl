@@ -3,9 +3,7 @@ set -e
 set -o pipefail
 trap 'echo "[ERROR] Failed at line $LINENO: $BASH_COMMAND" >&2; exit 1' ERR
 
-VLLM_PATH=${VLLM_PATH:-third_party/vllm}
-VERL_PATH=${VERL_PATH:-third_party/verl}
-MAX_JOBS=${MAX_JOBS:-32}
+MAX_JOBS=${MAX_JOBS:-64}
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PSRL_PATH="$(dirname "$SCRIPT_DIR")"
@@ -16,30 +14,41 @@ echo "0. Install uv to boost installation speed"
 python -m pip install uv
 
 echo "1. Install pytorch and tensordict"
-python -m uv pip install "torch==2.9.1" "torchvision==0.24.1" "torchaudio==2.9.1" --index-url https://download.pytorch.org/whl/cu128
-python -m uv pip install "triton==3.5.1" "tensordict==0.10.0" torchdata
+python -m uv pip install --no-cache-dir "torch==2.11.0" "torchvision==0.26.0" "torchaudio==2.11.0" --index-url https://download.pytorch.org/whl/cu128
+python -m uv pip install --no-cache-dir "triton==3.6.0" "tensordict==0.12.4" torchdata
+
+# For ncclCommSuspend/ncclCommResume support
+# 2.28.9 is not enough
+python -m uv pip install nvidia-nccl-cu12==2.29.7
 
 echo "2. Install basic packages"
-python -m uv pip install "transformers[hf_xet]==5.5.0" accelerate datasets peft hf-transfer matplotlib flask click==8.2.1 \
+python -m uv pip install "transformers==5.10.1" accelerate datasets peft hf-transfer matplotlib flask click==8.2.1 \
     "numpy<2.0.0" "pyarrow>=19.0.1" pandas paramiko sortedcontainers \
     ray[default]==2.49.1 codetiming hydra-core pylatexenc qwen-vl-utils wandb dill pybind11 liger-kernel mathruler blobfile xgrammar \
-    pytest py-spy pre-commit ruff meson ninja pynvml requests einops trl==0.26.2
+    pytest py-spy pre-commit ruff meson ninja pynvml requests einops "trl==1.14.1" maturin puccinialin protoc-wheel-0 nvidia-modelopt[torch]
 
-python -m uv pip uninstall pynvml nvidia-ml-py
+python -m uv pip uninstall -y pynvml nvidia-ml-py
 python -m uv pip install --no-cache-dir "nvidia-ml-py>=12.560.30" "fastapi[standard]>=0.115.0" "optree>=0.13.0" "pydantic>=2.9" "grpcio>=1.62.1" "nvidia-cudnn-frontend>=1.13.0"
+# Match the protobuf 7 runtime before no-build-isolation generates SMG stubs.
+python -m uv pip install --no-cache-dir "grpcio-tools>=1.81.1" "protobuf>=7.35.1,<8"
 
 echo "4. Install FlashAttention and FlashInfer"
-# Install flash-attn-2.8.1
+# Install FlashAttention 2 for packages that import `flash_attn`.
 FLASH_ATTN_CUDA_ARCHS=90 \
 FLASH_ATTENTION_FORCE_BUILD="TRUE" \
 FLASH_ATTENTION_FORCE_CXX11_ABI="FALSE" \
 FLASH_ATTENTION_SKIP_CUDA_BUILD="FALSE" \
-python -m uv pip install --no-cache-dir --no-build-isolation "flash-attn==2.8.1" 
+python -m uv pip install -U "flash-attn==2.8.1" --no-build-isolation --no-deps
 
-# Install flashinfer-python
-python -m uv pip install --no-cache-dir --no-build-isolation "flashinfer-python==0.5.3"
-
-python -m uv pip install flash-linear-attention==0.4.2
+# Install FlashAttention 3 beta from the Hopper source tree.
+git clone --depth 1 --branch v2.8.1 https://github.com/Dao-AILab/flash-attention.git flash_attn_src
+pushd flash_attn_src/hopper
+python setup.py install
+python_path=`python -c "import site; print(site.getsitepackages()[0])"`
+mkdir -p $python_path/flash_attn_3
+wget -P $python_path/flash_attn_3 https://raw.githubusercontent.com/Dao-AILab/flash-attention/7b0bfcc3d1f69786f0c4277c582ad58acdfb297d/hopper/flash_attn_interface.py
+popd
+rm -rf flash_attn_src
 
 echo "5. Install apex"
 mkdir -p apex_src
@@ -50,15 +59,52 @@ MAX_JOB=$MAX_JOBS python -m pip install -v --disable-pip-version-check --no-cach
 popd
 rm -rf apex_src
 
-echo "6. Install vllm and verl"
+echo "6. Install SMG (with PSRL policies)"
+# Check if Rust is installed
+if ! command -v cargo &> /dev/null; then
+    echo "Error: Rust/Cargo not found. Please install Rust first:"
+    echo "  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+    echo "  source \$HOME/.cargo/env"
+    exit 1
+fi
+
+echo "Building SMG from source..."
+pushd $THIRD_PARTY_PATH
+# git clone https://github.com/psrl-project/smg.git -b psrl-dev
+cd smg
+SMG_DIR="${PWD}" bash "${SCRIPT_DIR}/apply_smg_patch.sh"
+# Comment out the smg-tui workspace dependency (not needed for PSRL build)
+sed -i 's|^smg-tui = { version = "0.1.0", path = "tui" }|# smg-tui = { version = "0.1.0", path = "tui" }|' Cargo.toml
+# Build release binary with PSRL policies
+cargo build --release
+# --no-build-isolation: generate stubs with the ambient grpcio-tools installed above.
+python -m uv pip install --no-build-isolation -e crates/grpc_client/python/
+python -m uv pip install --no-build-isolation -e crates/psrl_state/python/
+python -m uv pip install -e grpc_servicer/
+# Re-assert protobuf 7 after servicer deps (pip may leave an older runtime).
+python -m uv pip install --no-cache-dir "protobuf>=7.35.1,<8"
+
+echo "Build python binding of smg..."
+cd bindings/python
+maturin develop --features vendored-openssl --release
+popd
+
+# Verify the binding is importable
+python -c "from smg.router import Router; print('  ✓ smg.router binding installed successfully')" || {
+    echo "Error: smg.router binding failed to install"
+    exit 1
+}
+
+echo "7. Install vllm and verl"
 if [ -z "$VLLM_PATH" ]; then
     pushd $THIRD_PARTY_PATH
-    git clone -b v0.18.1 https://github.com/vllm-project/vllm.git
+    # git clone -b releases/v0.22.0 https://github.com/vllm-project/vllm.git
+    VLLM_PATH=$THIRD_PARTY_PATH/vllm
     popd
 fi
 pushd $VLLM_PATH
 python use_existing_torch.py
-python -m uv pip install -r requirements/build.txt
+python -m uv pip install -r requirements/build/cuda.txt
 python -m uv pip install --no-build-isolation -e .
 popd
 
@@ -67,24 +113,47 @@ python -m uv pip install "transformers[hf_xet]==5.5.0"
 
 if [ -z "$VERL_PATH" ]; then
     pushd $THIRD_PARTY_PATH
-    git clone https://github.com/volcengine/verl.git
+    # git clone https://github.com/volcengine/verl.git
     VERL_PATH=$THIRD_PARTY_PATH/verl
     cd $VERL_PATH
-    git checkout 3824689
+    git checkout e5ca4acb
     popd
 fi
 pushd $VERL_PATH
 python -m uv pip install -e .
 popd
 
-# echo "7. Apply patch for vllm"
-# pushd $PSRL_PATH/patch/vllm
-# bash apply_patch.sh
-# popd
+if [ -z "$TQ_PATH" ]; then
+    pushd $THIRD_PARTY_PATH
+    # git clone https://github.com/Ascend/TransferQueue.git
+    TQ_PATH=$THIRD_PARTY_PATH/TransferQueue
+    cd $TQ_PATH
+    # git checkout 434f8c4
+    popd
+fi
+pushd $TQ_PATH
+python -m uv pip install -e .
+popd
 
-# echo "8. Apply patch for verl"
-# pushd $PSRL_PATH/patch/verl
-# bash apply_patch.sh
-# popd
+echo "8. Apply patch for dependencies..."
+
+# bash "$PSRL_PATH/patch/apply_patch.sh" vllm
+# bash "$PSRL_PATH/patch/apply_patch.sh" verl
+# bash "$PSRL_PATH/patch/apply_patch.sh" transfer_queue
+
+echo "9. Install torch_memory_saver"
+python -m uv pip install git+https://github.com/fzyzcjy/torch_memory_saver.git@d64a6394d1e09c613fab90260054cecc2684586d --no-cache-dir --force-reinstall
+
+echo "10. Install flashinfer"
+mkdir -p flashinfer_src
+pushd flashinfer_src
+git clone https://github.com/flashinfer-ai/flashinfer.git --recursive --branch v0.6.11.post3
+cd flashinfer
+python -m uv pip install -v .
+cd flashinfer-cubin
+python -m build --no-isolation --wheel
+python -m uv pip install dist/*.whl
+popd
+rm -rf flashinfer_src
 
 echo "Successfully installed all basic packages"

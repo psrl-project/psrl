@@ -1,0 +1,45 @@
+name: pre-commit
+
+on:
+  pull_request:
+  push:
+    branches: [main, base_agentic_rl]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  pre-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Install pre-commit
+        run: python -m pip install pre-commit
+      - name: Run pre-commit on changed files
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            base_sha="${{ github.event.pull_request.base.sha }}"
+          else
+            base_sha="${{ github.event.before }}"
+          fi
+
+          head_sha="${{ github.sha }}"
+          if [[ "$base_sha" == "0000000000000000000000000000000000000000" ]]; then
+            base_sha="$(git rev-list --max-parents=0 "$head_sha")"
+          fi
+
+          pre-commit run \
+            --show-diff-on-failure \
+            --color=always \
+            --from-ref "$base_sha" \
+            --to-ref "$head_sha"

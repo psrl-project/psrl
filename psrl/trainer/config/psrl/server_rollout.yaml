@@ -1,0 +1,14 @@
+# Whether to enable server rollout service.
+enable: False
+
+# Rollout gateway config.
+# This gateway is an HTTP entrypoint used by agent loops to call rollout service.
+gateway:
+
+  # Bind address for the gateway process.
+  router_ip: ${psrl.ps_manager_ip}
+
+  router_port: 18080
+
+# Max concurrent connections per rollout server for the HTTP client.
+server_concurrency: 64

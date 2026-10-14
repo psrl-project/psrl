@@ -1,0 +1,24 @@
+# Metric used by scale_down_threshold/scale_up_threshold for elastic scaling decisions.
+# Available options:
+# - kv_cache: scheduler_stats.kv_cache_usage
+# - running_request_num: scheduler_stats.num_running_reqs
+# - waiting_request_num: scheduler_stats.num_waiting_reqs
+# - total_request_num: num_running_reqs + num_waiting_reqs
+load_threshold_metric: kv_cache
+
+# Low-load threshold under `load_threshold_metric` below which an instance can cede resources
+scale_down_threshold: 0.1
+
+# Full-load threshold under `load_threshold_metric` above which an instance is considered full-load
+scale_up_threshold: 0.8
+
+# Priority-3 scale-down guard: even if KV cache is below scale_down_threshold, do not shrink if the
+# selected scale-down candidate still has too many requests waiting in its local queue.
+# 0 means: candidate must have no waiting requests to be shrinkable.
+max_waiting_queue_for_scale_down: 64
+
+# Full load mode for scaling policy
+# Available options: "all", "any"
+# "all": all instances must be full load to scale up
+# "any": any instance can be full load to scale up
+full_load_mode: any

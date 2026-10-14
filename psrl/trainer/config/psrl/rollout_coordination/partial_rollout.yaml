@@ -1,0 +1,5 @@
+# Whether to enable partial rollout
+enable: True
+
+# Whether view interrupted trajectories as new prompts
+interrupt_as_prompt: False

@@ -189,10 +189,6 @@ class StatCollector(StatLoggerBase):
                     "num_finished_requests": (
                         len(getattr(iteration_stats, "finished_requests", [])) if iteration_stats else 0
                     ),
-                    # "time_to_first_tokens": getattr(iteration_stats, 'time_to_first_tokens_iter', [])
-                    # if iteration_stats else [],
-                    # "inter_token_latencies": getattr(iteration_stats, 'inter_token_latencies_iter', [])
-                    # if iteration_stats else [],
                     "time_to_first_tokens_avg": (np.mean(time_to_first_tokens_iter) if iteration_stats else 0),
                     "time_to_first_tokens_max": (np.max(time_to_first_tokens_iter) if iteration_stats else 0),
                     "inter_token_latencies_avg": (np.mean(inter_token_latencies_iter) if iteration_stats else 0),

@@ -1,0 +1,2 @@
+# Whether to return logprobs from rollout engines
+enable_rollout_engine_log_prob: True

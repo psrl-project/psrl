@@ -1,0 +1,180 @@
+# configs for the reward model
+
+# whether to launch the reward function asynchronously
+launch_reward_fn_async: True
+
+# way to normalize the reward, choices: group, batch, none
+reward_normalization: null
+
+# reward loop worker pool for request-granularity reward computation
+reward_loop_worker:
+  num_workers: 8
+  max_concurrency_per_worker: 256
+  queue_size_per_worker: 4096
+  placement: reward_service_ip
+  result_queue_size: 65536
+  result_drain_batch_size: 1024
+  heartbeat_interval_s: 30
+  shutdown_timeout_s: 10
+
+# Only listed managers are active at runtime.
+active_managers:
+  - naive
+
+# Scripts may override `reward.managers.<name>.<field>` in these named configurations.
+managers:
+  dapo:
+    reward_manager:
+      _target_: verl.workers.config.reward_model.RewardManagerConfig
+      source: register
+      name: dapo
+      module:
+        _target_: verl.trainer.config.config.ModuleConfig
+        path: null
+        name: custom_reward_manager
+    reward_loop_type: dapo
+    reward_fn:
+      - path: null
+        name: compute_score
+    reward_kwargs:
+      max_resp_len: 5120
+      overlong_buffer_cfg:
+        enable: True
+        len: 3072
+        penalty_factor: 1.0
+        log: False
+
+  naive:
+    reward_manager:
+      _target_: verl.workers.config.reward_model.RewardManagerConfig
+      source: register
+      name: naive
+      module:
+        _target_: verl.trainer.config.config.ModuleConfig
+        path: null
+        name: custom_reward_manager
+    reward_loop_type: naive
+    reward_fn:
+      - path: null
+        name: compute_score
+
+  gen_qwen3_8b:
+    reward_manager:
+      _target_: verl.workers.config.reward_model.RewardManagerConfig
+      source: register
+      name: gen
+      module:
+        _target_: verl.trainer.config.config.ModuleConfig
+        path: null
+        name: custom_reward_manager
+    reward_loop_type: gen
+    reward_fn:
+      - path: null
+        name: default
+    reward_model_name: Qwen3-8B
+  
+    enable_resource_pool: True
+    n_gpus_per_node: 4
+    num_replicas: 4
+    nnodes: 1
+    rollout_ngpus_per_instance_per_node: 1
+    rollout_nnodes_per_instance: 1
+    # null leaves concurrent requests on one reward instance uncapped.
+    max_concurrent_requests_per_instance: null
+  
+    model:
+      path: ${oc.env:PSRL_WORKSPACE,/tmp}/models/Qwen3-8B
+      external_lib: ${oc.select:train_actor_rollout_ref.model.external_lib,null}
+      trust_remote_code: False
+  
+    # RM-specific overlays on the composed `psrl_rollout` schema.
+    rollout:
+      gpu_memory_utilization: 0.7
+      enforce_eager: true
+      tensor_model_parallel_size: 1
+      max_num_batched_tokens: 204800
+      max_num_seqs: 1024
+      load_format: auto
+      enable_chunked_prefill: false
+      enable_prefix_caching: false
+      # One-shot teacher scoring does not reuse KV cache.
+      disable_kv_cache: true
+      skip_tokenizer_init: false
+      n: 1
+      prompt_length: 16384
+      response_length: 16384
+      max_model_len: 32768
+      enable_weights_cpu_backup: True
+  
+    sampling_config:
+      temperature: 1.0
+      top_p: -1
+      top_k: 1
+
+  gen_skywork:
+    reward_manager:
+      _target_: verl.workers.config.reward_model.RewardManagerConfig
+      source: register
+      name: gen
+      module:
+        _target_: verl.trainer.config.config.ModuleConfig
+        path: null
+        name: custom_reward_manager
+    reward_loop_type: gen
+    reward_fn:
+      - path: null
+        name: skywork
+    reward_model_name: Skywork-Reward-V2-Qwen3-8B
+  
+    enable_resource_pool: True
+    n_gpus_per_node: 1
+    num_replicas: 4
+    nnodes: 1
+    rollout_ngpus_per_instance_per_node: 1
+    rollout_nnodes_per_instance: 1
+    # null leaves concurrent requests on one reward instance uncapped.
+    max_concurrent_requests_per_instance: null
+  
+    model:
+      path: ${oc.env:PSRL_WORKSPACE,/tmp}/models/Skywork-Reward-V2-Qwen3-8B
+      external_lib: ${oc.select:train_actor_rollout_ref.model.external_lib,null}
+      trust_remote_code: False
+  
+    # RM-specific overlays on the composed `psrl_rollout` schema.
+    rollout:
+      gpu_memory_utilization: 0.5
+      enforce_eager: true
+      tensor_model_parallel_size: 1
+      max_num_batched_tokens: 20480
+      max_num_seqs: 1024
+      load_format: auto
+      enable_chunked_prefill: false
+      enable_prefix_caching: false
+      # One-shot teacher scoring does not reuse KV cache.
+      disable_kv_cache: true
+      disable_log_stats: true
+      skip_tokenizer_init: false
+      n: 1
+      prompt_length: 8192
+      response_length: 8192
+      max_model_len: 16384
+      runner: pooling
+      task: classify
+  
+    pooling_config:
+      task: classify
+      use_activation: false
+      normalize: false
+
+  sandbox:
+    reward_loop_type: naive
+    reward_fn:
+      - None
+    # Cloud/local sandbox fusion configuration for custom reward logic
+    sandbox_fusion:
+      # Cloud /local function URL for sandbox execution
+      url: null
+      # Max concurrent requests allowed to sandbox
+      max_concurrent: 64
+      # Max memory limit for each sandbox process in MB
+      memory_limit_mb: 1024

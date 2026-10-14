@@ -1,41 +1,82 @@
-# PSRL
+# =========================================================================
+# Project-specific (PSRL)
+# =========================================================================
 examples/visualization/.*/
 unit_tests/nixl/plot/
 third_party/
 third_party_old/
 third_party_old_2/
 third_party_new/
+third_party*/
 
-# General
+# Auto-generated Sphinx api docs
+/docs/generated
+
+# Misc project data
+dataset/*
+tensorflow/my_graph/*
+
+
+# =========================================================================
+# Runtime artifacts / outputs (apply anywhere in the repo)
+# =========================================================================
+# Common artifact file types
 **/*.log
-**/*.svg
 **/*.pdf
 **/*.pkl
 **/*.png
 **/*.pt
+**/*.ckpt
+**/*.tar.gz
+**/*.jsonl
+**/*.parquet
+**/*.lock
+
+# Documentation figures are source assets, not runtime artifacts, so they are
+# re-included after the broad file-type rules above.
+!docs/_static/img/*.png
+!assets/*.png
+
+# AIRS-Bench pinned parquet dataset files (small metadata, not training data).
+!examples/airs_bench/data/
+!examples/airs_bench/data/*.parquet
+
+# Common artifact directories
 **/checkpoints
+**/ckpts
 **/wget-log
 **/_build/
-**/*.ckpt
 **/outputs
-**/*.tar.gz
+**/outputs/
+
+# Talk material. Cites cluster-side measurements that stay out of published docs.
+examples/sciaccel_rl/slides/
+**/output/
 **/playground
 **/wandb
-**/*.jsonl
+**/logs/
+**/log/
+**/*log*/
+# "topology" contains "log", so the rule above swallows this config group.
+!psrl/eval/config/topology/
+**/models/
+# **/data/
+**/results/
 
-# Byte-compiled / optimized / DLL files
+
+# =========================================================================
+# Python: byte-compiled / optimized / DLL files
+# =========================================================================
 __pycache__/
 *.py[cod]
 *$py.class
-dataset/*
-tensorflow/my_graph/*
-.idea/
-# C extensions
 *.so
 
+
+# =========================================================================
 # Distribution / packaging
+# =========================================================================
 .Python
-env/
 build/
 develop-eggs/
 dist/
@@ -48,79 +89,178 @@ parts/
 sdist/
 var/
 tmp/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+MANIFEST
 
+
+# =========================================================================
 # PyInstaller
-#  Usually these files are written by a python script from a template
-#  before PyInstaller builds the exe, so as to inject date/other infos into it.
+#   Usually these files are written by a python script from a template
+#   before PyInstaller builds the exe, so as to inject date/other infos.
+# =========================================================================
 *.manifest
 *.spec
 
+
+# =========================================================================
 # Installer logs
+# =========================================================================
 pip-log.txt
 pip-delete-this-directory.txt
 
+
+# =========================================================================
 # Unit test / coverage reports
+# =========================================================================
 htmlcov/
 .tox/
+.nox/
 .coverage
 .coverage.*
 .cache
 nosetests.xml
 coverage.xml
+*.cover
 *,cover
+*.py,cover
 .hypothesis/
+.pytest_cache/
 
+
+# =========================================================================
 # Translations
+# =========================================================================
 *.mo
 *.pot
 
-# Django stuff:
-*.log
-local_settings.py
 
-# Flask stuff:
+# =========================================================================
+# Django
+# =========================================================================
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+
+# =========================================================================
+# Flask
+# =========================================================================
 instance/
 .webassets-cache
 
-# Scrapy stuff:
+
+# =========================================================================
+# Scrapy
+# =========================================================================
 .scrapy
 
-# Sphinx documentation
-docs/_build/
 
+# =========================================================================
+# Sphinx documentation
+# =========================================================================
+docs/_build/
+docs/superpowers/
+
+
+# =========================================================================
 # PyBuilder
+# =========================================================================
 target/
 
-# IPython Notebook
-.ipynb_checkpoints
 
+# =========================================================================
+# Jupyter / IPython
+# =========================================================================
+.ipynb_checkpoints
+profile_default/
+ipython_config.py
+
+
+# =========================================================================
 # pyenv
+# =========================================================================
 .python-version
 
-# celery beat schedule file
+
+# =========================================================================
+# pipenv
+#   According to pypa/pipenv#598, it is recommended to include Pipfile.lock
+#   in version control. However, in case of collaboration, if having
+#   platform-specific dependencies or dependencies having no cross-platform
+#   support, pipenv may install dependencies that don't work, or not install
+#   all needed dependencies.
+# =========================================================================
+#Pipfile.lock
+
+
+# =========================================================================
+# PEP 582 (e.g. github.com/David-OConnor/pyflow)
+# =========================================================================
+__pypackages__/
+
+
+# =========================================================================
+# Celery
+# =========================================================================
 celerybeat-schedule
+celerybeat.pid
 
-# dotenv
+
+# =========================================================================
+# SageMath
+# =========================================================================
+*.sage.py
+
+
+# =========================================================================
+# Virtual environments
+# =========================================================================
 .env
-
-# virtualenv
+.venv
+env/
 venv/
-.venv/
 ENV/
+env.bak/
+venv.bak/
 
-# Spyder project settings
+
+# =========================================================================
+# Type checkers / linters
+# =========================================================================
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+# Pyre
+.pyre/
+
+
+# =========================================================================
+# mkdocs documentation
+# =========================================================================
+/site
+
+
+# =========================================================================
+# Editor / IDE / OS
+# =========================================================================
+# Spyder
 .spyderproject
-
-# Rope project settings
+.spyproject
+# Rope
 .ropeproject
-
-# vscode
+# PyCharm
+.idea/
+# VSCode
 .vscode
-
-# Mac
+# Vim
+*.swp
+# macOS
 .DS_Store
 
 # vim

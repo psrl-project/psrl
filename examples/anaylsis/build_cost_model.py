@@ -321,10 +321,7 @@ def plot_results(data, fit_result):
 
 def plot_attn_results(data, attn_fit_result, k, b, threshold):
     """
-    Plot attention latency fitting results
-    X-axis: token_num
-    Y-axis: actual_latency - latency_model_predicted (i.e., attention latency)
-    Only plots filtered data points (outliers removed)
+    Plot the attention latency fit after removing invalid and outlier points.
     """
     if not attn_fit_result:
         return
@@ -342,7 +339,7 @@ def plot_attn_results(data, attn_fit_result, k, b, threshold):
     # Calculate other latencies using latency_model
     other_latencies = latency_model(request_nums, k, b, threshold)
 
-    # Calculate attention latencies (actual - other)
+    # Subtract modeled nonattention latency from actual latency.
     attention_latencies = actual_latencies - other_latencies
 
     # Filter out negative values first (basic validation)

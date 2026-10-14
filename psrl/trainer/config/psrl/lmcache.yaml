@@ -1,0 +1,83 @@
+# Offload vLLM KV cache to preserve prefixes across multi-turn agent loops.
+
+# Whether to enable LMCache KV offloading in vLLM.
+enable: False
+
+# Backend for offloaded KV: "cpu", "disk", or "remote" (TODO: remote).
+backend: cpu
+
+# Total GiB across all TP ranks. vLLM converts it to a per-rank budget.
+# Do not set `LMCACHE_MAX_LOCAL_CPU_SIZE`, which would apply the total to every rank.
+offload_size_gb: 100.0
+
+# Token chunk size for hash-based KV indexing (must divide the block size).
+chunk_size: 256
+
+# Full LMCache YAML config path. When set, it overrides all individual fields.
+config_file: null
+
+# Whether to clear stale KV cache after model weight pull from PS.
+clear_on_weight_update: False
+
+# Whether to enable multi-version KV cache.
+multi_version_kv: True
+
+# --- CPU backend ---
+
+# GiB of CPU memory to keep free and never use for KV offloading.
+reserve_local_cpu_size: 0.0
+
+# --- Disk backend ---
+
+# Filesystem path for disk-backed KV storage (required when backend=disk).
+disk_path: null
+
+# Max disk usage in GiB when using the disk backend.
+max_disk_size_gb: 1000.0
+
+# --- Remote backend (TODO) ---
+
+# Remote LMCache server URL (e.g., "redis://host:6379").
+remote_url: null
+
+# --- Cache behaviour ---
+
+# Also cache KV from decode steps (increases memory, helps multi-turn reuse).
+save_decode_cache: True
+
+# NOTE(lhy): The `save_unfull_chunk` option is buggy and must remain disabled.
+save_unfull_chunk: False
+
+# Eviction policy: "LRU" (default) or "FIFO".
+cache_policy: LRU
+
+# NOTE(lhy): Async cache loading is buggy and must remain disabled.
+enable_async_loading: False
+
+# P2P is required by routing_strategy.kv_transfer.enable and requires `clear_on_weight_update=False`.
+# Keep `multi_version_kv=True` because version tags prevent stale hits while P2PBackend cannot clear during weight sync.
+enable_p2p: False
+
+# `nixl` selects shared memory, IPC, or RDMA.
+# Use `tcp` when NIXL or UCX is unavailable.
+p2p_transfer_channel: nixl
+
+# Base HTTP port. `RolloutCoordinator` selects an available port from this value.
+controller_base_port: 9000
+
+# Health timeout includes slow imports and cluster CPU or filesystem contention.
+controller_health_timeout_s: 3000
+
+# Host where the LMCache Controller runs. Defaults to psrl.ps_manager_ip.
+# Both PSRL (HTTP) and LMCache workers (ZMQ) connect to this host.
+controller_host: ${psrl.ps_manager_ip}
+
+# ZMQ PULL port for LMCache worker registration and heartbeats.
+controller_pull_port: 8300
+
+# ZMQ REPLY port for controller instructions to LMCache workers.
+controller_reply_port: 8400
+
+# Maximum pinned GPU KV blocks. Zero disables the limit.
+# The oldest pinned trajectory is released first.
+gpu_pin_block_budget: 0

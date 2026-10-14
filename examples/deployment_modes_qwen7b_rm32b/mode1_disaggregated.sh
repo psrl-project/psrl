@@ -21,12 +21,6 @@ export PSRL_DEPLOY_RM_NUM_REPLICAS=8
 export PSRL_DEPLOY_SMOKE=${1:-0}
 export PSRL_DEPLOY_DATASET=${PSRL_DEPLOY_DATASET:-dapo}
 export PSRL_NEED_VALIDATION=${PSRL_NEED_VALIDATION:-1}
-export PSRL_DISAGG_INTERRUPT_INTERVAL_S=${PSRL_DISAGG_INTERRUPT_INTERVAL_S:-10}
 shift || true
-
-export PSRL_DEPLOY_EXTRA="\
-psrl.deployment.disaggregated_rollout_interrupt.enable=True \
-psrl.deployment.disaggregated_rollout_interrupt.interval_s=${PSRL_DISAGG_INTERRUPT_INTERVAL_S} \
-"
 
 launch_qwen7b_rm32b_deployment_mode "$@"

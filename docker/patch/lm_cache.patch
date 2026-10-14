@@ -1,0 +1,300 @@
+diff --git a/lmcache/integration/vllm/lmcache_mp_connector.py b/lmcache/integration/vllm/lmcache_mp_connector.py
+index 972d90cd..09cc41eb 100644
+--- a/lmcache/integration/vllm/lmcache_mp_connector.py
++++ b/lmcache/integration/vllm/lmcache_mp_connector.py
+@@ -5,7 +5,6 @@ from collections.abc import Iterable
+ from dataclasses import dataclass, field
+ from typing import TYPE_CHECKING, Any, Literal
+ import enum
+-
+ # Third Party
+ from vllm.config import VllmConfig
+ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+diff --git a/lmcache/integration/vllm/vllm_v1_adapter.py b/lmcache/integration/vllm/vllm_v1_adapter.py
+index 27c29c8d..c958e3bf 100644
+--- a/lmcache/integration/vllm/vllm_v1_adapter.py
++++ b/lmcache/integration/vllm/vllm_v1_adapter.py
+@@ -1543,10 +1543,43 @@ class LMCacheConnectorV1Impl:
+         force_skip_save = self.kv_role == "kv_consumer" or self.force_skip_save
+ 
+         meta = LMCacheConnectorMetadata()
++
++        # NOTE(psrl): Build the set of req_ids being newly scheduled this step
++        # before evicting finished entries. PSRL recycles integer UIDs across
++        # partial-rollout re-submissions, so the same ID can appear in both
++        # finished_req_ids (the old, aborted instance) and scheduled_new_reqs
++        # (the freshly re-submitted instance) within a single scheduling step.
++        # This happens because PSRL's abort and re-add messages land in the
++        # same _process_input_queue drain, causing the sequence:
++        #   (a) ABORT(uid)  → finished_req_ids.add(uid)
++        #   (b) ADD(uid_v2) → waiting queue
++        #   (c) schedule()  → uid_v2 promoted to running →
++        #       update_state_after_alloc → _unfinished_requests[uid] = req_v2
++        #       uid_v2 placed in scheduled_new_reqs
++        # If we blindly pop _unfinished_requests[uid] in step (a)'s cleanup,
++        # the freshly-set entry for req_v2 is destroyed. The next step then
++        # finds uid in scheduled_cached_reqs but not in _unfinished_requests,
++        # raising ValueError.
++        # Fix: skip _unfinished_requests eviction when the same ID has already
++        # been re-registered in scheduled_new_reqs this step. The
++        # _request_trackers entry is still popped (the scheduled_new_reqs loop
++        # below will re-create it for req_v2).
++        new_req_ids: set[str] = {
++            r.req_id
++            for r in scheduler_output.scheduled_new_reqs
++            if not r.req_id.startswith("mock_req")
++        }
+ 
+         for finished_req_id in scheduler_output.finished_req_ids:
+             self._request_trackers.pop(finished_req_id, None)
+-            self._unfinished_requests.pop(finished_req_id, None)
++            if finished_req_id not in new_req_ids:
++                self._unfinished_requests.pop(finished_req_id, None)
++            else:
++                logger.debug(
++                    "Skipping _unfinished_requests eviction for %s: "
++                    "same ID was re-submitted in this scheduling step.",
++                    finished_req_id,
++                )
+ 
+         # We should load KV for:
+         # 1. new requests
+@@ -1779,11 +1812,21 @@ class LMCacheConnectorV1Impl:
+ 
+         # Cleanup if request was aborted
+         if request.status == RequestStatus.FINISHED_ABORTED:
+-            # Notify storage backends of aborted requests
+-            assert self.lmcache_engine is not None
+-            sm = self.lmcache_engine.storage_manager
+-            if sm is not None:
+-                sm.cancel_request(request.request_id)
++            # Notify storage backends of aborted requests.
++            # NOTE(psrl): request_finished is a scheduler-side method, and the
++            # scheduler role does not create an lmcache_engine unless
++            # enable_scheduler_bypass_lookup is set (see vllm_service_factory:
++            # "Scheduler without bypass lookup does not need an engine"). The
++            # original code asserted the engine is not None, which crashes the
++            # EngineCore with AssertionError when PSRL aborts in-flight requests
++            # during the weight-sync pause (pause_scheduler mode="abort"),
++            # leaving the trainer hung waiting for the pause to complete. The
++            # storage_manager only lives on the worker side, so guard the engine
++            # access; the scheduler-side abort cleanup is the cancel_lookup below.
++            if self.lmcache_engine is not None:
++                sm = self.lmcache_engine.storage_manager
++                if sm is not None:
++                    sm.cancel_request(request.request_id)
+ 
+             if self.async_loading:
+                 # Cancel any ongoing async lookup and prefetch tasks on workers
+diff --git a/lmcache/v1/cache_controller/executor.py b/lmcache/v1/cache_controller/executor.py
+index a78d1971..2f7ebaed 100644
+--- a/lmcache/v1/cache_controller/executor.py
++++ b/lmcache/v1/cache_controller/executor.py
+@@ -323,6 +323,7 @@ class LMCacheClusterExecutor:
+                     new_position=(dst_url, msg.new_position[1]),
+                     tokens=msg.tokens,
+                     copy=msg.copy,
++                    request_configs=getattr(msg, "request_configs", None),
+                 )
+             )
+             serialized_msgs.append(serialized_msg)
+diff --git a/lmcache/v1/cache_controller/message.py b/lmcache/v1/cache_controller/message.py
+index d4d68dc5..a33c06ce 100644
+--- a/lmcache/v1/cache_controller/message.py
++++ b/lmcache/v1/cache_controller/message.py
+@@ -422,6 +422,7 @@ class MoveWorkerMsg(ControlMsg):
+     new_position: Tuple[str, str]  # (target_url, location (storage backend name) )
+     tokens: Optional[list[int]] = None
+     copy: Optional[bool] = True
++    request_configs: Optional[dict] = None
+ 
+     def describe(self) -> str:
+         return (
+diff --git a/lmcache/v1/cache_controller/worker.py b/lmcache/v1/cache_controller/worker.py
+index a6632c2d..0e2e1f7c 100644
+--- a/lmcache/v1/cache_controller/worker.py
++++ b/lmcache/v1/cache_controller/worker.py
+@@ -566,6 +566,7 @@ class LMCacheWorker:
+                             new_position=new_position,
+                             event_id=worker_event_id,
+                             do_copy=do_copy,
++                            request_configs=getattr(request, "request_configs", None),
+                         )
+ 
+                     # TODO(Jiayi): LMCache needs to have an event tracking
+diff --git a/lmcache/v1/cache_engine.py b/lmcache/v1/cache_engine.py
+index b684a4ee..0ec8a79f 100644
+--- a/lmcache/v1/cache_engine.py
++++ b/lmcache/v1/cache_engine.py
+@@ -1190,6 +1190,7 @@ class LMCacheEngine:
+         new_position: tuple[str, str],
+         event_id: str,
+         do_copy: bool = True,
++        request_configs: Optional[dict] = None,
+     ) -> int:
+         """
+         Perform cross-node move of the KV cache.
+@@ -1201,47 +1202,63 @@ class LMCacheEngine:
+             search_range=[old_position],
+             lookup_id=event_id,
+             pin=True,
++            request_configs=request_configs,
+         )
+ 
+         if not num_tokens:
+             logger.debug("Move is not performed as there are no tokens to move.")
+             return 0
+ 
+-        block_mapping = self.lookup_pins[event_id]
+-        assert len(block_mapping) == 1
+-        keys = block_mapping[old_position]
+-
+-        memory_objs = self.storage_manager.batched_get(
+-            keys=keys,
+-            location=old_position,
+-        )
+-        assert None not in memory_objs, "Failed to get memory objects to move"
+-        logger.debug(
+-            f"Trying to send {len(memory_objs)} memory objects to {new_position}"
+-        )
+-
+-        # TODO: reduce loops
+-        token_dim = memory_objs[0].meta.fmt.token_dim()  # type: ignore
+-        offsets = [m.meta.shape[token_dim] for m in memory_objs]  # type: ignore
+-
+-        transfer_spec = {
+-            "target_peer_init_url": new_position[0],
+-            "offsets": offsets,
+-        }
+-
+-        logger.info(self.storage_manager.storage_backends)
+-        p2p_backend = self.storage_manager.storage_backends["P2PBackend"]
++        memory_objs = None
++        try:
++            block_mapping = self.lookup_pins[event_id]
++            assert len(block_mapping) == 1
++            keys = block_mapping[old_position]
+ 
+-        future = asyncio.run_coroutine_threadsafe(
+-            p2p_backend.async_batched_submit_put_task(
+-                keys,
+-                memory_objs,  # type: ignore
+-                transfer_spec=transfer_spec,
+-            ),
+-            self.storage_manager.loop,
+-        )
++            memory_objs = self.storage_manager.batched_get(
++                keys=keys,
++                location=old_position,
++            )
++            assert None not in memory_objs, "Failed to get memory objects to move"
++            logger.debug(
++                f"Trying to send {len(memory_objs)} memory objects to {new_position}"
++            )
+ 
+-        future.result()
++            # TODO: reduce loops
++            token_dim = memory_objs[0].meta.fmt.token_dim()  # type: ignore
++            offsets = [m.meta.shape[token_dim] for m in memory_objs]  # type: ignore
++
++            transfer_spec = {
++                "target_peer_init_url": new_position[0],
++                "offsets": offsets,
++            }
++
++            logger.info(self.storage_manager.storage_backends)
++            p2p_backend = self.storage_manager.storage_backends["P2PBackend"]
++
++            future = asyncio.run_coroutine_threadsafe(
++                p2p_backend.async_batched_submit_put_task(
++                    keys,
++                    memory_objs,  # type: ignore
++                    transfer_spec=transfer_spec,
++                ),
++                self.storage_manager.loop,
++            )
++            future.result()
++        finally:
++            # Always release resources regardless of success/failure:
++            # 1. Unpin chunks pinned by lookup(pin=True) -- prevents pin leaks
++            #    even if an exception occurred after lookup succeeded. A leaked
++            #    pin keeps a chunk un-evictable; once the CPU pool fills, the
++            #    forced-eviction path indexes hot_cache by a key a concurrent op
++            #    already popped, raising a bare KeyError(CacheEngineKey).
++            self.lookup_unpin(event_id)
++            # 2. Release ref_count from batched_get (balances ref_count_up in
++            #    get_blocking).
++            if memory_objs is not None:
++                for mem_obj in memory_objs:
++                    if mem_obj is not None:
++                        mem_obj.ref_count_down()
+ 
+         if not do_copy:
+             self.storage_manager.batched_remove(keys, locations=[old_position])
+diff --git a/lmcache/v1/config.py b/lmcache/v1/config.py
+index 0b8d4591..62058188 100644
+--- a/lmcache/v1/config.py
++++ b/lmcache/v1/config.py
+@@ -137,7 +137,11 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
+     },
+     "blend_min_tokens": {"type": int, "default": 256, "env_converter": int},
+     "blend_special_str": {"type": str, "default": " # # ", "env_converter": str},
+-    "retrieve_locations": {"type": Optional[list[str]], "default": None},
++    "retrieve_locations": {
++        "type": Optional[list[str]],
++        "default": None,
++        "env_converter": _to_str_list,
++    },
+     "store_location": {"type": Optional[str], "default": None},
+     # P2P configurations
+     "enable_p2p": {
+diff --git a/lmcache/v1/storage_backend/local_cpu_backend.py b/lmcache/v1/storage_backend/local_cpu_backend.py
+index d35f3682..fa5508e9 100644
+--- a/lmcache/v1/storage_backend/local_cpu_backend.py
++++ b/lmcache/v1/storage_backend/local_cpu_backend.py
+@@ -135,7 +135,10 @@ class LocalCPUBackend(AllocatorBackendInterface):
+         # flip the order of the keys in the request
+         with self.cpu_lock:
+             for key in reversed(self.keys_in_request):
+-                self.cache_policy.update_on_hit(key, self.hot_cache)
++                # Guard: key may have been removed by a concurrent thread between
++                # contains(pin=True) and this touch_cache() call.
++                if key in self.hot_cache:
++                    self.cache_policy.update_on_hit(key, self.hot_cache)
+             self.keys_in_request = []
+ 
+     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
+diff --git a/lmcache/v1/storage_backend/p2p_backend.py b/lmcache/v1/storage_backend/p2p_backend.py
+index 7e928f8e..ef684585 100644
+--- a/lmcache/v1/storage_backend/p2p_backend.py
++++ b/lmcache/v1/storage_backend/p2p_backend.py
+@@ -471,6 +471,12 @@ class P2PBackend(StorageBackendInterface):
+                 local_mem_objs.append(local_mem_obj)
+                 keys_to_read.append(key)
+ 
++            # Every pushed chunk is already present locally: nothing to read.
++            # Skip the channel read -- async_batched_read indexes buffers[0] to
++            # detect the object type, so an empty batch raises IndexError.
++            if not local_mem_objs:
++                return BatchedLookupAndPutRetMsg(num_read_chunks=0)
++
+             channel_transfer_spec = {
+                 "sender_id": sender_id,
+                 "remote_indexes": r_mem_indexes_to_read,
+@@ -485,6 +491,16 @@ class P2PBackend(StorageBackendInterface):
+                 memory_objs=local_mem_objs,
+             )
+ 
++            # Release caller's reference -- allocate() returned each MemoryObj
++            # with ref_count=1, and batched_submit_put_task takes its own ref
++            # for hot_cache. Without dropping the caller ref here, every received
++            # chunk leaks one ref, so it is never freed normally; later eviction
++            # plus the object's own GC cleanup drive ref_count negative ("Double
++            # free occurred somewhere") and corrupt the pool. Matches
++            # storage_manager.py's ref_count_down-after-put convention.
++            for mem_obj in local_mem_objs:
++                mem_obj.ref_count_down()
++
+             return BatchedLookupAndPutRetMsg(num_read_chunks=len(local_mem_objs))
+         except Exception as e:
+             logger.error(

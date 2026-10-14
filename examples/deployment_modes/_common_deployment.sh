@@ -10,26 +10,26 @@
 #   PSRL_DEPLOY_MODE          one of disaggregated|colocated|rollout_rm_colocated|
 #                             trainer_pool_only|elastic_rl
 #   PSRL_DEPLOY_EXPERIMENT    experiment name string
-#   PSRL_DEPLOY_STALENESS     staleness (modes 2/3 require 0)
-#   PSRL_DEPLOY_RM_ASYNC      True|False (modes 2/3 require True)
+#   PSRL_DEPLOY_STALENESS     staleness (colocated requires 0)
+#   PSRL_DEPLOY_RM_ASYNC      True|False (colocated and rollout_rm_colocated require True)
 #   PSRL_DEPLOY_NNODES        total cluster nodes
 #   PSRL_DEPLOY_TRAIN_NNODES  train_pool nodes
 #   PSRL_DEPLOY_TRAIN_NGPUS   gpus per train node
-#   PSRL_DEPLOY_SHARED_NNODES   shared_rollout_pool nodes (0/unused for mode 2)
+#   PSRL_DEPLOY_SHARED_NNODES   shared_rollout_pool nodes (0/unused for colocated)
 #   PSRL_DEPLOY_SHARED_NGPUS    gpus per shared node, or a Hydra list like [4, 8]
 #   PSRL_DEPLOY_RM_NUM_REPLICAS  gen-RM num_replicas (non-elastic modes 1/4)
 #                                set to 0 to leave default
 #   PSRL_DEPLOY_SMOKE         0|1 (smoke test: 2 steps, small bsz)
 #   PSRL_NEED_VALIDATION      0|1 (default: 0; 1 enables periodic validation)
-#   PSRL_DEPLOY_DATASET       dapo|gsm8k|mixed (default: dapo; mixed is 1:1)
-#   PSRL_DEPLOY_MODEL_NAME    rollout model directory name (default: Qwen2.5-7B)
-#   PSRL_DEPLOY_RM_MODEL_NAME reward model directory name (default: DeepSeek-R1-Distill-Qwen-7B)
+#   PSRL_DEPLOY_DATASET       dapo|gsm8k|mixed (default: mixed; mixed is 1:1)
+#   PSRL_DEPLOY_MODEL_NAME    rollout model directory name (default: Qwen2.5-1.5B)
+#   PSRL_DEPLOY_RM_MODEL_NAME reward model directory name (default: GLM-Z1-9B-0414)
 #   PSRL_DEPLOY_MODEL_PATH    optional absolute rollout model path
 #   PSRL_DEPLOY_RM_MODEL_PATH optional absolute reward model path
 #   PSRL_DEPLOY_ROLLOUT_TP    rollout tensor parallelism (default: 1)
 #   PSRL_DEPLOY_RM_TP         reward-model tensor parallelism (default: 1)
-#   PSRL_DEPLOY_COLOCATE_VALIDATE_AND_TRAIN  True|False (default: False)
-#   PSRL_DEPLOY_FUSE_ROLLOUT_WITH_VALIDATE   True|False (default: True)
+#   PSRL_DEPLOY_COLOCATE_VALIDATE_AND_TRAIN  True|False (elastic modes require True)
+#   PSRL_DEPLOY_FUSE_ROLLOUT_WITH_VALIDATE   True|False (elastic modes require False)
 #   PSRL_DEPLOY_VAL_GPU_MEMORY_UTILIZATION    validation vLLM memory fraction (default: 0.6)
 #   PSRL_DEPLOY_VAL_BEFORE_TRAIN               True|False (default: False)
 #   PSRL_DEPLOY_EXTRA         space-separated extra hydra overrides appended last
@@ -68,6 +68,93 @@ _psrl_total_gpus_from_node_spec() {
 
     echo "Invalid PSRL_DEPLOY_SHARED_NGPUS=${ngpus_spec}; expected integer or Hydra list like [4, 8]" >&2
     return 1
+}
+
+_psrl_require_choice() {
+    local name=$1 value=$2
+    shift 2
+    local item
+    for item in "$@"; do
+        if [[ "${value}" == "${item}" ]]; then
+            return 0
+        fi
+    done
+    echo "Invalid ${name}=${value}; expected one of: $*" >&2
+    return 1
+}
+
+_psrl_require_bool() {
+    local name=$1 value=$2
+    case "${value}" in
+        True|False|true|false) return 0 ;;
+        *)
+            echo "Invalid ${name}=${value}; expected True or False" >&2
+            return 1
+            ;;
+    esac
+}
+
+_psrl_is_true() {
+    case "${1}" in
+        True|true) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+_psrl_require_nonneg_int() {
+    local name=$1 value=$2
+    if [[ ! "${value}" =~ ^[0-9]+$ ]]; then
+        echo "Invalid ${name}=${value}; expected a non-negative integer" >&2
+        return 1
+    fi
+}
+
+_psrl_require_pos_int() {
+    local name=$1 value=$2
+    if [[ ! "${value}" =~ ^[1-9][0-9]*$ ]]; then
+        echo "Invalid ${name}=${value}; expected a positive integer" >&2
+        return 1
+    fi
+}
+
+_psrl_require_unit_interval() {
+    local name=$1 value=$2
+    awk -v raw="${value}" -v name="${name}" 'BEGIN {
+        if (raw !~ /^[0-9]+(\.[0-9]+)?$/) {
+            printf "Invalid %s=%s; expected a number in (0, 1].\n", name, raw > "/dev/stderr"
+            exit 1
+        }
+        if (!(raw > 0 && raw <= 1)) {
+            printf "Invalid %s=%s; expected a number in (0, 1].\n", name, raw > "/dev/stderr"
+            exit 1
+        }
+    }'
+}
+
+_psrl_require_nonneg_number() {
+    local name=$1 value=$2
+    awk -v raw="${value}" -v name="${name}" 'BEGIN {
+        if (raw !~ /^[0-9]+(\.[0-9]+)?$/) {
+            printf "Invalid %s=%s; expected a non-negative number.\n", name, raw > "/dev/stderr"
+            exit 1
+        }
+        if (raw < 0) {
+            printf "Invalid %s=%s; expected a non-negative number.\n", name, raw > "/dev/stderr"
+            exit 1
+        }
+    }'
+}
+
+_psrl_gpus_divisible() {
+    local total=$1 size=$2 field=$3
+    if (( size <= 0 )); then
+        echo "Invalid ${field}=${size}; expected a positive GPU group size" >&2
+        return 1
+    fi
+    if (( total % size != 0 )); then
+        echo "GPU total ${total} is not divisible by ${field}=${size}" >&2
+        return 1
+    fi
 }
 
 _psrl_vllm_ep_size_for_model() {
@@ -135,20 +222,129 @@ launch_deployment_mode() {
     PSRL_DEPLOY_DATASET=${PSRL_DEPLOY_DATASET:-mixed}
     PSRL_DEPLOY_RM_NUM_REPLICAS=${PSRL_DEPLOY_RM_NUM_REPLICAS:-0}
     PSRL_DEPLOY_TRAINER_READY_GRACE_S=${PSRL_DEPLOY_TRAINER_READY_GRACE_S:-5}
-    PSRL_DEPLOY_COLOCATE_VALIDATE_AND_TRAIN=${PSRL_DEPLOY_COLOCATE_VALIDATE_AND_TRAIN:-False}
-    PSRL_DEPLOY_FUSE_ROLLOUT_WITH_VALIDATE=${PSRL_DEPLOY_FUSE_ROLLOUT_WITH_VALIDATE:-True}
+    case "${PSRL_DEPLOY_MODE}" in
+        elastic_rl|colocated|rollout_rm_colocated)
+            PSRL_DEPLOY_COLOCATE_VALIDATE_AND_TRAIN=${PSRL_DEPLOY_COLOCATE_VALIDATE_AND_TRAIN:-True}
+            PSRL_DEPLOY_FUSE_ROLLOUT_WITH_VALIDATE=${PSRL_DEPLOY_FUSE_ROLLOUT_WITH_VALIDATE:-False}
+            ;;
+        *)
+            PSRL_DEPLOY_COLOCATE_VALIDATE_AND_TRAIN=${PSRL_DEPLOY_COLOCATE_VALIDATE_AND_TRAIN:-False}
+            PSRL_DEPLOY_FUSE_ROLLOUT_WITH_VALIDATE=${PSRL_DEPLOY_FUSE_ROLLOUT_WITH_VALIDATE:-True}
+            ;;
+    esac
     PSRL_DEPLOY_VAL_GPU_MEMORY_UTILIZATION=${PSRL_DEPLOY_VAL_GPU_MEMORY_UTILIZATION:-0.6}
     PSRL_DEPLOY_VAL_BEFORE_TRAIN=${PSRL_DEPLOY_VAL_BEFORE_TRAIN:-False}
+    PSRL_DEPLOY_ROLLOUT_TP=${PSRL_DEPLOY_ROLLOUT_TP:-1}
+    PSRL_DEPLOY_RM_TP=${PSRL_DEPLOY_RM_TP:-1}
     PSRL_DEPLOY_EXTRA=${PSRL_DEPLOY_EXTRA:-}
     if [[ -z "${PSRL_DEPLOY_OPTIMIZER_OFFLOAD+x}" ]]; then
         case "${PSRL_DEPLOY_MODE}" in
-            colocated|trainer_pool_only)
+            colocated|trainer_pool_only|elastic_rl)
                 PSRL_DEPLOY_OPTIMIZER_OFFLOAD=True
                 ;;
             *)
                 PSRL_DEPLOY_OPTIMIZER_OFFLOAD=${PSRL_DEPLOY_COLOCATE_VALIDATE_AND_TRAIN}
                 ;;
         esac
+    fi
+
+    _psrl_require_choice PSRL_DEPLOY_MODE "${PSRL_DEPLOY_MODE}" \
+        disaggregated colocated rollout_rm_colocated trainer_pool_only elastic_rl
+    _psrl_require_choice PSRL_DEPLOY_SMOKE "${PSRL_DEPLOY_SMOKE}" 0 1
+    _psrl_require_choice PSRL_NEED_VALIDATION "${PSRL_NEED_VALIDATION}" 0 1
+    _psrl_require_choice PSRL_DEPLOY_DATASET "${PSRL_DEPLOY_DATASET}" dapo gsm8k mixed
+    _psrl_require_bool PSRL_DEPLOY_RM_ASYNC "${PSRL_DEPLOY_RM_ASYNC}"
+    _psrl_require_bool PSRL_DEPLOY_COLOCATE_VALIDATE_AND_TRAIN "${PSRL_DEPLOY_COLOCATE_VALIDATE_AND_TRAIN}"
+    _psrl_require_bool PSRL_DEPLOY_FUSE_ROLLOUT_WITH_VALIDATE "${PSRL_DEPLOY_FUSE_ROLLOUT_WITH_VALIDATE}"
+    _psrl_require_bool PSRL_DEPLOY_VAL_BEFORE_TRAIN "${PSRL_DEPLOY_VAL_BEFORE_TRAIN}"
+    _psrl_require_bool PSRL_DEPLOY_OPTIMIZER_OFFLOAD "${PSRL_DEPLOY_OPTIMIZER_OFFLOAD}"
+    _psrl_require_nonneg_int PSRL_DEPLOY_STALENESS "${PSRL_DEPLOY_STALENESS}"
+    _psrl_require_pos_int PSRL_DEPLOY_NNODES "${PSRL_DEPLOY_NNODES}"
+    _psrl_require_pos_int PSRL_DEPLOY_TRAIN_NNODES "${PSRL_DEPLOY_TRAIN_NNODES}"
+    _psrl_require_pos_int PSRL_DEPLOY_TRAIN_NGPUS "${PSRL_DEPLOY_TRAIN_NGPUS}"
+    _psrl_require_nonneg_int PSRL_DEPLOY_SHARED_NNODES "${PSRL_DEPLOY_SHARED_NNODES}"
+    _psrl_require_nonneg_int PSRL_DEPLOY_RM_NUM_REPLICAS "${PSRL_DEPLOY_RM_NUM_REPLICAS}"
+    _psrl_require_pos_int PSRL_DEPLOY_ROLLOUT_TP "${PSRL_DEPLOY_ROLLOUT_TP}"
+    _psrl_require_pos_int PSRL_DEPLOY_RM_TP "${PSRL_DEPLOY_RM_TP}"
+    _psrl_require_nonneg_number PSRL_DEPLOY_TRAINER_READY_GRACE_S "${PSRL_DEPLOY_TRAINER_READY_GRACE_S}"
+    _psrl_require_unit_interval PSRL_DEPLOY_VAL_GPU_MEMORY_UTILIZATION "${PSRL_DEPLOY_VAL_GPU_MEMORY_UTILIZATION}"
+
+    if (( PSRL_DEPLOY_TRAIN_NNODES > PSRL_DEPLOY_NNODES )); then
+        echo "PSRL_DEPLOY_TRAIN_NNODES=${PSRL_DEPLOY_TRAIN_NNODES} exceeds PSRL_DEPLOY_NNODES=${PSRL_DEPLOY_NNODES}" >&2
+        return 1
+    fi
+    if (( PSRL_DEPLOY_TRAIN_NNODES + PSRL_DEPLOY_SHARED_NNODES > PSRL_DEPLOY_NNODES )); then
+        echo "PSRL_DEPLOY_TRAIN_NNODES=${PSRL_DEPLOY_TRAIN_NNODES} + PSRL_DEPLOY_SHARED_NNODES=${PSRL_DEPLOY_SHARED_NNODES} exceeds PSRL_DEPLOY_NNODES=${PSRL_DEPLOY_NNODES}" >&2
+        return 1
+    fi
+
+    case "${PSRL_DEPLOY_MODE}" in
+        colocated)
+            if [[ "${PSRL_DEPLOY_STALENESS}" != "0" ]]; then
+                echo "PSRL_DEPLOY_MODE=colocated requires PSRL_DEPLOY_STALENESS=0, got ${PSRL_DEPLOY_STALENESS}" >&2
+                return 1
+            fi
+            if ! _psrl_is_true "${PSRL_DEPLOY_RM_ASYNC}"; then
+                echo "PSRL_DEPLOY_MODE=colocated requires PSRL_DEPLOY_RM_ASYNC=True" >&2
+                return 1
+            fi
+            if (( PSRL_DEPLOY_SHARED_NNODES != 0 )); then
+                echo "PSRL_DEPLOY_MODE=colocated requires PSRL_DEPLOY_SHARED_NNODES=0, got ${PSRL_DEPLOY_SHARED_NNODES}" >&2
+                return 1
+            fi
+            ;;
+        rollout_rm_colocated)
+            if ! _psrl_is_true "${PSRL_DEPLOY_RM_ASYNC}"; then
+                echo "PSRL_DEPLOY_MODE=rollout_rm_colocated requires PSRL_DEPLOY_RM_ASYNC=True" >&2
+                return 1
+            fi
+            if (( PSRL_DEPLOY_SHARED_NNODES < 1 )); then
+                echo "PSRL_DEPLOY_MODE=rollout_rm_colocated requires PSRL_DEPLOY_SHARED_NNODES>=1" >&2
+                return 1
+            fi
+            ;;
+        elastic_rl)
+            if (( PSRL_DEPLOY_SHARED_NNODES < 1 )); then
+                echo "PSRL_DEPLOY_MODE=elastic_rl requires PSRL_DEPLOY_SHARED_NNODES>=1" >&2
+                return 1
+            fi
+            ;;
+        disaggregated|trainer_pool_only)
+            if (( PSRL_DEPLOY_SHARED_NNODES < 1 )); then
+                echo "PSRL_DEPLOY_MODE=${PSRL_DEPLOY_MODE} requires PSRL_DEPLOY_SHARED_NNODES>=1" >&2
+                return 1
+            fi
+            ;;
+    esac
+
+    case "${PSRL_DEPLOY_MODE}" in
+        elastic_rl|colocated|rollout_rm_colocated)
+            if ! _psrl_is_true "${PSRL_DEPLOY_COLOCATE_VALIDATE_AND_TRAIN}" \
+                || _psrl_is_true "${PSRL_DEPLOY_FUSE_ROLLOUT_WITH_VALIDATE}"; then
+                echo "Elastic modes require colocated trainer validation and dedicated validation routing." >&2
+                return 1
+            fi
+            ;;
+    esac
+
+    if ! _psrl_is_true "${PSRL_DEPLOY_COLOCATE_VALIDATE_AND_TRAIN}" \
+        && ! _psrl_is_true "${PSRL_DEPLOY_FUSE_ROLLOUT_WITH_VALIDATE}"; then
+        echo "PSRL_DEPLOY_FUSE_ROLLOUT_WITH_VALIDATE must be True when PSRL_DEPLOY_COLOCATE_VALIDATE_AND_TRAIN is False" >&2
+        return 1
+    fi
+
+    case "${PSRL_DEPLOY_MODE}" in
+        colocated|trainer_pool_only|elastic_rl)
+            if ! _psrl_is_true "${PSRL_DEPLOY_OPTIMIZER_OFFLOAD}"; then
+                echo "PSRL_DEPLOY_MODE=${PSRL_DEPLOY_MODE} can sleep the trainer, so PSRL_DEPLOY_OPTIMIZER_OFFLOAD must be True" >&2
+                return 1
+            fi
+            ;;
+    esac
+    if _psrl_is_true "${PSRL_DEPLOY_COLOCATE_VALIDATE_AND_TRAIN}" \
+        && ! _psrl_is_true "${PSRL_DEPLOY_OPTIMIZER_OFFLOAD}"; then
+        echo "PSRL_DEPLOY_COLOCATE_VALIDATE_AND_TRAIN=True requires PSRL_DEPLOY_OPTIMIZER_OFFLOAD=True" >&2
+        return 1
     fi
 
     PSRL_WORKSPACE=/apdcephfs_zwfy10/share_303541817/yfzhao/psrl
@@ -163,8 +359,8 @@ launch_deployment_mode() {
         n_resp_per_prompt=8
     else
         experiment_suffix=""
-        total_training_steps=20
-        test_freq=-1
+        total_training_steps=100
+        test_freq=5
         save_freq=-1
         train_prompt_bsz=128
         train_prompt_mini_bsz=32
@@ -176,24 +372,39 @@ launch_deployment_mode() {
         test_freq=5
     fi
 
-    project_name='verl_deployment_modes'
+    project_name='psrl_example'
     MODEL_NAME=${PSRL_DEPLOY_MODEL_NAME:-Qwen2.5-1.5B}
     RM_MODEL_NAME=${PSRL_DEPLOY_RM_MODEL_NAME:-GLM-Z1-9B-0414}
     # MODEL_NAME=${PSRL_DEPLOY_MODEL_NAME:-DeepSeek-R1-Distill-Qwen-7B}
     # RM_MODEL_NAME=${PSRL_DEPLOY_RM_MODEL_NAME:-Qwen3-8B}
     experiment_name="${PSRL_DEPLOY_DATASET}_${PSRL_DEPLOY_EXPERIMENT}_${MODEL_NAME}_${RM_MODEL_NAME}${experiment_suffix}"
 
-    source ${PSRL_WORKSPACE}/env/env_311.sh
+    source ${PSRL_WORKSPACE}/env/psrl.sh
 
     HOME=${PSRL_WORKSPACE}
     PSRL_PATH=$(python -c "import psrl; import os; print(os.path.dirname(os.path.dirname(psrl.__file__)))")
-    
+    if [[ -z "${LOCAL_IP:-}" ]]; then
+        LOCAL_IP=$(hostname --ip-address | awk '{print $1}')
+    fi
+    if [[ -z "${LOCAL_IP}" ]]; then
+        echo "LOCAL_IP is empty. Set LOCAL_IP to the PS manager address." >&2
+        return 1
+    fi
+
     HF_MODEL_PATH=${PSRL_DEPLOY_MODEL_PATH:-${PSRL_WORKSPACE}/models/${MODEL_NAME}}
     RM_MODEL_PATH=${PSRL_DEPLOY_RM_MODEL_PATH:-${PSRL_WORKSPACE}/models/${RM_MODEL_NAME}}
+    if [[ ! -f "${HF_MODEL_PATH}/config.json" ]]; then
+        echo "Rollout model config.json not found under ${HF_MODEL_PATH}" >&2
+        return 1
+    fi
+    if [[ ! -f "${RM_MODEL_PATH}/config.json" ]]; then
+        echo "Reward model config.json not found under ${RM_MODEL_PATH}" >&2
+        return 1
+    fi
 
-    # Data config (Hydra / OmegaConf), aligned with psrl/trainer/config/data/multi_datasets.yaml
-    GSM8K_TRAIN="${PSRL_WORKSPACE}/data/gsm8k_verl/train.parquet"
-    GSM8K_TEST="${PSRL_WORKSPACE}/data/gsm8k_verl/test.parquet"
+    # Dataset specs follow `data.train_datas` / `data.val_datas`.
+    GSM8K_TRAIN="${PSRL_WORKSPACE}/data/gsm8k/train.parquet"
+    GSM8K_TEST="${PSRL_WORKSPACE}/data/gsm8k/test.parquet"
     DAPO_TRAIN="${PSRL_WORKSPACE}/data/dapo/dapo-math-17k.parquet"
     DAPO_VAL="${PSRL_WORKSPACE}/data/dapo/aime-2024.parquet"
 
@@ -236,7 +447,7 @@ launch_deployment_mode() {
     GEN_NGPUS_PER_NODE_PER_INSTANCE=$(( ${GEN_TP} * ${GEN_PP} ))
 
     # reward-model rollout settings
-    RM_TP=${PSRL_DEPLOY_RM_TP:-1}
+    RM_TP=${PSRL_DEPLOY_RM_TP:-2}
     RM_PP=1
     RM_EP=$(_psrl_vllm_ep_size_for_model "${RM_MODEL_PATH}" "${RM_TP}")
     RM_NGPUS_PER_NODE_PER_INSTANCE=$(( ${RM_TP} * ${RM_PP} ))
@@ -245,8 +456,26 @@ launch_deployment_mode() {
     VAL_TP=1
     VAL_PP=1
     VAL_EP=$(_psrl_vllm_ep_size_for_model "${HF_MODEL_PATH}" "${VAL_TP}")
-    VAL_INSTANCES=$(( (${PSRL_DEPLOY_TRAIN_NNODES} * ${PSRL_DEPLOY_TRAIN_NGPUS}) / ( ${VAL_TP} * ${VAL_PP} ) ))
     VAL_NGPUS_PER_NODE_PER_INSTANCE=$(( ${VAL_TP} * ${VAL_PP} ))
+    TRAIN_TOTAL_NGPUS=$(( PSRL_DEPLOY_TRAIN_NNODES * PSRL_DEPLOY_TRAIN_NGPUS ))
+    SHARED_TOTAL_NGPUS=$(_psrl_total_gpus_from_node_spec "${PSRL_DEPLOY_SHARED_NGPUS}" "${PSRL_DEPLOY_SHARED_NNODES}")
+    GEN_INSTANCE_GPUS=$(( GEN_TP * GEN_PP ))
+    RM_INSTANCE_GPUS=$(( RM_TP * RM_PP ))
+    VAL_INSTANCE_GPUS=$(( VAL_TP * VAL_PP ))
+    _psrl_gpus_divisible "${TRAIN_TOTAL_NGPUS}" "${VAL_INSTANCE_GPUS}" VAL_TP
+    VAL_INSTANCES=$(( TRAIN_TOTAL_NGPUS / VAL_INSTANCE_GPUS ))
+    if (( VAL_INSTANCES < 1 )); then
+        echo "Computed n_validate_instances=${VAL_INSTANCES} from train GPUs ${TRAIN_TOTAL_NGPUS} / ${VAL_INSTANCE_GPUS}" >&2
+        return 1
+    fi
+    if [[ "${PSRL_DEPLOY_MODE}" != "colocated" ]]; then
+        _psrl_gpus_divisible "${SHARED_TOTAL_NGPUS}" "${GEN_INSTANCE_GPUS}" GEN_TP
+        _psrl_gpus_divisible "${SHARED_TOTAL_NGPUS}" "${RM_INSTANCE_GPUS}" RM_TP
+        if (( SHARED_TOTAL_NGPUS < 1 )); then
+            echo "PSRL_DEPLOY_MODE=${PSRL_DEPLOY_MODE} requires a non-empty shared pool, got ${SHARED_TOTAL_NGPUS} GPUs" >&2
+            return 1
+        fi
+    fi
 
     sp_size=1
     fsdp_size=${PSRL_DEPLOY_TRAIN_NGPUS}
@@ -281,71 +510,69 @@ launch_deployment_mode() {
     offload=${PSRL_DEPLOY_OPTIMIZER_OFFLOAD}
 
     REWARD_MODELS=(
-        reward_models_config.reward_normalization=none
-        reward_models_config.reward_models.0.reward_loop_type=naive
-        reward_models_config.reward_models.0.reward_fn='["default"]'
-        reward_models_config.reward_models.1.reward_loop_type=dapo
-        reward_models_config.reward_models.1.reward_fn='["default"]'
-        reward_models_config.reward_models.1.reward_loop_kwargs.max_resp_len=10240
-        reward_models_config.reward_models.1.reward_loop_kwargs.overlong_buffer_cfg.enable=True
-        reward_models_config.reward_models.1.reward_loop_kwargs.overlong_buffer_cfg.len=5120
-        reward_models_config.reward_models.1.reward_loop_kwargs.overlong_buffer_cfg.penalty_factor=1.0
-        reward_models_config.reward_models.1.reward_loop_kwargs.overlong_buffer_cfg.log=False
-        reward_models_config.reward_models.2.reward_loop_type=gen
-        reward_models_config.reward_models.2.reward_fn='["default"]'
-        reward_models_config.reward_models.2.reward_model_name=${RM_MODEL_NAME}
-        reward_models_config.reward_models.2.enable_resource_pool=True
-        reward_models_config.reward_models.2.rollout_ngpus_per_instance_per_node=${RM_NGPUS_PER_NODE_PER_INSTANCE}
-        reward_models_config.reward_models.2.rollout_nnodes_per_instance=1
-        reward_models_config.reward_models.2.max_concurrent_requests_per_instance=128
-        reward_models_config.reward_models.2.model.path=${RM_MODEL_PATH}
-        reward_models_config.reward_models.2.model.use_shm=False
-        reward_models_config.reward_models.2.model.trust_remote_code=False
-        reward_models_config.reward_models.2.rollout._target_=psrl.workers.config.RolloutConfig
-        reward_models_config.reward_models.2.rollout.name=vllm
-        reward_models_config.reward_models.2.rollout.mode=psrl_async
-        reward_models_config.reward_models.2.rollout.disable_attn=False
-        reward_models_config.reward_models.2.rollout.dtype=bfloat16
-        reward_models_config.reward_models.2.rollout.gpu_memory_utilization=0.8
-        reward_models_config.reward_models.2.rollout.enforce_eager=true
-        reward_models_config.reward_models.2.rollout.free_cache_engine=true
-        reward_models_config.reward_models.2.rollout.data_parallel_size=1
-        reward_models_config.reward_models.2.rollout.expert_parallel_size=${RM_EP}
-        reward_models_config.reward_models.2.rollout.tensor_model_parallel_size=${RM_TP}
-        reward_models_config.reward_models.2.rollout.pipeline_model_parallel_size=${RM_PP}
-        reward_models_config.reward_models.2.rollout.max_num_batched_tokens=$((1024 * 40))
-        reward_models_config.reward_models.2.rollout.max_num_seqs=1024
-        reward_models_config.reward_models.2.rollout.enable_chunked_prefill=false
-        reward_models_config.reward_models.2.rollout.enable_prefix_caching=false
-        +reward_models_config.reward_models.2.rollout.engine_kwargs.vllm.async_scheduling=false
+        reward.active_managers='[naive,dapo,gen_qwen3_8b]'
+        reward.reward_normalization=none
+        reward.managers.naive.reward_loop_type=naive
+        reward.managers.dapo.reward_loop_type=dapo
+        reward.managers.dapo.reward_kwargs.max_resp_len=10240
+        reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.enable=True
+        reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.len=5120
+        reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.penalty_factor=1.0
+        reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.log=False
+        reward.managers.gen_qwen3_8b.reward_loop_type=gen
+        reward.managers.gen_qwen3_8b.reward_model_name=${RM_MODEL_NAME}
+        reward.managers.gen_qwen3_8b.enable_resource_pool=True
+        reward.managers.gen_qwen3_8b.rollout_ngpus_per_instance_per_node=${RM_NGPUS_PER_NODE_PER_INSTANCE}
+        reward.managers.gen_qwen3_8b.rollout_nnodes_per_instance=1
+        reward.managers.gen_qwen3_8b.max_concurrent_requests_per_instance=128
+        reward.managers.gen_qwen3_8b.model.path=${RM_MODEL_PATH}
+        reward.managers.gen_qwen3_8b.model.use_shm=False
+        reward.managers.gen_qwen3_8b.model.trust_remote_code=False
+        reward.managers.gen_qwen3_8b.rollout._target_=psrl.workers.config.RolloutConfig
+        reward.managers.gen_qwen3_8b.rollout.name=vllm
+        reward.managers.gen_qwen3_8b.rollout.mode=psrl_async
+        reward.managers.gen_qwen3_8b.rollout.disable_attn=False
+        reward.managers.gen_qwen3_8b.rollout.dtype=bfloat16
+        reward.managers.gen_qwen3_8b.rollout.gpu_memory_utilization=0.8
+        reward.managers.gen_qwen3_8b.rollout.enforce_eager=true
+        reward.managers.gen_qwen3_8b.rollout.free_cache_engine=true
+        reward.managers.gen_qwen3_8b.rollout.data_parallel_size=1
+        reward.managers.gen_qwen3_8b.rollout.expert_parallel_size=${RM_EP}
+        reward.managers.gen_qwen3_8b.rollout.tensor_model_parallel_size=${RM_TP}
+        reward.managers.gen_qwen3_8b.rollout.pipeline_model_parallel_size=${RM_PP}
+        reward.managers.gen_qwen3_8b.rollout.max_num_batched_tokens=$((1024 * 40))
+        reward.managers.gen_qwen3_8b.rollout.max_num_seqs=1024
+        reward.managers.gen_qwen3_8b.rollout.enable_chunked_prefill=false
+        reward.managers.gen_qwen3_8b.rollout.enable_prefix_caching=false
+        +reward.managers.gen_qwen3_8b.rollout.engine_kwargs.vllm.async_scheduling=false
         # GLM-Z1 native context is 32k; YaRN factor 1.25 extrapolates to 40k without editing config.json.
         # vLLM Transformers 5 reads rope_type; keep type for the official GLM docs field name.
-        +reward_models_config.reward_models.2.rollout.engine_kwargs.vllm.hf_overrides.rope_scaling.type=yarn
-        +reward_models_config.reward_models.2.rollout.engine_kwargs.vllm.hf_overrides.rope_scaling.rope_type=yarn
-        +reward_models_config.reward_models.2.rollout.engine_kwargs.vllm.hf_overrides.rope_scaling.factor=1.25
-        +reward_models_config.reward_models.2.rollout.engine_kwargs.vllm.hf_overrides.rope_scaling.original_max_position_embeddings=32768
-        reward_models_config.reward_models.2.rollout.disable_log_stats=false
-        reward_models_config.reward_models.2.rollout.skip_tokenizer_init=false
-        reward_models_config.reward_models.2.rollout.prompt_length=$((1024 * 16))
-        reward_models_config.reward_models.2.rollout.response_length=$((1024 * 20))
-        reward_models_config.reward_models.2.rollout.max_model_len=$((1024 * 40))
-        reward_models_config.reward_models.2.rollout.runner=generate
-        reward_models_config.reward_models.2.rollout.task=generate
-        reward_models_config.reward_models.2.sampling_config.temperature=1.0
-        reward_models_config.reward_models.2.sampling_config.top_p=1.0
-        reward_models_config.reward_models.2.sampling_config.top_k=-1
+        +reward.managers.gen_qwen3_8b.rollout.engine_kwargs.vllm.hf_overrides.rope_scaling.type=yarn
+        +reward.managers.gen_qwen3_8b.rollout.engine_kwargs.vllm.hf_overrides.rope_scaling.rope_type=yarn
+        +reward.managers.gen_qwen3_8b.rollout.engine_kwargs.vllm.hf_overrides.rope_scaling.factor=1.25
+        +reward.managers.gen_qwen3_8b.rollout.engine_kwargs.vllm.hf_overrides.rope_scaling.original_max_position_embeddings=32768
+        reward.managers.gen_qwen3_8b.rollout.disable_log_stats=false
+        reward.managers.gen_qwen3_8b.rollout.skip_tokenizer_init=false
+        reward.managers.gen_qwen3_8b.rollout.prompt_length=$((1024 * 16))
+        reward.managers.gen_qwen3_8b.rollout.response_length=$((1024 * 20))
+        reward.managers.gen_qwen3_8b.rollout.max_model_len=$((1024 * 40))
+        reward.managers.gen_qwen3_8b.rollout.runner=generate
+        reward.managers.gen_qwen3_8b.rollout.task=generate
+        reward.managers.gen_qwen3_8b.sampling_config.temperature=1.0
+        reward.managers.gen_qwen3_8b.sampling_config.top_p=1.0
+        reward.managers.gen_qwen3_8b.sampling_config.top_k=-1
     )
 
     mkdir -p "${PSRL_WORKSPACE}/logs/${project_name}"
 
     # ---- Mode-derived deployment args ----
     DEPLOY_ARGS=(
-        psrl.deployment.mode=${PSRL_DEPLOY_MODE}
+        +psrl.deployment.mode=${PSRL_DEPLOY_MODE}
         psrl.staleness=${PSRL_DEPLOY_STALENESS}
-        reward_models_config.launch_reward_fn_async=${PSRL_DEPLOY_RM_ASYNC}
-        psrl.deployment.elastic_rm.shared_nnodes=${PSRL_DEPLOY_SHARED_NNODES}
-        "psrl.deployment.elastic_rm.shared_ngpus_per_node=${PSRL_DEPLOY_SHARED_NGPUS}"
-        psrl.deployment.elastic_rm.trainer_ready_grace_s=${PSRL_DEPLOY_TRAINER_READY_GRACE_S}
+        reward.launch_reward_fn_async=${PSRL_DEPLOY_RM_ASYNC}
+        psrl.deployment.elastic.shared_nnodes=${PSRL_DEPLOY_SHARED_NNODES}
+        "psrl.deployment.elastic.shared_ngpus_per_node=${PSRL_DEPLOY_SHARED_NGPUS}"
+        psrl.deployment.elastic.trainer_ready_grace_s=${PSRL_DEPLOY_TRAINER_READY_GRACE_S}
         psrl.deployment.train_nnodes=${PSRL_DEPLOY_TRAIN_NNODES}
         psrl.deployment.train_ngpus_per_node=${PSRL_DEPLOY_TRAIN_NGPUS}
         psrl.deployment.total_nnodes=${PSRL_DEPLOY_NNODES}
@@ -360,23 +587,57 @@ launch_deployment_mode() {
     # / reward pools; main_ppo needs an explicit n_rollout_instances and (for the
     # gen RM) num_replicas. Elastic modes auto-compute these from the pool sizes.
     case "${PSRL_DEPLOY_MODE}" in
-        disaggregated|trainer_pool_only)
-            SHARED_TOTAL_NGPUS=$(_psrl_total_gpus_from_node_spec "${PSRL_DEPLOY_SHARED_NGPUS}" "${PSRL_DEPLOY_SHARED_NNODES}")
-            N_ROLLOUT_INSTANCES=$(( SHARED_TOTAL_NGPUS / ( GEN_TP * GEN_PP ) ))
+        disaggregated)
+            N_ROLLOUT_INSTANCES=$(( SHARED_TOTAL_NGPUS / GEN_INSTANCE_GPUS ))
+            if (( N_ROLLOUT_INSTANCES < 1 )); then
+                echo "Computed n_rollout_instances=${N_ROLLOUT_INSTANCES} from shared GPUs ${SHARED_TOTAL_NGPUS} / ${GEN_INSTANCE_GPUS}" >&2
+                return 1
+            fi
             DEPLOY_ARGS+=(
                 psrl.deployment.n_rollout_instances=${N_ROLLOUT_INSTANCES}
-                psrl.deployment.elastic_rm.enable=False
+                psrl.deployment.elastic.enable=False
+                psrl.deployment.elastic.enable_trainer_pool=False
             )
             if [[ "${PSRL_DEPLOY_RM_NUM_REPLICAS}" != "0" ]]; then
-                DEPLOY_ARGS+=( reward_models_config.reward_models.2.num_replicas=${PSRL_DEPLOY_RM_NUM_REPLICAS} )
+                DEPLOY_ARGS+=( reward.managers.gen_qwen3_8b.num_replicas=${PSRL_DEPLOY_RM_NUM_REPLICAS} )
             fi
             ;;
-        colocated|rollout_rm_colocated|elastic_rl)
-            DEPLOY_ARGS+=( psrl.deployment.elastic_rm.enable=True )
+        trainer_pool_only)
+            N_ROLLOUT_INSTANCES=$(( SHARED_TOTAL_NGPUS / GEN_INSTANCE_GPUS ))
+            if (( N_ROLLOUT_INSTANCES < 1 )); then
+                echo "Computed n_rollout_instances=${N_ROLLOUT_INSTANCES} from shared GPUs ${SHARED_TOTAL_NGPUS} / ${GEN_INSTANCE_GPUS}" >&2
+                return 1
+            fi
+            DEPLOY_ARGS+=(
+                psrl.deployment.n_rollout_instances=${N_ROLLOUT_INSTANCES}
+                psrl.deployment.elastic.enable=False
+                psrl.deployment.elastic.enable_trainer_pool=False
+                psrl.deployment.elastic.enable_policy=False
+            )
+            if [[ "${PSRL_DEPLOY_RM_NUM_REPLICAS}" != "0" ]]; then
+                DEPLOY_ARGS+=( reward.managers.gen_qwen3_8b.num_replicas=${PSRL_DEPLOY_RM_NUM_REPLICAS} )
+            fi
+            ;;
+        colocated)
+            DEPLOY_ARGS+=(
+                psrl.deployment.elastic.enable=True
+                psrl.deployment.elastic.enable_trainer_pool=True
+                psrl.deployment.elastic.enable_policy=False
+            )
+            ;;
+        rollout_rm_colocated)
+            DEPLOY_ARGS+=(
+                psrl.deployment.elastic.enable=True
+                psrl.deployment.elastic.enable_trainer_pool=False
+                psrl.deployment.elastic.enable_policy=False
+            )
+            ;;
+        elastic_rl)
+            DEPLOY_ARGS+=( psrl.deployment.elastic.enable=True )
             ;;
         *)
             echo "Unknown PSRL_DEPLOY_MODE=${PSRL_DEPLOY_MODE}" >&2
-            exit 1
+            return 1
             ;;
     esac
 
@@ -384,27 +645,31 @@ launch_deployment_mode() {
     # waiting cap. Mode 5 keeps the stricter cap required by elastic scaling.
     case "${PSRL_DEPLOY_MODE}" in
         elastic_rl)
+            ROLLOUT_COST_MODEL=${PSRL_PATH}/psrl/trainer/config/cost_model/qwen2.5_1.5b.json
+            if [[ ! -f "${ROLLOUT_COST_MODEL}" ]]; then
+                echo "Rollout cost model not found: ${ROLLOUT_COST_MODEL}" >&2
+                return 1
+            fi
             ROUTING_ARGS=(
-                psrl.routing_strategy.method=throughput_optimal
-                psrl.routing_strategy.candidate_sort_indicator=reserve_capability
-                psrl.routing_strategy.enable_multi_priority_queue=True
-                psrl.routing_strategy.enable_group_sampling_on_multi_instances=True
-                psrl.routing_strategy.cost_model_path=${PSRL_PATH}/psrl/trainer/config/cost_model/qwen2.5_1.5b.json
-                psrl.routing_strategy.delta_throughput_threshold=0.2
-                psrl.routing_strategy.request_budget=1024
-                psrl.routing_strategy.max_num_waiting_reqs_after_preemption=3
-                psrl.routing_strategy.max_concurrent_seqs_per_instance=512
+                psrl.rollout_coordination.routing_strategy.method=throughput_optimal
+                psrl.rollout_coordination.routing_strategy.candidate_sort_indicator=reserve_capability
+                psrl.rollout_coordination.routing_strategy.enable_multi_priority_queue=True
+                psrl.rollout_coordination.routing_strategy.cost_model_path=${ROLLOUT_COST_MODEL}
+                psrl.rollout_coordination.routing_strategy.delta_throughput_threshold=0.2
+                psrl.rollout_coordination.routing_strategy.request_budget=1024
+                psrl.rollout_coordination.routing_strategy.max_num_waiting_reqs_after_preemption=3
+                psrl.rollout_coordination.routing_strategy.max_concurrent_seqs_per_instance=512
             )
             ;;
         disaggregated|colocated|rollout_rm_colocated|trainer_pool_only)
             ROUTING_ARGS=(
-                psrl.routing_strategy.method=round_robin
-                psrl.routing_strategy.candidate_sort_indicator=version
-                psrl.routing_strategy.enable_multi_priority_queue=False
-                psrl.routing_strategy.max_num_waiting_reqs_after_preemption=10000
+                psrl.rollout_coordination.routing_strategy.method=round_robin
+                psrl.rollout_coordination.routing_strategy.candidate_sort_indicator=version
+                psrl.rollout_coordination.routing_strategy.enable_multi_priority_queue=False
+                psrl.rollout_coordination.routing_strategy.max_num_waiting_reqs_after_preemption=10000
                 ++gen_actor_rollout_ref.rollout.use_psrl_scheduler=True
-                ++reward_models_config.reward_models.2.routing_strategy.method=round_robin
-                ++reward_models_config.reward_models.2.rollout.use_psrl_scheduler=True
+                ++reward.managers.gen_qwen3_8b.routing_strategy.method=round_robin
+                ++reward.managers.gen_qwen3_8b.rollout.use_psrl_scheduler=True
             )
             ;;
     esac
@@ -432,12 +697,11 @@ launch_deployment_mode() {
         psrl.nixl.server_port=23456 \
         psrl.group_post_process.enable=False \
         psrl.group_post_process.name=dynamic_sampling_filter \
-        psrl.redundant_rollout.enable=False \
-        psrl.partial_rollout.enable=True \
+        psrl.rollout_coordination.redundant_rollout.enable=False \
+        psrl.rollout_coordination.partial_rollout.enable=True \
         \
         "${ROUTING_ARGS[@]}" \
         \
-        gen_actor_rollout_ref.model.path="$HF_MODEL_PATH" \
         gen_actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
         gen_actor_rollout_ref.rollout.expert_parallel_size=${GEN_EP} \
         gen_actor_rollout_ref.rollout.tensor_model_parallel_size=${GEN_TP} \
@@ -464,6 +728,7 @@ launch_deployment_mode() {
         train_actor_rollout_ref.rollout.expert_parallel_size=${VAL_EP} \
         train_actor_rollout_ref.rollout.tensor_model_parallel_size=${VAL_TP} \
         train_actor_rollout_ref.rollout.gpu_memory_utilization=${PSRL_DEPLOY_VAL_GPU_MEMORY_UTILIZATION} \
+        train_actor_rollout_ref.actor.strategy=fsdp2 \
         train_actor_rollout_ref.actor.use_kl_loss=${use_kl_loss} \
         train_actor_rollout_ref.actor.kl_loss_coef=${kl_loss_coef} \
         train_actor_rollout_ref.actor.clip_ratio_low=${clip_ratio_low} \
@@ -497,8 +762,8 @@ launch_deployment_mode() {
         algorithm.kl_ctrl.kl_coef=${kl_coef} \
         algorithm.rollout_correction.rollout_is=${rollout_is} \
         algorithm.rollout_correction.rollout_is_threshold=${rollout_is_threshold} \
-        psrl.proactive_filter_strategy.method="retry" \
-        psrl.proactive_filter_strategy.threshold=0 \
+        psrl.rollout_coordination.proactive_filter_strategy.method="retry" \
+        psrl.rollout_coordination.proactive_filter_strategy.threshold=0 \
         \
         trainer.logger='["console", "wandb"]' \
         +trainer.wandb_proxy=http://star-proxy.oa.com:3128 \

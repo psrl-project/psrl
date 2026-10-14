@@ -15,7 +15,7 @@ class HFParameterMapping(ParameterMapping):
         """
         Return an empty mapping list.
 
-        HF parameters are already in the target format; no name transformation
+        HF parameters are already in the target format. No name transformation
         is required.
         """
         return []

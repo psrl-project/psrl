@@ -1,0 +1,49 @@
+{
+  "categories": {
+    "CodeGenerationAPPSPassAt5": "Code",
+    "CodeRetrievalCodeXGlueMRR": "Code",
+    "CoreferenceResolutionSuperGLUEWSCAccuracy": "Text Extraction and Matching",
+    "CoreferenceResolutionWinograndeAccuracy": "Text Extraction and Matching",
+    "CvMolecularPropertyPredictionQm9MeanAbsoluteError": "Molecules and Proteins ML",
+    "GMolecularPropertyPredictionQm9MeanAbsoluteError": "Molecules and Proteins ML",
+    "GraphRegressionZincMae": "Molecules and Proteins ML",
+    "MathQuestionAnsweringSVAMPAccuracy": "Math",
+    "QuestionAnsweringDuoRCAccuracy": "Question Answering",
+    "QuestionAnsweringEli5RougeL": "Question Answering",
+    "QuestionAnsweringFinqaAccuracy": "Question Answering",
+    "R2AbsMolecularPropertyPredictionQm9MeanAbsoluteError": "Molecules and Proteins ML",
+    "ReadingComprehensionSquadExactMatch": "Question Answering",
+    "SentimentAnalysisYelpReviewFullAccuracy": "Text Classification",
+    "TextualClassificationSickAccuracy": "Text Classification",
+    "TextualSimilaritySickSpearmanCorrelation": "Text Extraction and Matching",
+    "TimeSeriesForecastingKaggleWebTrafficMASE": "Time Series",
+    "TimeSeriesForecastingRideshareMAE": "Time Series",
+    "TimeSeriesForecastingSolarWeeklyMAE": "Time Series",
+    "U0MolecularPropertyPredictionQm9MeanAbsoluteError": "Molecules and Proteins ML"
+  },
+  "seed": 20260826,
+  "train": [
+    "CodeGenerationAPPSPassAt5",
+    "CodeRetrievalCodeXGlueMRR",
+    "CoreferenceResolutionSuperGLUEWSCAccuracy",
+    "CoreferenceResolutionWinograndeAccuracy",
+    "CvMolecularPropertyPredictionQm9MeanAbsoluteError",
+    "MathQuestionAnsweringSVAMPAccuracy",
+    "QuestionAnsweringDuoRCAccuracy",
+    "QuestionAnsweringEli5RougeL",
+    "QuestionAnsweringFinqaAccuracy",
+    "R2AbsMolecularPropertyPredictionQm9MeanAbsoluteError",
+    "SentimentAnalysisYelpReviewFullAccuracy",
+    "TimeSeriesForecastingKaggleWebTrafficMASE",
+    "TimeSeriesForecastingSolarWeeklyMAE",
+    "U0MolecularPropertyPredictionQm9MeanAbsoluteError"
+  ],
+  "val": [
+    "GMolecularPropertyPredictionQm9MeanAbsoluteError",
+    "GraphRegressionZincMae",
+    "ReadingComprehensionSquadExactMatch",
+    "TextualClassificationSickAccuracy",
+    "TextualSimilaritySickSpearmanCorrelation",
+    "TimeSeriesForecastingRideshareMAE"
+  ]
+}

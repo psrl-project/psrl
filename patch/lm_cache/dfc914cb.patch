@@ -1,0 +1,47 @@
+diff --git a/lmcache/integration/vllm/vllm_v1_adapter.py b/lmcache/integration/vllm/vllm_v1_adapter.py
+index 38143a5b..aae755bf 100644
+--- a/lmcache/integration/vllm/vllm_v1_adapter.py
++++ b/lmcache/integration/vllm/vllm_v1_adapter.py
+@@ -1429,9 +1429,41 @@ class LMCacheConnectorV1Impl:
+ 
+         meta = LMCacheConnectorMetadata()
+ 
++        # NOTE(psrl): Build the set of req_ids being newly scheduled this step
++        # before evicting finished entries. PSRL recycles integer UIDs across
++        # partial-rollout re-submissions, so the same ID can appear in both
++        # finished_req_ids (the old, aborted instance) and scheduled_new_reqs
++        # (the freshly re-submitted instance) within a single scheduling step.
++        # This happens because PSRL's abort and re-add messages land in the
++        # same _process_input_queue drain, causing the sequence:
++        #   (a) ABORT(uid)  → finished_req_ids.add(uid)
++        #   (b) ADD(uid_v2) → waiting queue
++        #   (c) schedule()  → uid_v2 promoted to running →
++        #       update_state_after_alloc → _unfinished_requests[uid] = req_v2
++        #       uid_v2 placed in scheduled_new_reqs
++        # If we blindly pop _unfinished_requests[uid] in step (a)'s cleanup,
++        # the freshly-set entry for req_v2 is destroyed. The next step then
++        # finds uid in scheduled_cached_reqs but not in _unfinished_requests,
++        # raising ValueError.
++        # Fix: skip _unfinished_requests eviction when the same ID has already
++        # been re-registered in scheduled_new_reqs this step. The
++        # _request_trackers entry is still popped (the scheduled_new_reqs loop
++        # below will re-create it for req_v2).
++        new_req_ids: set[str] = {
++            r.req_id
++            for r in scheduler_output.scheduled_new_reqs
++            if not r.req_id.startswith("mock_req")
++        }
+         for finished_req_id in scheduler_output.finished_req_ids:
+             self._request_trackers.pop(finished_req_id, None)
+-            self._unfinished_requests.pop(finished_req_id, None)
++            if finished_req_id not in new_req_ids:
++                self._unfinished_requests.pop(finished_req_id, None)
++            else:
++                logger.debug(
++                    "Skipping _unfinished_requests eviction for %s: "
++                    "same ID was re-submitted in this scheduling step.",
++                    finished_req_id,
++                )
+ 
+         # We should load KV for:
+         # 1. new requests

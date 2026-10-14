@@ -9,14 +9,3 @@ tools:
       name: "code_interpreter"
       description:  "A tool for executing code."
       type: native
-
-  # Use registered tools
-  # - tool_name: custom_sandbox_fusion
-  #   params:
-  #     type: native
-  #     sandbox_fusion_url: "http://localhost:8080/run_code"
-  #     memory_limit_mb: 1024
-  #     default_timeout: 30
-  #     default_language: "python"
-  #     name: "code_interpreter"
-  #     description:  "A tool for executing code."

@@ -1,33 +1,46 @@
+# Copyright 2024 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License").
+# You may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+#
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+#
+# limitations under the License.
+"""Define PSRL rollout configuration extensions."""
+
 from dataclasses import dataclass, field
 
 from omegaconf import MISSING
 from verl.base_config import BaseConfig
-from verl.utils.profiler import ProfilerConfig
-
-__all__ = [
-    "SamplingConfig",
-    "PoolingConfig",
-    "MultiTurnConfig",
-    "CustomAsyncServerConfig",
-    "AgentLoopConfig",
-    "TraceConfig",
-    "ServerConfig",
-    "PrometheusConfig",
-    "RolloutConfig",
-]
-
-
-@dataclass
-class SamplingConfig(BaseConfig):
-    temperature: float = 1.0
-    top_k: int = -1
-    top_p: float = 1.0
-    do_sample: bool = True
-    n: int = 1
+from verl.workers.config.rollout import (
+    AgentLoopConfig as _VeRLAgentLoopConfig,
+)
+from verl.workers.config.rollout import (
+    CustomAsyncServerConfig,
+    PrometheusConfig,
+    SamplingConfig,
+    ServerConfig,
+    TraceConfig,
+)
+from verl.workers.config.rollout import (
+    MultiTurnConfig as _VeRLMultiTurnConfig,
+)
+from verl.workers.config.rollout import (
+    RolloutConfig as _VeRLRolloutConfig,
+)
 
 
 @dataclass
 class PoolingConfig(BaseConfig):
+    """Configuration for vLLM pooling models (e.g., reward/embedding models)."""
+
     normalize: bool = True
     use_activation: bool = False
     task: str = "classify"
@@ -66,11 +79,26 @@ class AgentDataConfig(BaseConfig):
 
 
 @dataclass
-class AgentLoopConfig(BaseConfig):
-    num_workers: int = 8
-    agent_loop_config_path: str | None = None
+class MultiTurnConfig(_VeRLMultiTurnConfig):
+    _mutable_fields = {"max_turns"}
+
+    enable: bool = False
+    max_turns: int | None = None
+    tool_config_path: str | None = None
+    function_tool_path: str | None = None
+    max_parallel_calls: int = 1
+    max_tool_response_length: int = 256
+    tool_response_truncate_side: str = "middle"
+    use_inference_chat_template: bool = False
+    tokenization_sanity_check_mode: str = "strict"
+    format: str = "hermes"
+
+
+@dataclass
+class AgentLoopConfig(_VeRLAgentLoopConfig):
+    """Configure PSRL agent loops."""
+
     route_strategy: str = "round_robin"
-    custom_async_server: CustomAsyncServerConfig = field(default_factory=CustomAsyncServerConfig)
     trajectory_timeout: float | None = None
     env: EnvironmentConfig = field(default_factory=EnvironmentConfig)
     data: AgentDataConfig = field(default_factory=AgentDataConfig)
@@ -79,143 +107,56 @@ class AgentLoopConfig(BaseConfig):
     gamma: float = 0.0
     reward_bonus_coeff: float = 0.0
     traj_reward_mode: str = "traj"
+    default_agent_loop: str = "generate_only_agent"
+    # Node IPs allowed to host agent loop workers. Empty means every alive node, which is
+    # the default round-robin placement. Naming a subset keeps container-backed rollout
+    # off a node whose Docker daemon has degraded, since such a node still accepts actors
+    # and then hangs every episode it is handed.
+    node_ips: list[str] = field(default_factory=list)
+    # DAPO Overlong Filtering. Zero the loss mask of every trajectory a harness budget
+    # cut off, so its tokens carry no gradient while its reward still moves the GRPO
+    # group baseline. This is the DAPO mechanism verl does NOT ship: its
+    # `overlong_buffer_cfg` is Soft Overlong Punishment, a length-proportional reward
+    # penalty that shapes the score rather than the mask. SkyRL enables the filtering
+    # variant for its Harbor recipes.
+    #
+    # Off by default because it discards real rollout tokens, which is the right call
+    # only for a workload whose truncation rate is high enough to distort the gradient.
+    overlong_filtering: bool = False
 
 
 @dataclass
-class TraceConfig(BaseConfig):
-    backend: str | None = None
-    token2text: bool = False
+class RolloutConfig(_VeRLRolloutConfig):
+    """Extend veRL rollout configuration with PSRL settings."""
 
-
-@dataclass
-class ServerConfig(BaseConfig):
-    """
-    Configuration for SGLang server when running in server mode
-    """
-
-    timeout: float = 60.0
-    max_attempts: int = 3
-    retry_delay: float = 2.0
-    max_connections: int = 1000
-    max_start_wait_time: float = 300.0
-
-
-@dataclass
-class PrometheusConfig(BaseConfig):
-    """
-    Configuration for Prometheus server
-    """
-
-    # whether enable prometheus on server mode rollout
-    enable: bool = False
-    # Port number that Prometheus listens on, default is 9090
-    port: int = 9090
-    # Path to Prometheus configuration file
-    file: str = "/tmp/ray/session_latest/metrics/prometheus/prometheus.yml"
-    # Specify served_model_name to avoid displaying overly long model paths in Grafana
-    served_model_name: str | None = None
-
-
-@dataclass
-class RolloutConfig(BaseConfig):
-    _mutable_fields = {"max_model_len", "load_format"}
-
-    name: str | None = MISSING
-    mode: str = "sync"
     disable_attn: bool = False
-    skip_tokenizer_init: bool = True
-
-    temperature: float = 1.0
-    top_k: int = -1
-    top_p: float = 1.0
-    do_sample: bool = True
-    n: int = 1
-
-    # Early termination threshold for multi-turn rollout in sglang.
-    # Abort remaining requests when (1 - over_sample_rate) * total_requests are completed.
-    over_sample_rate: float = 0.0
-
-    prompt_length: int = 512
-    response_length: int = 512
-
-    dtype: str = "bfloat16"
-    gpu_memory_utilization: float = 0.5
-    ignore_eos: bool = False
-    enforce_eager: bool = True
-    cudagraph_capture_sizes: list | None = None
-    free_cache_engine: bool = True
-    data_parallel_size: int = 1
-    expert_parallel_size: int = 1
-    tensor_model_parallel_size: int = 2
-    pipeline_model_parallel_size: int = 1
-    max_num_batched_tokens: int = 8192
-
-    # TODO: enable train_kwargs
-    # train_sampling_config: SamplingConfig = field(default_factory=SamplingConfig)
-
-    val_kwargs: SamplingConfig = field(default_factory=SamplingConfig)
-    pooling_config: PoolingConfig = field(default_factory=PoolingConfig)
-
-    max_model_len: int | None = None
-    max_num_seqs: int = 1024
-
-    # note that the logprob computation should belong to the actor
-    log_prob_micro_batch_size: int | None = None
-    log_prob_micro_batch_size_per_gpu: int | None = None
-    log_prob_use_dynamic_bsz: bool = False
-    log_prob_max_token_len_per_gpu: int = 16384
-
-    disable_log_stats: bool = False
-
-    multi_stage_wake_up: bool = False
-    engine_kwargs: dict = field(default_factory=dict)
-
-    calculate_log_probs: bool = False
-
-    agent: AgentLoopConfig = field(default_factory=AgentLoopConfig)
-
-    trace: TraceConfig = field(default_factory=TraceConfig)
-
-    multi_turn: MultiTurnConfig = field(default_factory=MultiTurnConfig)
-
-    # Server configuration for sglang server mode
-    server: ServerConfig = field(default_factory=ServerConfig)
-
-    # Use Prometheus to collect and monitor rollout statistics
-    prometheus: PrometheusConfig = field(default_factory=PrometheusConfig)
-
-    update_weights_bucket_megabytes: int = 512
-
-    skip_rollout: bool = False
-
-    skip_dump_dir: str = "/tmp/rollout_dump"
-
-    profiler: ProfilerConfig | None = None
-
-    enable_chunked_prefill: bool = True
-
-    enable_prefix_caching: bool = True
-
-    use_psrl_scheduler: bool = True
-
-    disable_kv_cache: bool = False
-
-    logprobs_mode: str = "raw_logprobs"
-
-    load_format: str = "dummy"
-
-    layered_summon: bool = False
-
-    layer_name_map: dict = field(default_factory=dict)
-
-    sglang_engine_mode: str = "local"
-
-    limit_images: int | None = None
-
-    skip_tokenizer_init: bool = False
-
-    enable_rollout_routing_replay: bool = False
-    
-    task: str = "generate"
-    
     runner: str = "generate"
+    task: str = "generate"
+    reward_kwargs: PoolingConfig = field(default_factory=PoolingConfig)
+    pooling_config: PoolingConfig = field(default_factory=PoolingConfig)
+    enable_weights_cpu_backup: bool = False
+    multi_turn: MultiTurnConfig = field(default_factory=MultiTurnConfig)
+    agent: AgentLoopConfig = field(default_factory=AgentLoopConfig)
+    # The SMG router uses this template to render TITO session prompts.
+    chat_template: str | None = None
+    skip_rollout: bool = False
+    skip_dump_dir: str = "/tmp/rollout_dump"
+    use_psrl_scheduler: bool = True
+    disable_kv_cache: bool = False
+    task: str = "generate"
+    runner: str = "generate"
+
+
+__all__ = [
+    "SamplingConfig",
+    "MultiTurnConfig",
+    "CustomAsyncServerConfig",
+    "AgentLoopConfig",
+    "TraceConfig",
+    "ServerConfig",
+    "PrometheusConfig",
+    "RolloutConfig",
+    "PoolingConfig",
+    "EnvironmentConfig",
+    "AgentDataConfig",
+]

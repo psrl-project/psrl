@@ -195,8 +195,8 @@ index bbe30c719..9a737d8b8 100644
 +        else:
 +            attn_output = self.attn(q, k, v)
  
-        if self.attn_output_gate:
-            gate = torch.sigmoid(gate)
+         if self.attn_output_gate:
+             gate = torch.sigmoid(gate)
 diff --git a/vllm/model_executor/models/chatglm.py b/vllm/model_executor/models/chatglm.py
 index f48e5dc1d..0721d042e 100644
 --- a/vllm/model_executor/models/chatglm.py
@@ -260,16 +260,16 @@ index 89447927d..1375d33df 100644
          return output
  
 diff --git a/vllm/v1/engine/async_llm.py b/vllm/v1/engine/async_llm.py
-index 7ff324f12..16f33c001 100644
+index a9c42e78e..4823ca330 100644
 --- a/vllm/v1/engine/async_llm.py
 +++ b/vllm/v1/engine/async_llm.py
 @@ -709,6 +709,15 @@ class AsyncLLM(EngineClient):
  
          self.output_handler = asyncio.create_task(output_handler())
  
-+    async def abort_all(self, internal: bool = False) -> int:
++    async def abort_all(self) -> int:
 +        """Abort all requests in OutputProcessor and EngineCore."""
-+        all_request_ids = self.output_processor.abort_all(internal=internal)
++        all_request_ids = self.output_processor.abort_all()
 +        await self.engine_core.abort_requests_async(all_request_ids)
 +
 +        if self.log_requests:
@@ -280,26 +280,51 @@ index 7ff324f12..16f33c001 100644
          self, request_id: str | Iterable[str], internal: bool = False
      ) -> None:
 diff --git a/vllm/v1/engine/output_processor.py b/vllm/v1/engine/output_processor.py
-index f9e965092..5501c8fb0 100644
+index f9e965092..df0304c97 100644
 --- a/vllm/v1/engine/output_processor.py
 +++ b/vllm/v1/engine/output_processor.py
-@@ -443,6 +443,11 @@ class OutputProcessor:
+@@ -443,6 +443,14 @@ class OutputProcessor:
              assert state.queue is not None
              state.queue.put(e)
  
-+    def abort_all(self, internal: bool = False) -> list[str]:
++    def abort_all(self) -> list[str]:
++        # request_states.keys() are *internal* IDs (randomized by assign_request_id),
++        # so we must pass internal=True; using internal=False would look them up in
++        # external_req_ids where they don't exist, silently aborting nothing.
 +        abort_request_ids = list(self.request_states.keys())
-+        self.abort_requests(abort_request_ids, internal=internal)
++        self.abort_requests(abort_request_ids, internal=True)
 +        return abort_request_ids
 +
      def abort_requests(self, request_ids: Iterable[str], internal: bool) -> list[str]:
          """Abort a list of requests.
  
 diff --git a/vllm/v1/metrics/loggers.py b/vllm/v1/metrics/loggers.py
-index 5d5877d16..43a063b2e 100644
+index f20d78542..1188aa359 100644
 --- a/vllm/v1/metrics/loggers.py
 +++ b/vllm/v1/metrics/loggers.py
-@@ -1284,11 +1284,14 @@ class StatLoggerManager:
+@@ -1117,8 +1117,20 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
+         # Labeled prompt token counters by source
+         pts = iteration_stats.prompt_token_stats
+         for source in PromptTokenStats.ALL_SOURCES:
++            # PSRL: when externally loaded KV blocks fail to load, the scheduler's
++            # _handle_invalid_blocks decrements request.num_external_computed_tokens
++            # (see scheduler.py). That can leave num_external_computed_tokens larger
++            # than num_cached_tokens for the iteration, so the per-source delta
++            # computed in PromptTokenStats.update_from_output goes negative. A
++            # Prometheus Counter rejects a negative inc() with ValueError, which
++            # otherwise crashes the whole EngineCore. Clamp to 0 to keep the metric
++            # monotonic and the engine alive; correctness is unaffected because the
++            # affected tokens are recomputed regardless.
++            source_tokens = pts.get_by_source(source)
++            if source_tokens < 0:
++                source_tokens = 0
+             self.counter_prompt_tokens_by_source[source][engine_idx].inc(
+-                pts.get_by_source(source)
++                source_tokens
+             )
+         self.counter_prompt_tokens_cached[engine_idx].inc(pts.cached_tokens)
+         self.counter_prompt_tokens_recomputed[engine_idx].inc(pts.recomputed_tokens)
+@@ -1292,11 +1304,14 @@ class StatLoggerManager:
                      custom_prometheus_logger = True
              else:
                  # per engine logger
@@ -320,10 +345,10 @@ index 5d5877d16..43a063b2e 100644
          if not custom_prometheus_logger:
              self.stat_loggers.append(
 diff --git a/vllm/v1/metrics/stats.py b/vllm/v1/metrics/stats.py
-index 45f002e01..0df2835d7 100644
+index 4a1e8b6f3..c9c9b5ca8 100644
 --- a/vllm/v1/metrics/stats.py
 +++ b/vllm/v1/metrics/stats.py
-@@ -170,6 +170,11 @@ class KVCacheEvictionEvent:
+@@ -170,6 +170,16 @@ class KVCacheEvictionEvent:
  @dataclass
  class SchedulerStats:
      """Stats associated with the scheduler."""
@@ -331,7 +356,43 @@ index 45f002e01..0df2835d7 100644
 +    need_to_abort_reqs: list[str] = field(default_factory=list)
 +    req_id_to_prompt_token_num: dict[str, int] | None = None
 +    req_id_to_response_token_num: dict[str, int] | None = None
-+    req_id_in_waiting: list[str] = field(default_factory=list)
++    # NOTE(lhy): GPU prefix cache hash snapshot for push-based KV cache info.
++    # Populated by RolloutScheduler.make_stats(), consumed by StatCollector.record().
++    gpu_prefix_cache_snapshot: dict | None = None
++    # NOTE(lhy): LMCache backend chunk hash snapshot for push-based cache info.
++    # Populated by RolloutScheduler.make_stats(), consumed by StatCollector.record().
++    lmcache_backend_snapshot: dict | None = None
  
      num_running_reqs: int = 0
      num_waiting_reqs: int = 0
+diff --git a/vllm/v1/worker/gpu_model_runner.py b/vllm/v1/worker/gpu_model_runner.py
+index 98e1dab36..b232429c2 100644
+--- a/vllm/v1/worker/gpu_model_runner.py
++++ b/vllm/v1/worker/gpu_model_runner.py
+@@ -1255,6 +1255,26 @@ class GPUModelRunner(
+                 # Replace the existing block IDs with the new ones.
+                 req_state.block_ids = new_block_ids
+ 
++            # Resync block_ids to the scheduler's authoritative length. When a KV
++            # load failure rolls back num_computed_tokens without preemption (the
++            # scheduler's recompute policy keeps the request RUNNING, so the
++            # resumed_from_preemption replace path above is skipped), the scheduler
++            # frees the orphaned tail blocks but the runner only ever extends its
++            # own block_ids. Across repeated rollbacks the list drifts longer than
++            # the scheduler's req_to_blocks and can exceed the block_table row width
++            # (cdiv(max_model_len, block_size)), overflowing it on add_row. The
++            # surplus is always a dead tail (positions past max_model_len are never
++            # addressed), so clamp each group to its row capacity.
++            block_tables = self.input_batch.block_table.block_tables
++            if len(req_state.block_ids) == len(block_tables):
++                for g, group_block_ids in enumerate(req_state.block_ids):
++                    bt = block_tables[g]
++                    # block_ids are KV-manager blocks; the row width is in kernel
++                    # blocks, so convert back to the KV-block capacity.
++                    cap = bt.max_num_blocks_per_req // bt.blocks_per_kv_block
++                    if len(group_block_ids) > cap:
++                        del group_block_ids[cap:]
++
+             if req_index is None:
+                 # The request is not in the persistent batch.
+                 # The request was either preempted and resumed later, or was not

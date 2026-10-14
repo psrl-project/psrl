@@ -50,19 +50,19 @@ def _materialize_ep_metadata_on_cpu(enabled: bool):
         yield
         return
 
-    from vllm.model_executor.layers.fused_moe import layer as fused_moe_layer
+    from vllm.model_executor.layers.fused_moe import expert_map_manager
 
-    original = fused_moe_layer.determine_expert_map
+    original = expert_map_manager.determine_expert_map
 
     def determine_expert_map_on_cpu(*args: Any, **kwargs: Any):
         with torch.device("cpu"):
             return original(*args, **kwargs)
 
-    fused_moe_layer.determine_expert_map = determine_expert_map_on_cpu
+    expert_map_manager.determine_expert_map = determine_expert_map_on_cpu
     try:
         yield
     finally:
-        fused_moe_layer.determine_expert_map = original
+        expert_map_manager.determine_expert_map = original
 
 
 def _assert_direct_moe_modules_supported(
@@ -90,8 +90,7 @@ def _assert_direct_moe_modules_supported(
         quant_method = module.quant_method
         if not isinstance(quant_method, UnquantizedFusedMoEMethod):
             raise RuntimeError(
-                "Direct MoE weight arena only supports UnquantizedFusedMoEMethod, "
-                f"got {type(quant_method).__name__}."
+                f"Direct MoE weight arena only supports UnquantizedFusedMoEMethod, got {type(quant_method).__name__}."
             )
         if quant_method.unquantized_backend != UnquantizedMoeBackend.TRITON:
             raise RuntimeError(
@@ -296,11 +295,14 @@ def _pack_loaded_model(
 
     model = model_runner.get_model()
     packer = pack_module_weights_in_fresh_tms_pool if replace_tms_pool else pack_module_weights
-    model_runner._psrl_weight_arena_handle = packer(
-        model,
-        max_chunk_bytes=_max_chunk_bytes(arena_config),
-        alignment_bytes=int(arena_config["alignment_bytes"]),
-    )
+    pack_kwargs = {
+        "max_chunk_bytes": _max_chunk_bytes(arena_config),
+        "alignment_bytes": int(arena_config["alignment_bytes"]),
+    }
+    if replace_tms_pool:
+        additional_config = model_runner.vllm_config.additional_config or {}
+        pack_kwargs["enable_cpu_backup"] = bool(additional_config.get("enable_weights_cpu_backup", False))
+    model_runner._psrl_weight_arena_handle = packer(model, **pack_kwargs)
     stats = model_runner._psrl_weight_arena_handle.stats
     role = (model_runner.vllm_config.additional_config or {}).get("psrl_role", "rollout")
     psrl_logger.warning(
@@ -398,8 +400,7 @@ class WeightArenaModelRunnerPatch(vLLMPatch[GPUModelRunner]):
             return
         if materialization != "repack":
             raise RuntimeError(
-                f"psrl.nixl.weight_arena.{role}_materialization must be 'direct' or 'repack', "
-                f"got {materialization!r}."
+                f"psrl.nixl.weight_arena.{role}_materialization must be 'direct' or 'repack', got {materialization!r}."
             )
 
         if os.environ.get("PSRL_VLLM_PATCHES", "").startswith("TMS"):

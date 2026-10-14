@@ -1,0 +1,366 @@
+# syntax=docker/dockerfile:1.7
+
+# PSRL CPU development/smoke-test image.
+# Build from the repository root:
+#   docker build --progress=plain -f docker/Dockerfile.cpu -t psrl:cpu .
+#
+# PSRL training is GPU-oriented. This image intentionally omits CUDA-only
+# extensions (DeepEP, Apex, TransformerEngine, torch_memory_saver, FlashAttention)
+# while keeping CPU vLLM, UCX/NIXL, LMCache, Mooncake, Megatron's Python layer,
+# veRL, TransferQueue, SMG, and PSRL importable for development and CI.
+
+ARG BASE_IMAGE=ubuntu:24.04
+FROM ${BASE_IMAGE}
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG PYTHON_VERSION=3.12
+ARG UV_VERSION=0.8.22
+ARG MAX_JOBS=32
+
+ARG UCX_REF=v1.20.0
+ARG NIXL_REF=v1.2.0
+ARG VLLM_REF=v0.22.0
+ARG VERL_REF=e5ca4acb
+ARG TRANSFER_QUEUE_REF=434f8c476b4be24bc087e6e95070e64efcc739f9
+ARG LMCACHE_REF=v0.4.6
+ARG MEGATRON_REF=c049020
+ARG MEGATRON_BRIDGE_REF=94d1870
+ARG SMG_REF=psrl-dev
+ARG PSRL_COMMIT=main
+ARG MOONCAKE_VERSION=0.3.10.post2
+
+ENV DEBIAN_FRONTEND=${DEBIAN_FRONTEND} \
+    PSRL_HOME=/home/psrl \
+    PSRL_WORKSPACE=/home/workspace \
+    PSRL_THIRD_PARTY=/root \
+    PSRL_PATCH_DIR=/root/patch \
+    UCX_HOME=/root/ucx \
+    NIXL_HOME=/root/nixl-install \
+    PROTOC=/usr/bin/protoc \
+    PROTOC_INCLUDE=/usr/include \
+    VIRTUAL_ENV=/root/venv \
+    UV_HTTP_TIMEOUT=500 \
+    UV_INDEX_STRATEGY=unsafe-best-match \
+    UV_LINK_MODE=copy \
+    UV_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cpu \
+    PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cpu \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1 \
+    MAX_JOBS=${MAX_JOBS} \
+    VLLM_TARGET_DEVICE=cpu \
+    VLLM_PLUGINS="" \
+    PSRL_CUDA_COMPONENTS_AVAILABLE=0 \
+    PATH=/root/venv/bin:/root/.cargo/bin:${PATH} \
+    LD_LIBRARY_PATH=/root/nixl-install/lib:/root/nixl-install/lib64:/root/ucx/lib:/root/ucx/lib/ucx:${LD_LIBRARY_PATH} \
+    PKG_CONFIG_PATH=/root/ucx/lib/pkgconfig:${PKG_CONFIG_PATH}
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+WORKDIR /root
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        autoconf \
+        automake \
+        build-essential \
+        ca-certificates \
+        ccache \
+        clang \
+        cmake \
+        curl \
+        ffmpeg \
+        git \
+        git-lfs \
+        gnupg \
+        ibverbs-providers \
+        ibverbs-utils \
+        jq \
+        libaio-dev \
+        libcurl4-openssl-dev \
+        libgl1 \
+        libibverbs-dev \
+        libnuma-dev \
+        libprotobuf-dev \
+        librdmacm-dev \
+        libsm6 \
+        libssl-dev \
+        libtcmalloc-minimal4 \
+        libtool \
+        libtool-bin \
+        libxext6 \
+        lsof \
+        meson \
+        ninja-build \
+        numactl \
+        openssh-client \
+        openssh-server \
+        patchelf \
+        pkg-config \
+        protobuf-compiler \
+        pssh \
+        python${PYTHON_VERSION} \
+        python${PYTHON_VERSION}-dev \
+        python${PYTHON_VERSION}-venv \
+        rdma-core \
+        rsync \
+        unzip \
+        vim \
+        wget && \
+    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 && \
+    ln -sf /usr/bin/python3 /usr/local/bin/python && \
+    ln -sf /usr/bin/parallel-ssh /usr/bin/pssh && \
+    python -m venv ${VIRTUAL_ENV} && \
+    python -m pip install --upgrade pip setuptools wheel && \
+    python -m pip install "uv==${UV_VERSION}"
+
+ARG DOCKER_APT_MIRROR=https://mirrors.tencentyun.com/docker-ce
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    codename="$(. /etc/os-release && printf '%s' "${VERSION_CODENAME}")" && \
+    test -n "${codename}" && \
+    install -m 0755 -d /usr/share/keyrings && \
+    curl -fsSL "${DOCKER_APT_MIRROR}/linux/ubuntu/gpg" -o /tmp/docker.asc && \
+    gpg --dearmor --yes -o /usr/share/keyrings/docker-archive-keyring.gpg /tmp/docker.asc && \
+    chmod a+r /usr/share/keyrings/docker-archive-keyring.gpg && \
+    rm -f /tmp/docker.asc && \
+    printf 'deb [arch=%s signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] %s/linux/ubuntu %s stable\n' \
+        "$(dpkg --print-architecture)" "${DOCKER_APT_MIRROR}" "${codename}" \
+        > /etc/apt/sources.list.d/docker.list && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        containerd.io \
+        docker-buildx-plugin \
+        docker-ce \
+        docker-ce-cli \
+        docker-ce-rootless-extras \
+        docker-compose-plugin && \
+    docker --version && \
+    dockerd --version && \
+    containerd --version
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install \
+        "torch==2.11.0" \
+        "torchvision==0.26.0" \
+        "torchaudio==2.11.0" \
+        --index-url https://download.pytorch.org/whl/cpu && \
+    uv pip install \
+        "tensordict==0.12.4" \
+        torchdata \
+        accelerate \
+        aiohttp \
+        blobfile \
+        cachetools \
+        click==8.2.1 \
+        codetiming \
+        datasets \
+        dill \
+        einops \
+        "fastapi[standard]>=0.115.0" \
+        flask \
+        "grpcio>=1.81.1" \
+        "grpcio-tools>=1.81.1" \
+        hf-transfer \
+        hydra-core \
+        mathruler \
+        matplotlib \
+        maturin \
+        "nvidia-ml-py>=12.560.30" \
+        "numpy<2.0.0" \
+        "optree>=0.13.0" \
+        pandas \
+        paramiko \
+        peft \
+        "protobuf>=7.35.1,<8" \
+        "pyarrow>=19.0.1" \
+        pybind11 \
+        pylatexenc \
+        qwen-vl-utils \
+        "ray[default]==2.49.1" \
+        requests \
+        sortedcontainers \
+        "setuptools>=77.0.3,<81" \
+        tomlkit \
+        transformers==5.10.1 \
+        trl \
+        wandb \
+        xgrammar
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+        sh -s -- -y --profile minimal --default-toolchain stable && \
+    rustup component add rustfmt clippy
+
+COPY docker/patch/ ${PSRL_PATCH_DIR}/
+
+# Build a CPU-only UCX/NIXL stack. UCX still supports shared memory, TCP, and
+# RDMA host buffers; CUDA/GDS plugins are intentionally absent.
+RUN git clone https://github.com/openucx/ucx.git /root/ucx-source && \
+    git -C /root/ucx-source checkout ${UCX_REF} && \
+    cd /root/ucx-source && \
+    ./autogen.sh && \
+    ./configure \
+        --prefix=${UCX_HOME} \
+        --enable-shared \
+        --disable-static \
+        --disable-doxygen-doc \
+        --enable-optimizations \
+        --enable-cma \
+        --enable-devel-headers \
+        --without-go \
+        --with-verbs \
+        --with-rdmacm \
+        --with-mlx5 \
+        --with-dm \
+        --enable-mt && \
+    make -j${MAX_JOBS} && \
+    make -j${MAX_JOBS} install-strip && \
+    rm -rf /root/ucx-source
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    git clone https://github.com/ai-dynamo/nixl.git ${PSRL_THIRD_PARTY}/nixl && \
+    git -C ${PSRL_THIRD_PARTY}/nixl checkout ${NIXL_REF} && \
+    cd ${PSRL_THIRD_PARTY}/nixl && \
+    meson setup build \
+        --prefix=${NIXL_HOME} \
+        -Dbuild_docs=false \
+        -Ducx_path=${UCX_HOME} \
+        -Dinstall_headers=true \
+        -Ddisable_gds_backend=true \
+        -Denable_plugins=UCX,POSIX && \
+    ninja -C build -j${MAX_JOBS} && \
+    ninja -C build install && \
+    uv pip install . --no-build-isolation && \
+    uv pip install build/src/bindings/python/nixl-meta/nixl-*-py3-none-any.whl && \
+    python -c "import nixl"
+
+# Build vLLM's CPU wheel from the same patched source revision as the GPU image.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=cache,target=/root/.cache/ccache \
+    git clone https://github.com/vllm-project/vllm.git ${PSRL_THIRD_PARTY}/vllm && \
+    git -C ${PSRL_THIRD_PARTY}/vllm checkout ${VLLM_REF} && \
+    git -C ${PSRL_THIRD_PARTY}/vllm apply --check ${PSRL_PATCH_DIR}/vllm.patch && \
+    git -C ${PSRL_THIRD_PARTY}/vllm apply ${PSRL_PATCH_DIR}/vllm.patch && \
+    cd ${PSRL_THIRD_PARTY}/vllm && \
+    uv pip install -r requirements/build/cpu.txt && \
+    VLLM_TARGET_DEVICE=cpu \
+        python setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38 && \
+    uv pip install dist/*.whl
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install "mooncake-transfer-engine-non-cuda==${MOONCAKE_VERSION}" && \
+    git clone https://github.com/volcengine/verl.git ${PSRL_THIRD_PARTY}/verl && \
+    git -C ${PSRL_THIRD_PARTY}/verl checkout ${VERL_REF} && \
+    git -C ${PSRL_THIRD_PARTY}/verl apply --check ${PSRL_PATCH_DIR}/verl.patch && \
+    git -C ${PSRL_THIRD_PARTY}/verl apply ${PSRL_PATCH_DIR}/verl.patch && \
+    uv pip install -e ${PSRL_THIRD_PARTY}/verl && \
+    git clone https://github.com/Ascend/TransferQueue.git ${PSRL_THIRD_PARTY}/TransferQueue && \
+    git -C ${PSRL_THIRD_PARTY}/TransferQueue checkout ${TRANSFER_QUEUE_REF} && \
+    git -C ${PSRL_THIRD_PARTY}/TransferQueue apply --check ${PSRL_PATCH_DIR}/transfer_queue.patch && \
+    git -C ${PSRL_THIRD_PARTY}/TransferQueue apply ${PSRL_PATCH_DIR}/transfer_queue.patch && \
+    uv pip install -e ${PSRL_THIRD_PARTY}/TransferQueue
+
+# Install numpy to overwrite verl's numpy version.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install "numpy==2.2.6"
+
+# LMCache has an explicit pure-Python fallback for CPU environments.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install \
+        aiofile \
+        aiofiles \
+        awscrt \
+        blake3 \
+        httptools \
+        httpx \
+        "huggingface-hub>=1.5.0" \
+        msgspec \
+        numba \
+        nvtx \
+        "opentelemetry-api>=1.20.0,<=1.40.0" \
+        "opentelemetry-exporter-otlp>=1.20.0" \
+        "opentelemetry-exporter-prometheus>=0.50b0,<=0.61b0" \
+        "opentelemetry-sdk>=1.20.0" \
+        "prometheus-client>=0.18.0,<=0.24.1" \
+        psutil \
+        py-cpuinfo \
+        pytest \
+        pyyaml \
+        "pyzmq>=25.0.0" \
+        redis \
+        safetensors \
+        uvicorn && \
+    git clone https://github.com/LMCache/LMCache.git ${PSRL_THIRD_PARTY}/LMCache && \
+    git -C ${PSRL_THIRD_PARTY}/LMCache checkout ${LMCACHE_REF} && \
+    git -C ${PSRL_THIRD_PARTY}/LMCache apply --check ${PSRL_PATCH_DIR}/lm_cache.patch && \
+    git -C ${PSRL_THIRD_PARTY}/LMCache apply ${PSRL_PATCH_DIR}/lm_cache.patch && \
+    NO_NATIVE_EXT=1 NO_GPU_EXT=1 \
+        uv pip install --no-build-isolation --no-deps -e ${PSRL_THIRD_PARTY}/LMCache && \
+    python -c "import lmcache"
+
+# Megatron's Python layer is useful for config/import tests on CPU. CUDA kernel
+# providers and TransformerEngine are deliberately not installed here.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    git clone https://github.com/NVIDIA/Megatron-LM.git ${PSRL_THIRD_PARTY}/Megatron-LM && \
+    git -C ${PSRL_THIRD_PARTY}/Megatron-LM checkout ${MEGATRON_REF} && \
+    uv pip install --no-deps --no-build-isolation -e ${PSRL_THIRD_PARTY}/Megatron-LM && \
+    git clone https://github.com/NVIDIA-NeMo/Megatron-Bridge.git ${PSRL_THIRD_PARTY}/Megatron-Bridge && \
+    git -C ${PSRL_THIRD_PARTY}/Megatron-Bridge checkout ${MEGATRON_BRIDGE_REF} && \
+    sed -i \
+        's|^megatron-core = { path = "3rdparty/Megatron-LM/", editable = true }|# megatron-core is supplied by PSRL.|' \
+        ${PSRL_THIRD_PARTY}/Megatron-Bridge/pyproject.toml && \
+    git -C ${PSRL_THIRD_PARTY}/Megatron-Bridge apply --check ${PSRL_PATCH_DIR}/megatron_bridge.patch && \
+    git -C ${PSRL_THIRD_PARTY}/Megatron-Bridge apply ${PSRL_PATCH_DIR}/megatron_bridge.patch && \
+    uv pip install --no-deps --no-build-isolation -e ${PSRL_THIRD_PARTY}/Megatron-Bridge
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    git clone https://github.com/psrl-project/smg.git ${PSRL_THIRD_PARTY}/smg && \
+    git -C ${PSRL_THIRD_PARTY}/smg checkout ${SMG_REF} && \
+    cd ${PSRL_THIRD_PARTY}/smg && \
+    "${PROTOC}" --version && \
+    test -f "${PROTOC_INCLUDE}/google/protobuf/timestamp.proto" && \
+    test -f "${PROTOC_INCLUDE}/google/protobuf/struct.proto" && \
+    cargo build --release && \
+    uv pip install --no-build-isolation -e crates/grpc_client/python/ && \
+    uv pip install --no-build-isolation -e crates/psrl_state/python/ && \
+    uv pip install -e grpc_servicer/ && \
+    uv pip install "protobuf>=7.35.1,<8" && \
+    cd bindings/python && \
+    maturin develop --features vendored-openssl --release
+
+# Clone PSRL last so changing `PSRL_COMMIT` does not invalidate native
+# dependency layers. The PSRL patch plugin remains reachable by pyproject.toml.
+WORKDIR /home
+RUN --mount=type=cache,target=/root/.cache/uv \
+    git clone https://github.com/psrl-project/psrl.git ${PSRL_HOME} && \
+    git -C ${PSRL_HOME} checkout ${PSRL_COMMIT} && \
+    cd ${PSRL_HOME} && \
+    uv pip install --no-build-isolation -e . && \
+    python -c \
+        "from importlib.metadata import entry_points, version; import vllm_patches; \
+        version('vllm-psrl-patches'); assert any( \
+        ep.name == 'custom_patches' for ep in entry_points(group='vllm.general_plugins'))" && \
+    python -c "import psrl, smg.router, torch, transfer_queue, verl, vllm, vllm_patches" && \
+    python -c "import lmcache, nixl" && \
+    rm -rf /root/.cache/pip /root/.cache/uv
+
+WORKDIR ${PSRL_HOME}
+
+RUN mkdir -p ${PSRL_WORKSPACE}/env
+COPY docker/env.sh ${PSRL_WORKSPACE}/env/psrl.sh
+
+ENV VIRTUAL_ENV=/root/venv \
+    PATH="/root/venv/bin:/root/.cargo/bin:/root/.local/bin:/usr/local/cuda/bin:/usr/local/nvidia/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+RUN echo 'export VIRTUAL_ENV=/root/venv' >> ~/.bashrc && \
+    echo 'export PATH=/root/venv/bin:/root/.cargo/bin:/root/.local/bin:/usr/local/cuda/bin:/usr/local/nvidia/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' >> ~/.bashrc
+
+LABEL org.opencontainers.image.title="PSRL CPU" \
+      org.opencontainers.image.description="CPU development and smoke-test environment for PSRL" \
+      org.opencontainers.image.source="https://github.com/psrl-project/psrl" \
+      ai.psrl.cuda-components="false"
+
+ENTRYPOINT []
+CMD ["/bin/bash"]

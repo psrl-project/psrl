@@ -1,0 +1,30 @@
+# Launch one fleet per host without spanning replicas across host boundaries.
+# Node-local replicas contain failures to one host.
+kind: multinode
+
+# Use one address per line. Blank lines and `#` comments are ignored.
+hosts_file: /apdcephfs_zwfy10/share_303541817/lhy/hosts/32GPUs
+
+# Per-host fleet shape, applied identically on every host.
+replicas: 4
+tp: 2
+pp: 1
+
+# Set `replicas=1` and `dp=N` only when the consumer accepts one URL per host.
+dp: 1
+
+base_port: 8000
+gpu_ids: []
+
+# Must bind all interfaces: the coordinator reaches each replica over the network,
+# not via loopback.
+host: 0.0.0.0
+
+wait_ready_sec: 4500
+
+# Optional ssh username. Empty uses the current user and ~/.ssh/config.
+ssh_user: ""
+
+# Permit half the expected endpoints so one failed host degrades capacity instead of aborting.
+# Failed hosts are excluded from `endpoints.json`.
+min_healthy_frac: 0.5

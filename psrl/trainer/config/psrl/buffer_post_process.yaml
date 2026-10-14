@@ -1,0 +1,7 @@
+# Post processor for buffer requests in batch mode
+
+# Whether to enable buffer post-processing
+enable: False
+
+# `dynamic_sampling_filter` requires `algorithm.filter_groups.metric`.
+name: null

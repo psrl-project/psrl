@@ -8,32 +8,37 @@ Currently we deploy SandBoxFusion with Docker Swarm, which will deploy the servi
 
 - Docker installed on all nodes.
 - SSH access to all nodes.
-- `NODE_IP_LIST` in environment variables: A list of node IPs where the service will be deployed.
-- `IMAGE_NAME` in environment variables: The name of the Docker image to be used for deployment.
+- `SANDBOX_NODE_IPS` in environment variables: comma-separated `ip:gpu_count` pairs (e.g. `192.168.1.1:8,192.168.1.2:8`). The GPU count is stripped before use.
+- `SANDBOX_NODE_NUM` (optional): number of nodes to use; defaults to the count of IPs in `SANDBOX_NODE_IPS`.
+- Image name is hardcoded as `code_sandbox:server` in `launch_service.sh` — load that tag onto every node before launching (see [docker_scripts/README.md](../docker_scripts/README.md)).
 
 ## Deployment Steps
 
 1. **Build the Docker Image**
 
-    Ensure you have built the Docker image for the SandBoxFusion service. You can do this by following the guide in [SandBoxFusion](https://github.com/bytedance/SandboxFusion) to build the code sandbox server image.
+    Ensure you have built the Docker image for the SandBoxFusion service. You can do this by following the guide in [SandBoxFusion](https://github.com/bytedance/SandboxFusion) to build the code sandbox server image, then tag it as `code_sandbox:server` and fan it out with `docker_scripts/docker_copy.sh`.
 
 2. **Prepare the Launch Script**
 
-    Use the provided `launch_service.sh` script to automate the deployment process. Make sure to set the `NODE_IP_LIST` and `IMAGE_NAME` environment variables before running the script.
+    Use the provided `launch_service.sh` script to automate the deployment process. Set `SANDBOX_NODE_IPS` (and optionally `SANDBOX_NODE_NUM`) before running the script.
 
 3. **Launch the Service**
 
     Run the `launch_service.sh` script on the master node:
 
     ```bash
-    bash launch_service.sh
+    SANDBOX_NODE_IPS=ip1:8,ip2:8,...,ipN:8 \
+    SANDBOX_NODE_NUM=N \
+      bash launch_service.sh
     ```
+
+    Or pass the same values as positional args: `bash launch_service.sh "$SANDBOX_NODE_IPS" "$SANDBOX_NODE_NUM"`.
 
     This script will:
     - Check and start docker service on all nodes.
     - Initialize docker swarm on the master node.
     - Join worker nodes to the swarm.
-    - Deploy the SandBoxFusion service using the specified Docker image.
+    - Deploy the SandBoxFusion service using the `code_sandbox:server` image.
 
 4. **Validate the Deployment**
 
@@ -69,9 +74,9 @@ Currently we deploy SandBoxFusion with Docker Swarm, which will deploy the servi
     If you need to remove the deployed service, you can run the following command on the master node, which will use pssh to stop and remove the service from all nodes:
 
     ```bash
-    bash clear_service.sh
+    SANDBOX_NODE_IPS=ip1:8,ip2:8,...,ipN:8 bash clear_service.sh
     ```
 
 ## Notes
 
-As a helper tool, you can use `scripts/docker/docker_manager.sh` in PSRL repository to manager docker across multiple nodes. It provides functionalities such as starting/stopping/restarting docker service, checking docker status and viewing docker logs.
+As a helper tool, you can use [`examples/retool/docker_scripts/docker_manager.sh`](../docker_scripts/docker_manager.sh) to manage Docker across multiple nodes. It provides functionalities such as starting/stopping/restarting the docker service, checking docker status, and viewing docker logs. Set `DOCKER_NODE_IPS` (same `ip:gpu_count` format) when invoking it.

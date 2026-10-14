@@ -12,9 +12,7 @@ from typing import Any
 import paramiko
 
 
-# ----------------------------------------
-# Data classes
-# ----------------------------------------
+# --- Data Classes ---
 @dataclass
 class CPUInfo:
     model_name: str | None = None
@@ -55,9 +53,7 @@ class NodeInfo:
     nvlink: list[dict[str, Any]] = field(default_factory=list)  # kept for backwards-compat if needed
 
 
-# ----------------------------------------
-# SSH helper (paramiko) - context manager
-# ----------------------------------------
+# --- Paramiko SSH Runner ---
 class SSHRunner:
     def __init__(
         self,
@@ -122,9 +118,7 @@ class SSHRunner:
         self.close()
 
 
-# ----------------------------------------
-# Parsers (small helpers)
-# ----------------------------------------
+# --- Parsers ---
 def parse_lscpu(output: str) -> dict[str, str]:
     d = {}
     for line in output.splitlines():
@@ -162,9 +156,7 @@ def parse_nvidia_query(output: str) -> list[dict[str, str]]:
     return items
 
 
-# ----------------------------------------
-# Microbench runner (encapsulate remote scripts)
-# ----------------------------------------
+# --- Microbenchmark Runner ---
 class MicrobenchRunner:
     LOCAL_P2P_SCRIPT = r"""
 import json, time, sys
@@ -323,9 +315,7 @@ print(json.dumps(out))
         return rc, out_run, err_run
 
 
-# ----------------------------------------
-# ClusterScanner
-# ----------------------------------------
+# --- Cluster Scanner ---
 class ClusterScanner:
     """
     Provide node basic scan (CPU/GPU/network + NVLink if available)
@@ -348,9 +338,7 @@ class ClusterScanner:
         self.port = ssh_port
         self.concurrency = concurrency
 
-    # -------------------------
-    # Network scan inside a single node
-    # -------------------------
+    # --- Network Scan ---
     def scan_network_interfaces(self, sr: SSHRunner) -> list[NetworkInterfaceInfo]:
         nlist: list[NetworkInterfaceInfo] = []
 
@@ -557,9 +545,7 @@ class ClusterScanner:
 
             return nlist
 
-    # -------------------------
-    # Basic node scan (only basic info + NVLink parsed into GPUInfo.nvlink)
-    # -------------------------
+    # --- Basic Node Scan ---
     def scan_node_basic(self, ip: str) -> NodeInfo:
         sr = SSHRunner(
             hostname=ip,
@@ -634,9 +620,7 @@ class ClusterScanner:
                 # network interfaces
                 nlist = self.scan_network_interfaces(sr)
 
-                # -----------------------
-                # NVLink (per-GPU)
-                # -----------------------
+                # --- Per-GPU NVLink ---
                 rc_nv, out_nv, err_nv = sr.run(
                     "which nvidia-smi >/dev/null 2>&1 && nvidia-smi nvlink --status || true"
                 )
@@ -657,7 +641,7 @@ class ClusterScanner:
                             if curr_idx is not None:
                                 blocks[curr_idx].append(ln)
                             else:
-                                # some outputs might include leading info before GPU lines; ignore for now
+                                # Ignore preamble text before the first GPU block.
                                 pass
 
                     # attach parsed link entries to each GPU object (by index)
@@ -676,7 +660,7 @@ class ClusterScanner:
                                 if ml:
                                     link_id = int(ml.group(1))
                                     speed = float(ml.group(2))
-                                    # speed is in GB/s; treat as Gbps value
+                                    # Preserve the reported numeric rate under the existing `speed_gbps` field.
                                     links.append({"link_id": link_id, "speed_gbps": speed})
                             if links:
                                 # sort by link_id for stable ordering
@@ -695,7 +679,7 @@ class ClusterScanner:
                         else:
                             g.nvlink = []
                 else:
-                    # no nvlink info found; leave g.nvlink empty lists
+                    # Keep each `nvlink` list empty when no status is available.
                     for g in gpus:
                         g.nvlink = []
 
@@ -720,9 +704,7 @@ class ClusterScanner:
         finally:
             sr.close()
 
-    # -------------------------
-    # Scan all basic nodes concurrently and return list of NodeInfo dicts
-    # -------------------------
+    # --- Concurrent Node Scan ---
     def scan_all_basic(self) -> list[dict[str, Any]]:
         nodes: list[NodeInfo] = []
         with ThreadPoolExecutor(max_workers=self.concurrency) as ex:
@@ -743,9 +725,7 @@ class ClusterScanner:
                 nodes.append(node)
         return [asdict(n) for n in nodes]
 
-    # -------------------------
-    # Summary utility
-    # -------------------------
+    # --- Summary ---
     def scan_summary(self) -> dict[str, Any]:
         """
         Run scan_all_basic() and produce a compact summary dict (JSON-able) with:
@@ -837,11 +817,7 @@ class ClusterScanner:
         }
         return summary
 
-    # -------------------------
-    # Microbench single API: accepts two (ip, gpu_index) tuples
-    # If same ip -> run local p2p with provided src/dst (uses GPU to GPU copy measurement)
-    # If different ip -> run NCCL allreduce between the two hosts on given GPU indices
-    # -------------------------
+    # --- Pairwise Microbenchmark ---
     def microbench_between(
         self,
         left: tuple[str, int],
@@ -904,9 +880,7 @@ class ClusterScanner:
             finally:
                 sr.close()
         else:
-            # inter-node: run NCCL allreduce between left and right
-            # We'll write the same script to both hosts and run with
-            # appropriate env vars (RANK, WORLD_SIZE, MASTER_ADDR, MASTER_PORT)
+            # Run one copy of the NCCL script per host with rank-specific environment variables.
             script = MicrobenchRunner.NCCL_ALLREDUCE_SCRIPT_TEMPLATE.format(
                 master_port=master_port, tensor_mb=tensor_mb, iters=iters, warmup=warmup
             )
@@ -1006,11 +980,9 @@ class ClusterScanner:
                 right_sr.close()
 
 
-# ----------------------------------------
-# Example usage
-# ----------------------------------------
+# --- Example Usage ---
 if __name__ == "__main__":
-    ips = ["28.49.53.113", "28.49.55.40"]
+    ips = ["192.168.1.1", "192.168.1.2"]
     username = "root"
     ssh_port = 36000
     ssh_key = None
@@ -1029,6 +1001,5 @@ if __name__ == "__main__":
     summary = scanner.scan_summary()
     print(json.dumps({"summary": summary}, indent=2))
 
-    # example microbench between two GPUs on same host: ("host", 0) and ("host", 1)
     # out = scanner.microbench_between(("127.0.0.1", 0), ("127.0.0.1", 1))
     # print(json.dumps(out, indent=2))

@@ -87,8 +87,6 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo \
     psrl.buffer_post_process.enable=True \
     psrl.buffer_post_process.name=dynamic_sampling_filter \
     \
-    gen_actor_rollout_ref.model.path="$MODEL_PATH" \
-    +gen_actor_rollout_ref.model.override_config.max_position_embeddings=32768 \
     gen_actor_rollout_ref.rollout.n=${n_resp_per_prompt} \
     gen_actor_rollout_ref.rollout.mode=sync \
     gen_actor_rollout_ref.rollout.enable_chunked_prefill=False \
@@ -132,12 +130,12 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo \
     train_actor_rollout_ref.actor.grad_clip=1.0 \
     train_actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode} \
     \
-    reward_model.reward_manager=dapo \
-    +reward_model.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer} \
-    +reward_model.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len} \
-    +reward_model.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \
-    +reward_model.reward_kwargs.overlong_buffer_cfg.log=False \
-    +reward_model.reward_kwargs.max_resp_len=${max_response_length} \
+    reward.reward_manager.name=dapo \
+    +reward.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer} \
+    +reward.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len} \
+    +reward.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \
+    +reward.reward_kwargs.overlong_buffer_cfg.log=False \
+    +reward.reward_kwargs.max_resp_len=${max_response_length} \
     \
     algorithm.rollout_correction.rollout_is=${rollout_is} \
     algorithm.rollout_correction.rollout_is_threshold=${rollout_is_threshold} \

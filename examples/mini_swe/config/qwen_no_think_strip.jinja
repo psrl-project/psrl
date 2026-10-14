@@ -1,0 +1,13 @@
+{#-
+  Preserve assistant thinking tags between rollout and training.
+  The agent supplies explicit system messages and plain user messages for tool output.
+-#}
+{%- for message in messages %}
+    {%- set content = message.content if message.content is string else '' %}
+    {%- if message.role == 'system' or message.role == 'user' or message.role == 'assistant' %}
+        {{- '<|im_start|>' + message.role + '\n' + content + '<|im_end|>\n' }}
+    {%- endif %}
+{%- endfor %}
+{%- if add_generation_prompt %}
+    {{- '<|im_start|>assistant\n<think>\n\n</think>\n\n' }}
+{%- endif %}

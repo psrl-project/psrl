@@ -1,0 +1,6 @@
+# Method for proactive filter strategy
+# Available options: "null", "retry", "truncate"
+method: null
+
+# Trigger retry or truncation when remaining reserved entries fall below this value.
+threshold: 0

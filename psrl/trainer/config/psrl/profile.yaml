@@ -1,0 +1,20 @@
+# Whether to disable the attention in Qwen2.5
+disable_attn: False
+
+# Whether to fix the weight of the model
+# Useful for analysis
+fix_weight: False
+
+# Cumulative prefill/decode wall-time split, written to
+# TimeSplit_I{replica_idx}.log under psrl.logging_path.
+time_split:
+  # Whether to enable the periodic prefill/decode time-split log.
+  enable: True
+  # Logging interval in seconds.
+  interval_in_s: 60.0
+
+# Per-step prefill composition is high volume because every prefill kernel is logged.
+# Output is written under `psrl.logging_path`.
+prefill_composition:
+  # Whether to enable per-step prefill composition logging.
+  enable: False

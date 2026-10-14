@@ -1,0 +1,45 @@
+name: gpu_distributed
+
+on:
+  push:
+    branches: [main, base_agentic_rl]
+    paths:
+      - "tests/fsdp/**"
+      - "tests/megatron/**"
+      - "tests/torch_dist/**"
+      - "tests/state_dict/**"
+      - "psrl/utils/converter/**"
+      - "psrl/workers/train/**"
+      - ".github/workflows/gpu_distributed.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gpu_distributed:
+    runs-on: [self-hosted, gpu]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install psrl with GPU dependencies
+        # Each `run` block uses a fresh shell, so source `psrl.sh` when needed.
+        run: |
+          pip install -e ".[grpc,test]"
+
+      - name: Run torch.distributed broadcast test (5 GPUs)
+        run: |
+          bash tests/torch_dist/scripts/test_broadcast.sh
+
+      - name: Run FSDP1 model loading test (2 GPUs)
+        run: |
+          bash tests/fsdp/scripts/test_fsdp1_load_model.sh
+
+      - name: Run FSDP2 model loading test (2 GPUs)
+        run: |
+          bash tests/fsdp/scripts/test_fsdp2_load_model.sh
+
+      - name: Run vLLM converter integration test (new API, TP=1 and TP=2)
+        run: |
+          bash tests/state_dict/scripts/test_vllm_converter_new_api.sh

@@ -1,30 +1,8 @@
 #!/usr/bin/env python3
 """
-plot_jsonl_simple.py
+Plot processed time series from one or more JSONL files.
 
-Simple: read a .jsonl file line-by-line, call a user-defined "processor" for each JSON object,
-collect kept rows and plot multiple labeled time series.
-
-REQUIREMENT: user must provide a processor function with signature:
-    processor(obj: dict) -> (keep: bool, values: dict[str, float], x_value)
-
-- keep: whether to keep this row
-- values: mapping label -> numeric value for this row
-- x_value: x-axis value for this row (can be number or datetime)
-Note: this script preserves the original file order; it does NOT sort by x.
-
-Supported modes:
-1. Single file: provide a .jsonl file path
-   Example: python plot.py data.jsonl --out output.png
-
-2. Multiple files: provide a directory and a substring to filter .jsonl files by name
-   Example: python plot.py /path/to/dir --substring "result" --out combined.png
-   Labels will be prefixed with filename: "filename::metric_name"
-
-3. Multiple files with custom labels:
-   Example: python plot.py /path/to/dir --substring "exp" --custom-labels "A,B,C" --out output.png
-   Custom labels will completely replace the original metric labels (one per file).
-   Number of custom labels must exactly match the number of matching files.
+A caller supplies a processor that selects rows and returns labels plus an x value.
 """
 
 import argparse
@@ -55,13 +33,10 @@ def natural_sort_key(text: str):
 
 
 def read_jsonl_lines(path: str) -> Iterable[dict[str, Any]]:
-    """Yield parsed JSON objects from a jsonl file, skipping empty/invalid lines.
+    """
+    Yield JSON objects from JSONL or prefixed log lines.
 
-    Supports lines with log prefixes before the JSON/Python dict object, e.g.:
-    "2025-11-03 16:24:54,757 - stats_collector.py - 203 - Snapshot (model version 0): {...}"
-    In such cases, extracts the JSON/Python dict part (starting from '{' or '[') and parses it.
-
-    Handles both standard JSON format (with double quotes) and Python dict literal format (with single quotes).
+    Supports JSON and Python dictionary syntax.
     """
     with open(path, encoding="utf-8") as f:
         for i, raw in enumerate(f, start=1):
@@ -133,14 +108,14 @@ def collect_by_processor(
         try:
             keep, values, x = processor(obj)
         except Exception as e:
-            print(f"[warn] processor raised error; skipping line: {e}")
+            print(f"[warn]: Processor raised an error. Skipping line: {e}.")
             raise e
             continue
 
         if not keep:
             continue
         if not isinstance(values, dict):
-            print("[warn] processor returned non-dict values; skipping line")
+            print("[warn]: Processor returned non-dict values. Skipping line.")
             continue
 
         for label, raw_v in values.items():
@@ -420,7 +395,7 @@ def sum_series_by_x(
         all_labels.update(series.keys())
 
     for label in all_labels:
-        # Extract metric part: if label contains "::", use part after it; otherwise use full label
+        # Remove any filename prefix from the metric label.
         if "::" in label:
             metric = label.split("::", 1)[1]
         else:
@@ -489,18 +464,7 @@ def sum_series_by_x(
     return result
 
 
-# -------------------------
-# Example processor (editable)
-# -------------------------
-#
-# This example processor implements the required signature:
-#   processor(obj) -> (keep: bool, values: dict, x_value)
-#
-# It:
-#  - uses 'elapsed_time' as x
-#  - extracts 'throughput_stats.total_throughput' and 'scheduler_stats.kv_cache_usage'
-#  - keeps every row (return keep=True). Modify as needed.
-#
+# --- Example processor ---
 
 
 def _get_by_dotted(d: dict[str, Any], path: str, default=None):
@@ -515,10 +479,7 @@ def _get_by_dotted(d: dict[str, Any], path: str, default=None):
 
 def processor_example(obj: dict[str, Any]) -> tuple[bool, dict[str, float], Any]:
     """
-    Example processor:
-    - keep every row
-    - x_value = obj['elapsed_time'] (numeric). If missing, fall back to timestamp parsed as datetime.
-    - returns two labels: 'total_throughput' and 'kv_cache_usage' (floats) if available.
+    Extract throughput and KV cache usage with elapsed time as the x value.
     """
     # choose x
     x = obj.get("elapsed_time")
@@ -551,9 +512,7 @@ def processor_example(obj: dict[str, Any]) -> tuple[bool, dict[str, float], Any]
     return keep, values, x
 
 
-# -------------------------
-# Main (CLI)
-# -------------------------
+# --- CLI ---
 def main():
     ap = argparse.ArgumentParser(description="Simple jsonl -> multi-line plot using a user processor.")
 
@@ -588,7 +547,6 @@ def main():
     # Replace `processor_example` with your own `processor` function if desired.
     # processor = processor_example
 
-    # Determine mode: single file or directory
     if os.path.isfile(args.jsonl):
         # Single file mode
         print(f"Processing single file: {args.jsonl}")

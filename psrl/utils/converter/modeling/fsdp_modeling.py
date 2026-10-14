@@ -15,7 +15,7 @@ class FSDPParameterMapping(ParameterMapping):
         """
         Return an empty mapping list.
 
-        FSDP parameters are already in the HF-equivalent format; no name
+        FSDP parameters are already in the HF equivalent format. No name
         transformation is required.
         """
         return []

@@ -179,11 +179,7 @@ def main() -> None:
     if not detail_dir.is_dir():
         raise SystemExit(f"Detail directory not found: {detail_dir}")
 
-    output_dir = (
-        args.output_dir.resolve()
-        if args.output_dir
-        else detail_dir.parent / "plots" / "itl_vs_kv_cache"
-    )
+    output_dir = args.output_dir.resolve() if args.output_dir else detail_dir.parent / "plots" / "itl_vs_kv_cache"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     models = discover_models(detail_dir)

@@ -1,202 +1,63 @@
-# Modified from verl/experimental/reward/reward_loop/registry.py
 import asyncio
+import inspect
 from collections.abc import Callable
 from functools import partial
-import importlib
-import inspect
-import os
-import sys
-from typing import Any
+from typing import Any, cast
 
 from omegaconf import DictConfig
-from verl.trainer.ppo.reward import get_custom_reward_fn
+from verl.workers.config.reward import RewardManagerConfig
 
 from psrl.utils.reward_score import default_compute_score_async
-from psrl.workers.reward.reward_loop.base import RewardLoopManagerBase
-
 from psrl.workers.reward.gen_reward_function import get_gen_reward_function_cls
-from psrl.workers.reward.reward_model import PSRL_RewardModelManager
+from psrl.workers.reward.reward_loop.base import RawRewardFn, RewardLoopBase
+from psrl.workers.reward.reward_protocol import RewardModelRuntimeInfo
 
-__all__ = ["register", "get_reward_loop_manager_cls", "load_reward_loop_manager"]
+__all__ = ["register", "get_reward_loop_cls", "load_reward_loop"]
 
-REWARD_LOOP_MANAGER_REGISTRY: dict[str, type[RewardLoopManagerBase]] = {}
+REWARD_LOOP: dict[str, type[RewardLoopBase]] = {}
 
 
-def register(
-    name: str,
-) -> Callable[[type[RewardLoopManagerBase]], type[RewardLoopManagerBase]]:
-    """Decorator to register a reward loop manager class with a given name.
+def register(name: str) -> Callable[[type[RewardLoopBase]], type[RewardLoopBase]]:
+    """Decorator to register a reward loop class with a given name.
 
     Args:
         name: `(str)`
-            The name of the reward loop manager.
+            The name of the reward loop.
     """
 
-    def decorator(cls: type[RewardLoopManagerBase]) -> type[RewardLoopManagerBase]:
-        if name in REWARD_LOOP_MANAGER_REGISTRY and REWARD_LOOP_MANAGER_REGISTRY[name] != cls:
-            raise ValueError(
-                f"reward loop manager {name} has already been registered: "
-                f"{REWARD_LOOP_MANAGER_REGISTRY[name]} vs {cls}"
-            )
-        REWARD_LOOP_MANAGER_REGISTRY[name] = cls
+    def decorator(cls: type[RewardLoopBase]) -> type[RewardLoopBase]:
+        if name in REWARD_LOOP and REWARD_LOOP[name] != cls:
+            raise ValueError(f"Reward loop {name!r} has already been registered: {REWARD_LOOP[name]} vs {cls}.")
+        REWARD_LOOP[name] = cls
         return cls
 
     return decorator
 
 
-def get_reward_loop_manager_cls(name: str) -> type[RewardLoopManagerBase]:
-    """Get the reward loop manager class with a given name.
+def get_reward_loop_cls(name: str) -> type[RewardLoopBase]:
+    """Get the reward loop class with a given name.
 
     Args:
         name: `(str)`
-            The name of the reward loop manager.
+            The name of the reward loop.
 
     Returns:
-        `(type)`: The reward loop manager class.
+        `(type)`: The reward loop class.
     """
-    if name not in REWARD_LOOP_MANAGER_REGISTRY:
-        raise ValueError(f"Unknown reward loop manager: {name}")
-    return REWARD_LOOP_MANAGER_REGISTRY[name]
+    if name not in REWARD_LOOP:
+        raise ValueError(f"Unknown reward loop: {name!r}.")
+    return REWARD_LOOP[name]
 
 
-def load_reward_loop_manager(
-    # config: DictConfig,
-    # input_tokenizer: Any,
-    # reward_model_router: Any,
-    # reward_model_tokenizer: Any,
-    # **reward_kwargs: Any,
-    # config: DictConfig,
-    reward_model_config: DictConfig,
-    input_tokenizer: Any,
-    # reward_model_router: Any,
-    # reward_model_tokenizer: Any,
-    reward_loop_type: str,
-    reward_fn: str | dict,
-    reward_model_manager: PSRL_RewardModelManager = None,
-    is_validate: bool = False,
-    **reward_kwargs: Any,
-) -> RewardLoopManagerBase:
-    """Load the reward loop manager based on the configuration.
-
-    Args:
-        config: `(DictConfig)`
-            The configuration for the reward loop manager.
-        input_tokenizer: `(Any)`
-            The tokenizer for the input.
-        reward_model_router: `(Any)`
-            The reward model router.
-        reward_model_tokenizer: `(Any)`
-            The tokenizer for the reward model.
-        is_validate: `(bool)`
-            Whether to load the reward loop manager for validation.
-        **reward_kwargs: `(Any)`
-            Additional keyword arguments for the reward loop manager.
-    Returns:
-        `(RewardLoopManagerBase)`: The reward loop manager instance.
-    """
-    # Try to get a custom reward function based on the configuration
-    # user defined reward manager can be registered in custom_reward_fn
-    # compute_score = get_custom_reward_fn(config)
-
-    # reward_loop_manager_name = config.reward_model.get("reward_manager", "naive")
-    # reward_loop_manager_cls = get_reward_loop_manager_cls(reward_loop_manager_name)
-
-    # if compute_score is None:
-    #     sandbox_config = config.reward_model.get("sandbox_fusion")
-    #     sandbox_url = sandbox_config.get("url") if sandbox_config else None
-    #     memory_limit_mb = sandbox_config.get("memory_limit_mb", 1024)
-    #     if sandbox_url:
-    #         # Create an asyncio.Semaphore to control concurrent access to the sandbox
-    #         # Note: asyncio.Semaphore must be created in the same event loop where it will be used
-    #         # Therefore, we pass max_concurrent as a parameter and create the semaphore later
-    #         max_concurrent = sandbox_config.get("max_concurrent", 64)
-    #         _concurrent_semaphore = asyncio.Semaphore(max_concurrent)
-    #         final_compute_score = partial(
-    #             default_compute_score_async,
-    #             sandbox_fusion_url=sandbox_url,
-    #             concurrent_semaphore=_concurrent_semaphore,
-    #             memory_limit_mb=memory_limit_mb,
-    #         )
-    #     else:
-    #         final_compute_score = default_compute_score_async
-
-    # return reward_loop_manager_cls(
-    #     config,
-    #     input_tokenizer,
-    #     final_compute_score,
-    #     reward_model_router,
-    #     reward_model_tokenizer,
-    #     **reward_kwargs,
-    # )
-
-    # compute_score = get_custom_reward_fn(config)
-    reward_loop_manager_name = reward_loop_type
-    reward_loop_manager_cls = get_reward_loop_manager_cls(reward_loop_manager_name)
-
-    # Try to get a custom reward function based on the configuration
-    # user defined reward manager can be registered in custom_reward_fn
-    if isinstance(reward_fn, dict):
-        compute_score = get_custom_reward_fn(reward_fn)
-        final_compute_score = compute_score
-        if final_compute_score is None:
-            sandbox_config = reward_kwargs.get("sandbox_fusion", None)
-            sandbox_url = sandbox_config.get("url") if sandbox_config else None
-            memory_limit_mb = sandbox_config.get("memory_limit_mb", 1024)
-            if sandbox_url:
-                # Create an asyncio.Semaphore to control concurrent access to the sandbox
-                # Note: asyncio.Semaphore must be created in the same event loop where it will be used
-                # Therefore, we pass max_concurrent as a parameter and create the semaphore later
-                max_concurrent = reward_kwargs.get("max_concurrent", 64)
-                _concurrent_semaphore = asyncio.Semaphore(max_concurrent)
-                final_compute_score = partial(
-                    default_compute_score_async,
-                    sandbox_fusion_url=sandbox_url,
-                    concurrent_semaphore=_concurrent_semaphore,
-                    memory_limit_mb=memory_limit_mb,
-                )
-    else:
-        final_compute_score = default_compute_score_async        
-
-    if reward_loop_manager_name == "gen":
-        # Get gen_reward_function from config or reward_kwargs
-        gen_reward_function_name = reward_fn
-        gen_reward_function_cls = get_gen_reward_function_cls(gen_reward_function_name)
-        return reward_loop_manager_cls(
-            reward_model_config,
-            input_tokenizer,
-            reward_model_manager=reward_model_manager,
-            reward_function=gen_reward_function_cls(),
-            **reward_kwargs,
-        )
-
-    if reward_loop_manager_name == "opd":
-        return reward_loop_manager_cls(
-            reward_model_config,
-            input_tokenizer,
-            reward_model_manager=reward_model_manager,
-            **reward_kwargs,
-        )
-        
-    return reward_loop_manager_cls(
-        reward_model_config,
-        input_tokenizer,
-        final_compute_score,
-        is_validate,
-        **reward_kwargs,
-    )
-
-
-
-# Modified from verl/trainer/ppo/reward.py
-def get_custom_reward_fn(reward_fn: dict[str, Any]) -> Callable[[], Any]:
+def get_custom_reward_fn(reward_fn_config: DictConfig) -> RawRewardFn | None:
     """Load and return a custom reward function from external file.
 
     Dynamically imports a reward function from a specified file path and wraps
     it with additional keyword arguments from the configuration.
 
     Args:
-        reward_fn: `(dict[str, Any])`
-            A customized reward function, like `{name: ..., path: ...}`
+        reward_fn_config (DictConfig): Configuration dictionary containing custom_reward_function
+                                      settings with 'path', 'name', and 'reward_kwargs' fields.
 
     Returns:
         callable or None: Wrapped reward function with merged kwargs, or None
@@ -208,36 +69,113 @@ def get_custom_reward_fn(reward_fn: dict[str, Any]) -> Callable[[], Any]:
         AttributeError: If the specified function name isn't found in the module.
     """
 
-    file_path = reward_fn.get("path")
-    function_name = reward_fn.get("name")
+    module_path = reward_fn_config.get("path")
+    if not module_path:
+        return None
 
-    module = sys.modules.get("custom_module", None)
-    if module is None:
-        if not os.path.exists(file_path):
-            raise FileNotFoundError(f"Reward function file '{file_path}' not found.")
+    fn_name = reward_fn_config.get("name")
+    assert fn_name is not None, "Reward function name is required."
 
-        spec = importlib.util.spec_from_file_location("custom_module", file_path)
-        assert spec is not None
-        module = importlib.util.module_from_spec(spec)
-        try:
-            sys.modules["custom_module"] = module
-            assert spec.loader is not None
-            spec.loader.exec_module(module)
-        except Exception as e:
-            raise RuntimeError(f"Error loading module from '{file_path}': {e}") from e
+    from verl.utils.import_utils import load_extern_object
 
-    if not hasattr(module, function_name):
-        raise AttributeError(f"Reward function '{function_name}' not found in '{module.__file__}'.")
+    raw_fn = load_extern_object(module_path=module_path, object_name=fn_name)
 
-    print(f"using customized reward function '{function_name}' from '{module.__file__}'")
-    raw_fn = getattr(module, function_name)
-
-    reward_kwargs = dict(reward_fn.get("reward_kwargs", {}))
-
+    reward_kwargs = dict(reward_fn_config.get("reward_kwargs", {}))
     if not inspect.iscoroutinefunction(raw_fn):
         return partial(_call_with_kwargs, raw_fn, reward_kwargs)
     else:
         return partial(_call_with_kwargs_async, raw_fn, reward_kwargs)
+
+
+def load_reward_loop(
+    config: DictConfig,
+    tokenizer: Any,
+    reward_loop_cfg: RewardManagerConfig,
+    reward_fn_config: DictConfig,
+    reward_model_manager: RewardModelRuntimeInfo | None = None,
+    **reward_kwargs: Any,
+) -> RewardLoopBase:
+    """Load the reward loop based on the configuration.
+
+    Args:
+        config: `(DictConfig)`
+            The configuration for the reward loop.
+        tokenizer: `(Any)`
+            The tokenizer for the input.
+        reward_loop_cfg: `(RewardManagerConfig)`
+            The configuration that selects the reward loop class.
+        reward_fn_config: `(DictConfig)`
+            The configuration for the reward function.
+        reward_model_manager: `(RewardModelRuntimeInfo | None)`
+            The reward model runtime configuration, required by generative reward loops.
+        **reward_kwargs: `(Any)`
+            Additional keyword arguments for the reward loop.
+    Returns:
+        `(RewardLoopBase)`: The reward loop instance.
+    """
+    reward_loop_cls: type[RewardLoopBase]
+    if reward_loop_cfg.source == "register":
+        reward_loop_cls = get_reward_loop_cls(reward_loop_cfg.name)
+    elif reward_loop_cfg.source == "importlib":
+        from verl.trainer.config.config import ModuleConfig
+        from verl.utils.import_utils import load_extern_object
+
+        module_cfg: ModuleConfig | None = reward_loop_cfg.module
+        assert module_cfg is not None and module_cfg.path is not None, (
+            f"Module path is required when {reward_loop_cfg.source=}, but got {module_cfg=}."
+        )
+        reward_loop_cls_name = reward_loop_cfg.name
+        reward_loop_cls = cast(
+            "type[RewardLoopBase]",
+            load_extern_object(module_path=module_cfg.path, object_name=reward_loop_cls_name),
+        )
+
+    if reward_loop_cfg.source == "register" and reward_loop_cfg.name == "gen":
+        gen_reward_function_cls = get_gen_reward_function_cls(reward_fn_config.name)
+        return reward_loop_cls(
+            config=config,
+            tokenizer=tokenizer,
+            reward_model_manager=reward_model_manager,
+            reward_function=gen_reward_function_cls(),
+            **reward_kwargs,
+        )
+    if reward_loop_cfg.source == "register" and reward_loop_cfg.name == "opd":
+        return reward_loop_cls(
+            config=config,
+            tokenizer=tokenizer,
+            reward_model_manager=reward_model_manager,
+            **reward_kwargs,
+        )
+
+    compute_score = get_custom_reward_fn(reward_fn_config)
+    final_compute_score = compute_score
+
+    default_compute_score_ = default_compute_score_async
+
+    if compute_score is None:
+        sandbox_config = reward_kwargs.get("sandbox_fusion", None)
+        sandbox_url = sandbox_config.get("url") if sandbox_config else None
+        memory_limit_mb = sandbox_config.get("memory_limit_mb", 1024) if sandbox_config else 1024
+        if sandbox_url:
+            # The semaphore must be created in the event loop that uses it.
+            max_concurrent = reward_kwargs.get("max_concurrent", 64)
+            _concurrent_semaphore = asyncio.Semaphore(max_concurrent)
+            final_compute_score = partial(
+                default_compute_score_,
+                sandbox_fusion_url=sandbox_url,
+                concurrent_semaphore=_concurrent_semaphore,
+                memory_limit_mb=memory_limit_mb,
+            )
+        else:
+            final_compute_score = default_compute_score_
+
+    return reward_loop_cls(
+        config=config,
+        tokenizer=tokenizer,
+        compute_score=final_compute_score,
+        **reward_kwargs,
+    )
+
 
 def _call_with_kwargs(raw_fn, extra_kwargs, *args, **kwargs):
     """Calls `raw_fn` by merging `extra_kwargs` into call-time `kwargs`, with `extra_kwargs` taking precedence.

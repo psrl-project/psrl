@@ -14,7 +14,6 @@ from nixl._api import nixl_agent, nixl_agent_config
 from omegaconf import DictConfig
 
 from psrl.utils.common.patch_utils import apply_tms_patch
-from psrl.utils.common.utils import lazy_import_to_globals
 from psrl.utils.logger import DualOutputHandler, deprecated, get_worker_info, log_tensor
 from psrl.utils.nixl.comm_plan import NIXLCommPlan
 from psrl.utils.nixl.fingerprint import fingerprint_tensor_mapping, tensor_mapping_signature
@@ -23,7 +22,6 @@ from psrl.utils.nixl.network_topology import get_local_gpu_id, get_local_ip
 from psrl.utils.nixl.nixl_spec import (
     NIXLClientInfo,
     NIXLClientType,
-    NIXLInterface,
     NIXLSharding,
     NIXLShardMetaInfo,
     NIXLTensorInfo,
@@ -32,7 +30,10 @@ from psrl.utils.nixl.nixl_spec import (
 if TYPE_CHECKING:
     from torch_memory_saver import torch_memory_saver
 else:
-    torch_memory_saver = None  # type: ignore
+    try:
+        from torch_memory_saver import torch_memory_saver
+    except ImportError:
+        torch_memory_saver = None  # type: ignore
 
 psrl_logger = logging.getLogger(__file__)
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "INFO"))
@@ -68,10 +69,12 @@ class NIXLStorageClient:
         use_gpu: bool,
         client_type: NIXLClientType,
         nixl_config: DictConfig,
-        nixl_interface: NIXLInterface | None = None,
+        replica_idx: int = 0,
+        worker_index: int = 0,
         binded_agent: nixl_agent | None = None,
         client_group_id: int = -1,  # -1 is the default client group
         logging_path: str | None = None,
+        enable_prog_thread: bool = True,
     ):
         self.client_name = client_name
         self.server_name = server_name
@@ -88,23 +91,24 @@ class NIXLStorageClient:
         self.max_pinned_temp_memory_slots = (
             nixl_config.max_pinned_temp_memory_slots
         )  # None means no pinned temp memory
-        self.nixl_interface = nixl_interface if nixl_interface is not None else NIXLInterface()
         self.client_group_id = client_group_id
         self.enable_tms_for_temp_buffers = nixl_config.enable_tms_for_temp_buffers and use_gpu
 
         if self.enable_tms_for_temp_buffers:
-            lazy_import_to_globals("torch_memory_saver", "torch_memory_saver")
+            if torch_memory_saver is None:
+                raise ImportError("torch_memory_saver is required when nixl_config.enable_tms_for_temp_buffers=True")
             apply_tms_patch()
+
             psrl_logger.info(f"NIXLStorageClient {self.client_name} enabled TMS for temporary buffers.")
 
         # Initialize NIXL agent
         if binded_agent is None:
-            self.client_port = (
-                0
-                if self.nixl_interface.port_scanner is None
-                else ray.get(self.nixl_interface.port_scanner.find_free_port.remote(host=get_worker_info()[0]))
-            )
-            self.agent = nixl_agent(self.client_name, nixl_agent_config(True, True, self.client_port))
+            from psrl.utils.nixl.port_scanner import get_port_scanner
+
+            worker_ip = get_worker_info()[0]
+            port_scanner = get_port_scanner(worker_ip)
+            self.client_port = ray.get(port_scanner.find_free_port.remote())
+            self.agent = nixl_agent(self.client_name, nixl_agent_config(enable_prog_thread, True, self.client_port))
         else:
             self.agent = binded_agent
 
@@ -327,8 +331,8 @@ class NIXLStorageClient:
         descs = nixlBind.nixlRegDList(self.agent.nixl_mems[mem_type], dlist)
         return self.agent.register_memory(descs)
 
-    # NOTE(lhy): low-level nixl api is time consuming, so we use high-level register memory
-    # maintained by us to ensure all tensors are registered
+    # NOTE(lhy): High level registration amortizes the expensive low level NIXL API
+    # while preserving complete tensor coverage.
     def _ensure_all_tensor_registered_low_level(self):
         """Check if all tensors are registered."""
         for (key, shard_idx), slice_info in self.contig_desc_slice_map.items():
@@ -406,8 +410,8 @@ class NIXLStorageClient:
     ):
         """
         Register local tensors with NIXL. Build key->desc mapping.
-        Currently only support all tensors are within binded_meta_tensor_mapping
-        or not within binded_meta_tensor_mapping.
+        Currently only support all tensors are within
+        binded_meta_tensor_mapping or not within binded_meta_tensor_mapping.
 
         Args:
             state_dict: {key: torch.Tensor}
@@ -540,21 +544,13 @@ class NIXLStorageClient:
                 len(self.contig_desc_slice_map),
                 len(self.temp_desc_slice_map),
             )
+            self._all_temp_mappings[self.client_name] = self._temp_desc_bytes_mapping
             return dict(self._last_reregister_timing)
 
         tms_ctx = torch_memory_saver.region(tag="nixl") if self.enable_tms_for_temp_buffers else nullcontext()
         with tms_ctx:
-            # If pinned temp memory is enabled, we need to first scan the state_dict
-            # and find all the tensors that are not contiguous
-            # Then we need to find all types (shape and dtype) of uncontiguous tensor
-            # and allocate max_pinned_temp_memory_slots times of their size as pinned memory
-            # (each pinned memory tensor is like this: [max_pinned_temp_memory_slots, *])
-            # Then we enumerate the uncontiguous tensors again and
-            # map them with the pinned memory in a round-robin manner
-            # (the first uncontiguous tensor map to [0, *], the second to [1, *],
-            # the (max_pinned_temp_memory_slots+1)-th to [0, *] again, etc.)
-            # We should record a mapping from the uncontiguous tensor to the index of the pinned memory
-            # log_env_info(psrl_logger)
+            # Group noncontiguous tensors by shape and dtype, then assign each group
+            # round robin across its bounded contiguous slot pool.
             if sharding_dict is None:
                 sharding_dict = {}
             _uncontiguous_tensor_mapping: dict[
@@ -564,7 +560,7 @@ class NIXLStorageClient:
                 # Scan the state_dict and find all the tensors that are not contiguous
                 for key, tensor in state_dict.items():
                     assert key in sharding_dict, f"Key {key} not found in sharding_dict."
-                    if tensor.device == torch.device("meta"):
+                    if tensor.device == torch.device("meta") or tensor.untyped_storage().nbytes() == 0:
                         continue
                     sharding = sharding_dict[key]
                     shard_indices = sharding.shard_indices
@@ -611,13 +607,14 @@ class NIXLStorageClient:
                             memory_slot = slot.squeeze(0)
                             self._pinned_memory[(shape, dtype)].append(memory_slot)
 
-            # Pre-scan meta tensors: one 1D buffer per dtype, single _record_region_registration per
-            # buffer; each tensor is a view (offset + length, then reshape) via MetaBuffer.
+            # Preallocate one buffer per dtype so meta tensor views share one registration.
             meta_buffer: MetaBuffer | None = None
-            if binded_meta_tensor_mapping is None and not meta_only:
+            if binded_meta_tensor_mapping is None:
                 entries: list[tuple[tuple[Any, Any], tuple[int, ...], torch.dtype]] = []
                 for key, tensor in state_dict.items():
                     assert key in sharding_dict, f"Key {key} not found in sharding_dict."
+                    if tensor.device != torch.device("meta") and tensor.untyped_storage().nbytes() == 0:
+                        tensor = torch.empty(tensor.shape, dtype=tensor.dtype, device="meta")
                     sharding = sharding_dict[key]
                     shard_indices = sharding.shard_indices
                     local_sharded_tensors = sharding.get_local_sharded_tensors(tensor)
@@ -639,6 +636,8 @@ class NIXLStorageClient:
             tensor_infos = {}
             for key, tensor in state_dict.items():
                 assert key in sharding_dict, f"Key {key} not found in sharding_dict."
+                if tensor.device != torch.device("meta") and tensor.untyped_storage().nbytes() == 0:
+                    tensor = torch.empty(tensor.shape, dtype=tensor.dtype, device="meta")
                 sharding = sharding_dict[key]
                 shard_indices = sharding.shard_indices
                 # assert sharding.is_contiguous_sharding(), "Only contiguous sharding is supported for now."
@@ -648,6 +647,7 @@ class NIXLStorageClient:
                 shard_meta_info_list = []
 
                 local_sharded_tensors = sharding.get_local_sharded_tensors(tensor)
+
                 for local_pos, tbd_local_sharded_tensor in enumerate(local_sharded_tensors):
                     # Store the original tensor mapping
                     # If the tensor is on meta device, allocate on-the-fly or binded from the external tensor
@@ -686,11 +686,6 @@ class NIXLStorageClient:
                     shard_meta_info_list.append(meta_info)
 
                     # Check if the shard is contiguous
-                    # psrl_logger.info(
-                    #     f"{self.client_name} key {key} shard {shard_indices[local_pos]} "
-                    #     f"register local tensor with shape {local_sharded_tensor.shape} and "
-                    #     f"dtype {local_sharded_tensor.dtype}, is_contiguous = {is_contiguous}"
-                    # )
                     if not meta_only:
                         if is_contiguous:
                             # Contiguous shard: batch register
@@ -703,7 +698,7 @@ class NIXLStorageClient:
                             ), (
                                 f"{self.client_name}: key {key} shard {shard_indices[local_pos]} is contiguous, "
                                 f"but contiguous slice address {slice_addr} is not within the registered "
-                                f"region {storage_key[0]} - {storage_key[0] + storage_key[1]}."
+                                f"region from {storage_key[0]} through {storage_key[0] + storage_key[1]}."
                             )
                             device_id = local_sharded_tensor.get_device() if local_sharded_tensor.is_cuda else 0
                             mem_type = "cuda" if local_sharded_tensor.is_cuda else "cpu"
@@ -773,7 +768,7 @@ class NIXLStorageClient:
                             ), (
                                 f"{self.client_name}: key {key} shard {shard_indices[local_pos]} is non-contiguous, "
                                 f"but temporary slice address {temp_slice_addr} is not within the registered "
-                                f"region {storage_key[0]} - {storage_key[0] + storage_key[1]}."
+                                f"region from {storage_key[0]} through {storage_key[0] + storage_key[1]}."
                             )
                             self.temp_desc_slice_map[(key, shard_indices[local_pos])] = (
                                 temp_slice_addr,
@@ -798,8 +793,8 @@ class NIXLStorageClient:
 
             if binded_meta_tensor_mapping is not None:
                 assert self.temp_desc_slice_map == {}, (
-                    f"temp_desc_slice_map must be empty when binded_meta_tensor_mapping is provided, \
-                    but got {self.temp_desc_slice_map}."
+                    "Expected temp_desc_slice_map to be empty when binded_meta_tensor_mapping is provided, "
+                    f"but got {self.temp_desc_slice_map}."
                 )
 
             # Batch register all tensors and cache the reg list once.
@@ -807,10 +802,8 @@ class NIXLStorageClient:
                 for mem_type, reg_list in self._mtype_to_reg_region_lists.items():
                     if not reg_list:
                         continue
-                    # NOTE(lhy): do not call _merge_contiguous_regions here.
-                    # See the docstring of _merge_contiguous_regions for more details.
-                    # reg_list = self._merge_contiguous_regions(reg_list)
-                    # self._mtype_to_reg_region_lists[mem_type] = reg_list
+                    # NOTE(lhy): Register each allocation separately because merging
+                    # adjacent virtual regions is invalid for RDMA and UCX.
                     reg_descs = self._register_memory(mem_type, reg_list)
                     self._track_registered_desc(reg_descs)
 
@@ -842,7 +835,6 @@ class NIXLStorageClient:
                     )
                     desc_type = xfer_descs.getType()
                     for i, (key, shard_idx, _, _, _) in enumerate(entries):
-                        # Re-wrap as a single-element list, then serialize
                         single = nixlBind.nixlXferDList(desc_type, [xfer_descs[i]])
                         desc_bytes = self.agent.get_serialized_descs(single)
                         local_pos = shard_pos_cache[key][shard_idx]
@@ -893,11 +885,19 @@ class NIXLStorageClient:
 
             if binded_meta_tensor_mapping is None:
                 self._ensure_all_tensor_registered_high_level()
+
+            # Refresh local temp descriptors so later reads use current buffers.
+            self._all_temp_mappings[self.client_name] = self._temp_desc_bytes_mapping
+
             psrl_logger.info(f"{self.client_name} all local tensors are registered.")
 
-    def deregister_local_tensors(self):
-        """Deregister all local tensors"""
-        assert self.local_client_info is not None, "Local client info not registered."
+    def deregister_local_tensors(self) -> None:
+        """
+        Release local memory registrations idempotently.
+
+        Sleep may precede the metadata handshake, and partial registrations can hold
+        descriptors before `local_client_info` exists.
+        """
         # Deregister all registered regions.
         self._deregister_all_descs()
         if not self.enable_tms_for_temp_buffers:
@@ -917,7 +917,7 @@ class NIXLStorageClient:
 
         psrl_logger.debug(f"{self.client_name} deregistered all local tensors.")
 
-    def connect_to_server(self, timeout: float = 600.0):
+    def connect_to_server(self, timeout: float = 1200.0):
         """
         Connect to the storage/meta server.
         """
@@ -964,6 +964,8 @@ class NIXLStorageClient:
     def send_local_info(self):
         """
         Send local client info to the server.
+        For storage_server mode, notify the server that the client is ready.
+        For meta_server mode, send the local client info to the server.
         """
         assert self._is_connected, "Not connected to server"
         if self.local_client_info is None:
@@ -981,7 +983,7 @@ class NIXLStorageClient:
             pickle.dumps({self.client_name: self._temp_desc_bytes_mapping}),
         )
 
-    def wait_for_server_sharding(self, timeout: float = 600.0):
+    def wait_for_server_sharding(self, timeout: float = 1200.0):
         """
         Wait for the server sharding to be fetched.
         """
@@ -1008,9 +1010,11 @@ class NIXLStorageClient:
         self._unified_sharding_dict_fetched = True
         return self._unified_sharding_dict
 
-    def wait_for_server_info(self, timeout: float | None = None):
+    def wait_for_server_info(self, timeout: float = 1200.0):
         """
         Wait for the server info to be fetched.
+        For storage_server mode, wait for the storage server info to be fetched.
+        For meta_server mode, wait for all client infos (stored in the server) to be fetched.
         """
         assert self._is_connected, "Not connected to server"
         timeout = self.metadata_server_info_timeout_s if timeout is None else timeout
@@ -1058,7 +1062,7 @@ class NIXLStorageClient:
             time.sleep(0.1)
         self._all_client_infos_fetched = True
 
-    def wait_for_server_temp_mappings(self, timeout: float = 600.0):
+    def wait_for_server_temp_mappings(self, timeout: float = 1200.0):
         """Wait for the server temporary mappings to be fetched."""
         assert self._is_connected, "Not connected to server"
         start = time.time()
@@ -1088,7 +1092,7 @@ class NIXLStorageClient:
         for dst_agent_name in dst_agent_names:
             self.agent.send_notif(dst_agent_name, payload)
 
-    def wait_for_update_infos(self, expected_agents: int, timeout: float = 600.0):
+    def wait_for_update_infos(self, expected_agents: int, timeout: float = 1200.0):
         """Wait for updated client infos from other clients.
 
         Args:
@@ -1148,11 +1152,6 @@ class NIXLStorageClient:
         meta = self._all_client_infos[target_client].meta
         try:
             self.agent.add_remote_agent(meta)
-            # nixl_agent_name_bytes = self.agent.add_remote_agent(meta)
-            # assert nixl_agent_name_bytes.decode() == target_client, (
-            #     f"NIXL agent name {nixl_agent_name_bytes.decode()} "
-            #     f"does not match target client: {target_client}"
-            # )
         except Exception as e:
             psrl_logger.error(f"Error adding remote agent {target_client}: {e}")
             raise e
@@ -1167,7 +1166,22 @@ class NIXLStorageClient:
         comm_plan: NIXLCommPlan | None = None,
         merge_and_cache_xfer: bool | None = False,
     ) -> list[tuple[int, ...]]:
-        """Read from another client, supports shard alignment and communication plan."""
+        """Read from another client, supports shard alignment and communication plan.
+
+        Args:
+            target_agent: NIXL agent name of the remote worker to read from.
+            target_client: Client name on the remote agent that holds the tensor.
+            key: Parameter name identifying the tensor to transfer.
+            tag: Opaque string used to track the transfer handle (must be unique
+                per concurrent in-flight transfer for the same key).
+            comm_plan: Optional explicit communication plan overriding
+                ``self._comm_plan``. When ``None`` the stored plan is used.
+                A supplied plan takes precedence.
+            merge_and_cache_xfer: When ``True``, accumulate descriptors into an
+                internal cache for later bulk submission via
+                ``merge_and_finish_cached_xfer()`` instead of posting the
+                transfer immediately.
+        """
         plan = comm_plan or self._comm_plan
         planned_shards: list[tuple[int, ...]] | None = None
         if plan and self.client_type == NIXLClientType.PULL_SIDE:
@@ -1232,7 +1246,6 @@ class NIXLStorageClient:
                             running_target_client,
                             running_shard_idx,
                         ) = self._pinned_slot_running_read_xfer[slot_key]
-                        # start_time = time.time()
                         self.wait(
                             running_key,
                             running_tag,
@@ -1240,11 +1253,6 @@ class NIXLStorageClient:
                             target_client=running_target_client,
                             shard_idx=running_shard_idx,
                         )
-                        # end_time = time.time()
-                        # psrl_logger.info(
-                        #     f"{self.client_name} read uncontiguous {(key, shard_idx)}, "
-                        #     f"pinned slot {pinned_idx} is available, time: {end_time - start_time}s"
-                        # )
                     self._pinned_slot_running_read_xfer[slot_key] = (
                         key,
                         tag,
@@ -1260,8 +1268,6 @@ class NIXLStorageClient:
                     f"Remote descriptor must be contiguous for client read, "
                     f"but found key {key} shard {shard_idx} in {target_client} is non-contiguous"
                 )
-                # if remote_desc_bytes is None:
-                #     raise RuntimeError(f"No remote temporary descriptor found for key {key} shard {shard_idx}")
 
             # Double check the shard size
             assert local_info.get_shard_size_bytes(local_pos) == remote_info.get_shard_size_bytes(remote_pos), (
@@ -1270,10 +1276,10 @@ class NIXLStorageClient:
             )
             local_desc = self._deserialize_to_xfer_descs(local_desc_bytes)
             remote_desc = self._deserialize_to_xfer_descs(remote_desc_bytes)
-            # Contiguous xfer can be merged and executed together later
+            # NOTE(claude): Continue after caching so every shard is processed before return.
             if merge_and_cache_xfer and is_contiguous:
                 self._cached_xfer_descs.append(("READ", local_desc, remote_desc, target_agent, tag, target_client))
-                return []
+                continue
             # Real xfer
             try:
                 if running_key is not None and running_shard_idx is not None:
@@ -1305,7 +1311,6 @@ class NIXLStorageClient:
                     f"{self.client_name} creating client READ transfer to {target_client} failed for "
                     f"key {key} shard {shard_idx}."
                 )
-            # start_time = time.time()
             try:
                 state = self.agent.transfer(handle)
             except Exception as e:
@@ -1313,16 +1318,15 @@ class NIXLStorageClient:
                     f"{self.client_name} posting client READ transfer to {target_client} failed for "
                     f"key {key} shard {shard_idx}: {e}"
                 ) from e
-            # end_time = time.time()
-            # psrl_logger.info(
-            #     f"{self.client_name} posted client READ transfer to {target_client} for "
-            #     f"key {key} shard {shard_idx}, time: {end_time - start_time}s"
-            # )
             if state == "ERR":
                 raise RuntimeError(
                     f"{self.client_name} posting client READ transfer to {target_client} failed for "
                     f"key {key} shard {shard_idx}."
                 )
+        # When merging and caching, transfers are deferred to merge_and_finish_cached_xfer.
+        # Return [] so the caller knows there is nothing to wait on immediately.
+        if merge_and_cache_xfer:
+            return []
         return shards_to_transfer
 
     def client_write(
@@ -1333,9 +1337,29 @@ class NIXLStorageClient:
         tag: str,
         comm_plan: NIXLCommPlan | None = None,
         merge_and_cache_xfer: bool | None = False,
+        use_comm_plan: bool = True,
     ) -> list[tuple[int, ...]]:
-        """Write to another client, supports shard alignment and communication plan."""
-        plan = comm_plan or self._comm_plan
+        """Write to another client, supports shard alignment and communication plan.
+
+        Args:
+            target_agent: NIXL agent name of the remote worker to write to.
+            target_client: Client name on the remote agent that holds the tensor.
+            key: Parameter name identifying the tensor to transfer.
+            tag: Opaque string used to track the transfer handle (must be unique
+                per concurrent in-flight transfer for the same key).
+            comm_plan: Optional explicit communication plan overriding
+                ``self._comm_plan``. When ``None`` the stored plan is used.
+                A supplied plan takes precedence.
+            merge_and_cache_xfer: When ``True``, accumulate descriptors into an
+                internal cache for later bulk submission via
+                ``merge_and_finish_cached_xfer()`` instead of posting the
+                transfer immediately.
+            use_comm_plan: If ``False``, ignore both ``comm_plan`` and the stored
+                ``self._comm_plan`` and fall back to default shard-alignment.
+                Useful when writing to a target that is not covered by the
+                existing comm plan (e.g. PS-to-PS broadcast transfers).
+        """
+        plan = (comm_plan or self._comm_plan) if use_comm_plan else None
         planned_shards: list[tuple[int, ...]] | None = None
         if plan and self.client_type == NIXLClientType.PUSH_SIDE:
             push_plan = plan.get_push_plan(self.client_name, key)
@@ -1434,10 +1458,6 @@ class NIXLStorageClient:
                     f"Remote descriptor must be contiguous for client write, "
                     f"but found key {key} shard {shard_idx} in {target_client} is non-contiguous"
                 )
-                # Use temporary descriptor for non-contiguous shard
-                # remote_desc_bytes = remote_info.temp_desc_bytes_list[remote_pos]
-                # if remote_desc_bytes is None:
-                #     raise RuntimeError(f"No remote temporary descriptor found for key {key} shard {shard_idx}")
 
             # Double check the shard size
             assert local_info.get_shard_size_bytes(local_pos) == remote_info.get_shard_size_bytes(remote_pos), (
@@ -1446,9 +1466,11 @@ class NIXLStorageClient:
             )
             local_desc = self._deserialize_to_xfer_descs(local_desc_bytes)
             remote_desc = self._deserialize_to_xfer_descs(remote_desc_bytes)
+            # NOTE(claude): Use continue (not return) here so all shards are processed before returning.
+            # Returning inside the loop would silently skip all remaining shards for this key.
             if merge_and_cache_xfer and is_contiguous:
                 self._cached_xfer_descs.append(("WRITE", local_desc, remote_desc, target_agent, tag, target_client))
-                return []
+                continue
             # Real xfer
             try:
                 if (key, shard_idx) in self._write_contiguous_event_cache:
@@ -1482,6 +1504,10 @@ class NIXLStorageClient:
                     f"{self.client_name} posting client WRITE transfer to {target_client} failed for "
                     f"key {key} shard {shard_idx}."
                 )
+        # When merging and caching, transfers are deferred to merge_and_finish_cached_xfer.
+        # Return [] so the caller knows there is nothing to wait on immediately.
+        if merge_and_cache_xfer:
+            return []
         return shards_to_transfer
 
     def clear_intermediate_cached_data(self):
@@ -1492,9 +1518,8 @@ class NIXLStorageClient:
         self._write_contiguous_event_cache.clear()
         self.xfer_handles.clear()
 
-    # NOTE(lhy): This use low-level NIXL API to merge fragmented transfers into a single transfer,
-    # which is more efficient than finishing each transfer individually.
-    def merge_and_finish_cached_xfer(self, timeout: float = 600.0):
+    # NOTE(lhy): Merge fragmented transfers into one low level NIXL operation.
+    def merge_and_finish_cached_xfer(self, timeout: float = 1200.0):
         """Merge and finish cached transfers."""
         if hasattr(self, "_cached_xfer_descs"):
             _cached_xfer_descs_by_op_type = {}
@@ -1640,7 +1665,7 @@ class NIXLStorageClient:
                                     f"Timeout waiting for merged transfer ({op_type}, {target_client}, {tag}) "
                                     f"from {self.client_name}"
                                 )
-                            time.sleep(0.0001)
+                            time.sleep(0.001)  # 1ms backoff to avoid CPU starvation at large scale
                         end = time.time()
                         psrl_logger.debug(
                             f"{self.client_name} finished client {op_type} transfer to {target_client} for tag {tag} "
@@ -1655,11 +1680,12 @@ class NIXLStorageClient:
         op_type: str,
         target_client: str | None = None,
         shard_idx: int | None = None,
-        timeout: float = 600.0,
+        timeout: float = 1800.0,
     ):
         """
         Wait for a transfer to be completed.
         """
+        # Shard tag, wait for all shards
         info = self.local_client_info.get_tensor_info(key)
         waiting_shard_indices = [shard_idx] if shard_idx is not None else info.sharding.shard_indices
         for shard_idx in waiting_shard_indices:
@@ -1685,11 +1711,6 @@ class NIXLStorageClient:
                         f"from {self.client_name} to {target_client}"
                     )
                 elif state == "DONE":
-                    # psrl_logger.info(
-                    #     f"Transfer ({key}, {tag}, {op_type}, shard {shard_idx}) "
-                    #     f"from {self.client_name} to {target_client} done, "
-                    #     f"time cost: {time.time() - start} seconds"
-                    # )
                     # For non-contiguous shards, sync data back to original tensor after READ
                     if op_type == "READ":
                         local_pos = info.sharding.shard_indices.index(shard_idx)
@@ -1703,11 +1724,7 @@ class NIXLStorageClient:
                                 raise RuntimeError(
                                     f"No temporary tensor mapping found for key {key} shard {shard_idx}"
                                 )
-                            # Copy data from temporary contiguous tensor back to original non-contiguous tensor.
-                            # Use `.data.copy_()` to bypass autograd's restriction on in-place modification
-                            # of views produced by multi-output functions (e.g. torch.chunk / torch.split).
-                            # This is purely a weight-transfer operation and must not be tracked by autograd.
-                            # Consistent with the WRITE path at client_write which uses `.detach()` on the source.
+                            # Copy data from temporary contiguous tensor back to original non-contiguous tensor
                             self._read_contiguous_event_cache[(key, shard_idx)] = torch.cuda.Event()
                             original_tensor.data.copy_(contiguous_tensor)
                             self._read_contiguous_event_cache[(key, shard_idx)].record()
@@ -1715,8 +1732,6 @@ class NIXLStorageClient:
                                 f"Copied data from temporary contiguous tensor to original "
                                 f"non-contiguous tensor for key {key} shard {shard_idx}"
                             )
-                    # NOTE(lhy): can keep the handle for future reuse
-                    # but no obvious performance gain, so we just pop it here
                     self.xfer_handles.pop(make_xfer_tag(tag, self.client_name, target_client, key, shard_idx))
                     break
                 if time.time() - start > timeout:
@@ -1724,61 +1739,37 @@ class NIXLStorageClient:
                         f"Timeout waiting for transfer ({key}, {tag}, {op_type}, shard {shard_idx}) "
                         f"from {self.client_name} to {target_client}"
                     )
-                # time.sleep(0.0001)
+                time.sleep(0.001)  # 1ms backoff to avoid CPU starvation on PS nodes at large scale
 
     def load_state_dict_into_registered_tensors(
         self,
         state_dict: dict[str, torch.Tensor],
     ) -> None:
         """
-        Copy weights from *state_dict* into the already-registered NIXL buffers.
+        Copy state dictionary weights into registered NIXL buffers.
 
-        This must be called **after** ``register_local_tensors()`` has completed so
-        that ``_original_tensor_mapping`` is fully populated and every meta-device
-        tensor has been replaced by a real allocated slice.
-
-        For each key in the client's registered tensor infos the method:
-
-        1.  Looks up the sharding that was used during ``register_local_tensors``
-            (stored in ``local_client_info.tensor_infos[key].sharding``).
-        2.  Calls ``sharding.get_local_sharded_tensors(src_tensor)`` to obtain the
-            exact same slices that were registered — i.e. it produces the same
-            ``len(shard_indices)`` sub-tensors in the same order.
-        3.  For each sub-tensor (shard) copies it into the corresponding registered
-            destination tensor retrieved from ``_original_tensor_mapping``.
-
-        If a key present in the client's registrations is **not** in *state_dict*,
-        a warning is emitted (it may be that this PS worker only holds a subset of
-        the model) and the key is skipped.
+        Source tensors are reshaped to match the registered sharding before copying.
 
         Args:
-            state_dict: ``{param_name: torch.Tensor}`` — full-precision weights
-                        loaded from the checkpoint.  The tensors will be cast to
-                        the registered dtype on-the-fly during ``copy_``.
+            state_dict: Mapping from parameter names to checkpoint tensors.
         """
         assert self.local_client_info is not None, (
-            "load_state_dict_into_registered_tensors: local_client_info is None — call register_local_tensors() first."
+            "load_state_dict_into_registered_tensors: local_client_info is None. Call register_local_tensors() first."
         )
         assert self.local_client_info.is_registered, (
-            "load_state_dict_into_registered_tensors: local_client_info.is_registered is False — "
+            "load_state_dict_into_registered_tensors: local_client_info.is_registered is False. "
             "register_local_tensors() must have been called with meta_only=False."
         )
 
         tensor_infos = self.local_client_info.tensor_infos
-
         for key, src_tensor in state_dict.items():
             if key not in tensor_infos:
-                # This key is not held by this PS worker — skip silently.
                 continue
 
             tensor_info = tensor_infos[key]
             sharding = tensor_info.sharding
 
-            # When the registered tensors are 3D (e.g. QKV weights reshaped for Megatron
-            # group-interleaved layout) but the checkpoint tensor is still 2D, reshape
-            # src_tensor to the full unsharded 3D shape before slicing.
-            # Full shape is derived from any registered shard: for each sharded dim,
-            # multiply the shard's size by the total shard count in that dim.
+            # Reconstruct the full shape when registered and checkpoint tensor ranks differ.
             dst_tensor_sample = None
             for shard_idx_sample in sharding.shard_indices:
                 dst_sample = self._original_tensor_mapping.get((key, shard_idx_sample))
@@ -1791,9 +1782,7 @@ class NIXLStorageClient:
                 for dim, count in sharding.shard_mesh.items():
                     full_shape[dim] *= count
                 src_tensor_full = src_tensor.reshape(full_shape)
-                # Slice each shard using the GLOBAL shard_mesh, not _local_shard_mesh.
-                # _local_shard_mesh only counts how many shard_indices this worker holds (= 1),
-                # so get_local_sharded_tensors() would be a no-op on the reconstructed tensor.
+                # Use the global mesh because the local mesh counts only owned shards.
                 shard_dims = list(sharding.shard_mesh.keys())
                 shard_counts = list(sharding.shard_mesh.values())
                 src_shards = []
@@ -1818,7 +1807,7 @@ class NIXLStorageClient:
                 if dst_tensor is None:
                     psrl_logger.warning(
                         f"[{self.client_name}] key={key!r} shard_idx={shard_idx}: "
-                        f"not found in _original_tensor_mapping — skipping."
+                        f"not found in _original_tensor_mapping. Skipping."
                     )
                     continue
 
@@ -1916,7 +1905,8 @@ class NIXLMultiStorageClients:
         use_gpu: bool,
         multi_client_types: list[NIXLClientType],
         nixl_config: DictConfig,
-        nixl_interface: NIXLInterface | None = None,
+        replica_idx: int = 0,
+        worker_index: int = 0,
         client_group_id: int = -1,  # -1 is the default client group
         logging_path: str | None = None,
     ):
@@ -1928,14 +1918,12 @@ class NIXLMultiStorageClients:
         self.device = torch.device("cuda:0" if use_gpu else "cpu")
         self.server_ip = nixl_config.server_ip
         self.server_port = nixl_config.server_port
-        self.nixl_interface = nixl_interface if nixl_interface is not None else NIXLInterface()
-
         # Initialize NIXL agent
-        self.client_port = (
-            0
-            if self.nixl_interface.port_scanner is None
-            else ray.get(self.nixl_interface.port_scanner.find_free_port.remote(host=get_worker_info()[0]))
-        )
+        from psrl.utils.nixl.port_scanner import get_port_scanner
+
+        worker_ip = get_worker_info()[0]
+        port_scanner = get_port_scanner(worker_ip)
+        self.client_port = ray.get(port_scanner.find_free_port.remote())
         self.agent = nixl_agent(self.agent_name, nixl_agent_config(True, True, self.client_port))
 
         # Initialize multi clients
@@ -1948,7 +1936,8 @@ class NIXLMultiStorageClients:
                     use_gpu,
                     client_type,
                     nixl_config,
-                    nixl_interface,
+                    replica_idx=replica_idx,
+                    worker_index=worker_index,
                     binded_agent=self.agent,
                     client_group_id=client_group_id,
                     logging_path=logging_path,
@@ -1968,7 +1957,7 @@ class NIXLMultiStorageClients:
         for client in self.multi_clients:
             client.release_temp_memory()
 
-    def connect_to_server(self, timeout: float = 600.0):
+    def connect_to_server(self, timeout: float = 1200.0):
         assert not self._is_connected, "Already connected to server"
         psrl_logger.info(
             f"[nixl-handshake] {self.agent_name} connect start: "
@@ -2026,7 +2015,7 @@ class NIXLMultiStorageClients:
             pickle.dumps({client.client_name: client._temp_desc_bytes_mapping for client in self.multi_clients}),
         )
 
-    def wait_for_server_sharding(self, timeout: float = 600.0):
+    def wait_for_server_sharding(self, timeout: float = 1200.0):
         assert self._is_connected, "Not connected to server"
         start = time.time()
         if self._multi_unified_sharding_dicts_fetched:
@@ -2056,7 +2045,7 @@ class NIXLMultiStorageClients:
         self._multi_unified_sharding_dicts_fetched = True
         return {client.client_name: client._unified_sharding_dict for client in self.multi_clients}
 
-    def wait_for_server_info(self, timeout: float | None = None):
+    def wait_for_server_info(self, timeout: float = 1200.0):
         assert self._is_connected, "Not connected to server"
         self.multi_clients[0].wait_for_server_info(timeout)
         if len(self.multi_clients) > 1:
@@ -2065,14 +2054,14 @@ class NIXLMultiStorageClients:
                 client._comm_plan = self.multi_clients[0]._comm_plan
                 client._all_client_infos_fetched = True
 
-    def wait_for_server_temp_mappings(self, timeout: float = 600.0):
+    def wait_for_server_temp_mappings(self, timeout: float = 1200.0):
         assert self._is_connected, "Not connected to server"
         self.multi_clients[0].wait_for_server_temp_mappings(timeout)
         if len(self.multi_clients) > 1:
             for client in self.multi_clients[1:]:
                 client._all_temp_mappings = self.multi_clients[0]._all_temp_mappings
 
-    def wait_for_update_infos(self, expected_agents: int, timeout: float = 600.0):
+    def wait_for_update_infos(self, expected_agents: int, timeout: float = 1200.0):
         assert self._is_connected, "Not connected to server"
         self.multi_clients[0].wait_for_update_infos(expected_agents, timeout)
         if len(self.multi_clients) > 1:
@@ -2105,10 +2094,11 @@ class NIXLMultiStorageClients:
         key: str,
         tag: str,
         comm_plan: NIXLCommPlan | None = None,
+        use_comm_plan: bool = True,
     ):
         assert self._is_connected, "Not connected to server"
         client = self.get_client_by_name(cur_client)
-        client.client_write(target_agent, target_client, key, tag, comm_plan)
+        client.client_write(target_agent, target_client, key, tag, comm_plan, use_comm_plan=use_comm_plan)
 
     def wait(
         self,
@@ -2117,7 +2107,7 @@ class NIXLMultiStorageClients:
         tag: str,
         op_type: str,
         target_client: str | None = None,
-        timeout: float = 600.0,
+        timeout: float = 1200.0,
     ):
         assert self._is_connected, "Not connected to server"
         client = self.get_client_by_name(cur_client)
@@ -2137,8 +2127,8 @@ class NIXLMultiStorageClients:
         Load *state_dict* weights into all registered sub-clients.
 
         When *shared* is True (train and gen clients point at the same
-        underlying buffers), the state_dict only needs to be written once —
-        into the first client — because the other client's
+        underlying buffers), write the state dictionary only once into the first
+        client because the other client's
         ``_original_tensor_mapping`` tensors share the same storage.
 
         When *shared* is False each client receives an independent copy via
@@ -2149,14 +2139,13 @@ class NIXLMultiStorageClients:
             shared: Whether train/gen clients share underlying buffers.
         """
         if shared:
-            # Write only into the first client; the rest share storage.
+            # Only the first client needs a copy because the others share storage.
             self.multi_clients[0].load_state_dict_into_registered_tensors(state_dict)
         else:
             for client in self.multi_clients:
                 client.load_state_dict_into_registered_tensors(state_dict)
 
     def shutdown(self):
-        # TODO(lhy): better shutdown logic
-        # May release twice if multi clients have shared memory
+        # TODO(lhy): Avoid duplicate releases when clients share memory.
         for client in self.multi_clients:
             client.shutdown()

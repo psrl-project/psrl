@@ -1,0 +1,169 @@
+# Extend veRL's `rollout.yaml` with PSRL-only fields.
+
+defaults:
+
+  # Load veRL's canonical rollout config first (via the sibling symlink verl's rollout.yaml).
+  - rollout
+
+  # Apply PSRL overrides/extensions last.
+  - _self_
+
+# Target class for this configuration (PSRL's extended RolloutConfig).
+_target_: psrl.workers.config.RolloutConfig
+
+# PSRL only support vllm backend.
+name: vllm
+
+# Async mode in PSRL
+mode: psrl_async
+
+# logprobs mode for rollout logprobs
+logprobs_mode: raw_logprobs
+
+# Select the rollout weight loader. Large safetensors models should set `use_shm=True`.
+load_format: dummy
+
+# Whether disable attention for profiling.
+disable_attn: ${oc.select:psrl.profile.disable_attn,False}
+
+# Disable logging statistics.
+disable_log_stats: False
+
+# Max length of sequences.
+max_num_seqs: ${oc.select:psrl.rollout_coordination.routing_strategy.max_concurrent_seqs_per_instance,1024}
+
+# vLLM runner type: 'generate' for autoregressive LLMs, 'pooling' for
+# embedding / reward / classification models.
+runner: generate
+
+# vLLM task type forwarded to the engine (e.g., 'generate', 'classify', 'embed').
+task: generate
+
+# Number of rollouts to run per sample.
+n: ${oc.select:psrl.rollout_n}
+
+# Pooling params for vLLM-based pooling reward models.
+reward_kwargs:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs.
+  _target_: psrl.workers.config.PoolingConfig
+
+  # Whether to L2-normalise the output embedding vector.
+  normalize: False
+
+  # Whether to apply an activation function (e.g., sigmoid) to the logit output.
+  use_activation: False
+
+# (TMS-only) Whether to enable offloading weights (level-1 sleep) to CPU.
+enable_weights_cpu_backup: False
+
+# Multi-turn interaction config for tools or chat.
+multi_turn:
+
+  # Required when using psrl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: psrl.workers.config.MultiTurnConfig
+
+  # Enable multi-turn tool interactions and use the compatible rollout backend.
+  enable: False
+
+  # null for no limit (default max_length // 3)
+  max_turns: null
+
+  # Native `Tool` configuration for stateful lifecycle hooks or custom rewards.
+  # Null disables this path.
+  tool_config_path: null
+
+  # Python file containing stateless `@function_tool` functions.
+  # Names must not collide with `tool_config_path`. Null disables this path.
+  function_tool_path: null
+
+  # max parallel call for tools in single turn
+  max_parallel_calls: 1
+
+  # max length of tool response
+  max_tool_response_length: 256
+
+  # truncate side of tool response: left, middle, right
+  tool_response_truncate_side: middle
+
+  # Use the model's chat template instead of recorded training token IDs.
+  use_inference_chat_template: False
+
+  # Compare turn-wise tokenization with full-conversation tokenization.
+  # Modes are `disable`, `strict`, and `ignore_strippable`.
+  tokenization_sanity_check_mode: strict
+
+  # Format of the multi-turn interaction. Options: hermes, gpt-oss, qwen3_coder, gemma4.
+  format: hermes
+
+# [PSRL] Agent loop configuration (overrides veRL's AgentLoopConfig with PSRL variant).
+agent:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs.
+  _target_: psrl.workers.config.AgentLoopConfig
+
+  # Number of agent loop workers.
+  num_workers: 1
+
+  # Node IPs allowed to host agent loop workers. Empty uses every alive node.
+  node_ips: []
+
+  # DAPO Overlong Filtering: drop budget-truncated trajectories from the loss while
+  # keeping their reward in the GRPO group baseline. Distinct from the reward manager's
+  # `overlong_buffer_cfg`, which is a soft length penalty on the score.
+  overlong_filtering: False
+
+  # Custom agent loop config path (list of AgentLoop configs to instantiate).
+  agent_loop_config_path: null
+
+  # Routing strategy for distributing requests across agent loop workers.
+  route_strategy: round_robin
+
+  # Custom async server configs.
+  custom_async_server:
+
+    # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs.
+    _target_: verl.workers.config.CustomAsyncServerConfig
+
+    # Path to the custom async server implementation.
+    path: null
+
+    # Class name of the custom async server class (e.g. AsyncvLLMServer).
+    name: null
+
+  # Max time (in seconds) allowed for each agent trajectory before timing out.
+  # If set to null, there is no timeout enforced.
+  trajectory_timeout: null
+
+  # Environment configuration for the agent loop.
+  env:
+
+    # Environment class name.
+    name: null
+
+    # Timeout (in seconds) for each step in the environment.
+    step_timeout: null
+
+  # Agent data configuration for the agent loop.
+  data:
+
+    # Agent data class name.
+    name: null
+
+  # Maximum number of retries for each trajectory in case of failures.
+  retry_limit: 1
+
+  # Whether to raise error in agent loop.
+  raise_on_error: True
+
+  # Discount factor for Monte Carlo return calculation in reward.
+  gamma: 0.0
+
+  # Coefficient for reward bonus shaping.
+  reward_bonus_coeff: 0.0
+
+  # Trajectory reward calculation mode: 'step' or 'traj'.
+  traj_reward_mode: traj
+
+  # Default agent loop name
+  default_agent_loop: generate_only_agent

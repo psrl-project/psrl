@@ -1,6 +1,5 @@
 import logging
 import os
-from typing import Optional
 
 from psrl.workers.reward.gen_reward_function.base import GenRewardFunctionBase
 from psrl.workers.reward.gen_reward_function.registry import gen_reward_func
@@ -13,7 +12,7 @@ psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
 class SkyworkGenRewardFunction(GenRewardFunctionBase):
     def __init__(self):
         super().__init__(using_sys_prompt=False)
-        
+
     def prompt_constructor(self, prompt_str: str, response_str: str) -> list[dict]:
         return [
             {
@@ -23,17 +22,17 @@ class SkyworkGenRewardFunction(GenRewardFunctionBase):
             {
                 "role": "assistant",
                 "content": response_str,
-            }
+            },
         ]
-        
+
     def compute_score(
         self,
         data_source: str,
         solution_str: str,
         rm_output: str,
-        rm_output_value: Optional[float] = None,
+        rm_output_value: float | None = None,
         ground_truth: str = "",
-        extra_info: Optional[dict] = None,
+        extra_info: dict | None = None,
         **kwargs,
     ) -> float:
         # For Skywork reward models, use logits if available, otherwise fall back to string output
@@ -45,4 +44,3 @@ class SkyworkGenRewardFunction(GenRewardFunctionBase):
         else:
             psrl_logger.warning("No rm_output_value provided for Skywork reward model, returning 0.0")
             return 0.0
-    

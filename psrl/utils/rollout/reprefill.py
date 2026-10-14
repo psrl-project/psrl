@@ -104,9 +104,7 @@ def filter_rollout_request_ids(
     filtered_by_instance = {}
     for instance_id, request_ids in instance_to_request_ids.items():
         filtered_request_ids = [
-            int(request_id)
-            for request_id in request_ids
-            if not request_is_validate.get(int(request_id), False)
+            int(request_id) for request_id in request_ids if not request_is_validate.get(int(request_id), False)
         ]
         if filtered_request_ids:
             filtered_by_instance[int(instance_id)] = filtered_request_ids

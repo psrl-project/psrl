@@ -2,7 +2,7 @@
 # Mode 5 — elastic RL (current elastic auto-scaling between rollout and rm).
 # rollout + RM share shared_rollout_pool with a ScalingPolicy that auto-scales the
 # awake instance counts; trainer on a separate train_pool. This is the existing
-# elastic_rm path (elastic_rm.enable=True + enable_policy=True).
+# elastic path (elastic.enable=True + enable_policy=True).
 #
 # Two nodes: shared_rollout_pool (8 GPUs, rollout+rm elastic) + train_pool (8 GPUs).
 #
@@ -38,30 +38,30 @@ shift || true
 # ---- Elastic auto-scaling config ----
 # enable_policy=True keeps the ElasticExecutor monitor loop running; the
 # scaling_policy_variant selects the ScalingPolicy implementation. Below is a
-# complete, tunable elastic_rm block (modeled on examples/elastic_rm/*_fsdp.sh):
-# common load thresholds + cooldown + itl_harmonic policy tuning.
+# complete, tunable elastic block (modeled on examples/elastic_rm/*_fsdp.sh):
+# cooldown plus throughput-optimal policy tuning.
 export PSRL_DEPLOY_EXTRA="\
-psrl.deployment.elastic_rm.enable_policy=True \
-psrl.deployment.elastic_rm.scaling_policy_variant=itl_harmonic \
-psrl.deployment.elastic_rm.enable_trainer_pool=True \
-psrl.deployment.elastic_rm.min_awake_per_role=0 \
-psrl.deployment.elastic_rm.cooldown_ms=10000 \
-psrl.deployment.elastic_rm.hysteresis=0.05 \
-psrl.deployment.elastic_rm.monitor_interval_ms=1000 \
-psrl.deployment.elastic_rm.wakeup_immunity_ms=10000 \
-psrl.deployment.elastic_rm.itl_policy.decision_window_s=60.0 \
-psrl.deployment.elastic_rm.itl_policy.throughput_objective=sum \
-psrl.deployment.elastic_rm.itl_policy.max_scale_instances_per_action=32 \
-psrl.deployment.elastic_rm.itl_policy.router_waiting_top_t=-1 \
-psrl.deployment.elastic_rm.itl_policy.role_throughput_weight_enable=true \
-psrl.deployment.elastic_rm.itl_policy.role_throughput_weight_basis=request_count \
-psrl.deployment.elastic_rm.itl_policy.role_throughput_weight_mode=raw \
-+reward_models_config.reward_models.2.routing_strategy.method=itl \
-+reward_models_config.reward_models.2.routing_strategy.cost_model_path=/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/trainer/config/cost_model/qwen3_30b_a3b_thinking_2507.json \
-+reward_models_config.reward_models.2.routing_strategy.delta_throughput_threshold=0.005 \
-+reward_models_config.reward_models.2.routing_strategy.request_budget=1024 \
-+reward_models_config.reward_models.2.routing_strategy.max_num_waiting_reqs_after_preemption=3 \
-+reward_models_config.reward_models.2.routing_strategy.max_concurrent_seqs_per_instance=128 \
+psrl.deployment.elastic.enable_policy=True \
+psrl.deployment.elastic.scaling_policy_variant=throughput-optimal \
+psrl.deployment.elastic.enable_trainer_pool=True \
+psrl.deployment.elastic.min_awake_per_role=0 \
+psrl.deployment.elastic.cooldown_ms=10000 \
+psrl.deployment.elastic.throughput_optimal.min_gain=0.05 \
+psrl.deployment.elastic.monitor_interval_ms=1000 \
+psrl.deployment.elastic.wakeup_immunity_ms=10000 \
+psrl.deployment.elastic.throughput_optimal.decision_window_s=60.0 \
+psrl.deployment.elastic.throughput_optimal.throughput_objective=sum \
+psrl.deployment.elastic.throughput_optimal.max_scale_instances_per_action=32 \
+psrl.deployment.elastic.throughput_optimal.router_waiting_top_t=-1 \
+psrl.deployment.elastic.throughput_optimal.role_throughput_weight_enable=true \
+psrl.deployment.elastic.throughput_optimal.role_throughput_weight_basis=request_count \
+psrl.deployment.elastic.throughput_optimal.role_throughput_weight_mode=raw \
++reward.managers.gen_qwen3_8b.routing_strategy.method=itl \
++reward.managers.gen_qwen3_8b.routing_strategy.cost_model_path=/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/trainer/config/cost_model/qwen3_30b_a3b_thinking_2507.json \
++reward.managers.gen_qwen3_8b.routing_strategy.delta_throughput_threshold=0.005 \
++reward.managers.gen_qwen3_8b.routing_strategy.request_budget=1024 \
++reward.managers.gen_qwen3_8b.routing_strategy.max_num_waiting_reqs_after_preemption=3 \
++reward.managers.gen_qwen3_8b.routing_strategy.max_concurrent_seqs_per_instance=128 \
 "
 
 

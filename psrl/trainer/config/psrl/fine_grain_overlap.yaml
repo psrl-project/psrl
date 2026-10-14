@@ -1,0 +1,6 @@
+# Overlap rollout with training at `mini_batch` or `micro_batch` granularity.
+# `recompute` preserves full-batch math, while `pre_step` updates each chunk.
+# `enable_trainer_pool` requires `granularity: none`.
+granularity: none
+multiplier: 1
+overlap_scope: recompute

@@ -150,16 +150,16 @@ class SandboxFusionTool(Tool):
         Execute code using the Sandbox Fusion service.
 
         Args:
-            code: The code string to execute
-            stdin_data: Optional stdin data for code execution
-            expected_output: Optional expected output for correctness check
-            language: Programming language (overrides default if provided)
-            timeout: Execution timeout (overrides default if provided)
-            return_score: If True, return numerical score; if False, return text output
-            **kwargs: Additional arguments
+            code: The code string to execute.
+            stdin_data: Optional stdin data for code execution.
+            expected_output: Optional expected output for correctness check.
+            language: Programming language, overriding the default when provided.
+            timeout: Execution timeout, overriding the default when provided.
+            return_score: Whether to return a numerical score instead of text output.
+            **kwargs: Additional arguments.
 
         Returns:
-            ToolOutput containing either text output or score with metadata
+            ToolOutput: Text output or a score with metadata.
         """
         lang = language or self.language
         exec_timeout = timeout or self.timeout
@@ -168,7 +168,6 @@ class SandboxFusionTool(Tool):
             code = str(code)
 
         try:
-            # Case 1: No test cases - just execute the code
             if stdin_data is None:
                 result_status, metadata = await self._process_single_case(
                     case_index=case_index,
@@ -192,7 +191,7 @@ class SandboxFusionTool(Tool):
                     return ToolOutput(
                         name=self.name,
                         output={
-                            "content": output_text,
+                            "text": output_text,
                             "result_status": result_status,
                         },
                         metadata=metadata,
@@ -203,13 +202,12 @@ class SandboxFusionTool(Tool):
                     return ToolOutput(
                         name=self.name,
                         output={
-                            "content": output_text,
+                            "text": output_text,
                             "result_status": result_status,
                             "score": score,
                         },
                         metadata=metadata,
                     )
-            # Case 2: With test cases - run correctness check
             else:
                 try:
                     result_status, metadata = await self._process_single_case(
@@ -225,7 +223,7 @@ class SandboxFusionTool(Tool):
                         fn_name=fn_name,
                     )
                 except Exception as exc:
-                    psrl_logger.error(f"Test case {case_index} generated an exception: {exc}")
+                    psrl_logger.error(f"Test case={case_index} raised {exc}.")
                     traceback.print_exc()
                     result_status = -1  # Mark as API/internal error
                     metadata = {
@@ -571,10 +569,10 @@ class SandboxFusionTool(Tool):
             If failed after retries, response_json is None, error_message contains the error information.
         """
         request_id = str(uuid.uuid4())
-        log_prefix = f"[Request ID: {request_id}] "
+        log_prefix = f"[Request ID: {request_id}]"
 
         if language not in SUPPORTED_LANGUAGES:
-            error_msg = f"{log_prefix}Unsupported language: {language}"
+            error_msg = f"{log_prefix} Unsupported language: {language}"
             psrl_logger.error(error_msg)
             return None, error_msg
 
@@ -600,7 +598,7 @@ class SandboxFusionTool(Tool):
         for attempt in range(MAX_RETRIES):
             try:
                 psrl_logger.debug(
-                    f"{log_prefix}Attempt {attempt + 1}/{MAX_RETRIES}: Calling sandbox API at {sandbox_fusion_url}"
+                    f"{log_prefix} Attempt {attempt + 1}/{MAX_RETRIES}: Calling sandbox API at {sandbox_fusion_url}"
                 )
 
                 async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -612,13 +610,13 @@ class SandboxFusionTool(Tool):
                         # Check for Gateway Timeout (504) specifically for retrying
                         if response.status == 504:
                             last_error = (
-                                f"{log_prefix}API Request Error: Gateway Timeout (504) on attempt "
+                                f"{log_prefix} API Request Error: Gateway Timeout (504) on attempt "
                                 f"{attempt + 1}/{MAX_RETRIES}"
                             )
                             psrl_logger.warning(last_error)
                             if attempt < MAX_RETRIES - 1:  # Don't sleep after the last attempt
                                 delay = INITIAL_RETRY_DELAY * (attempt + 1)
-                                psrl_logger.info(f"{log_prefix}Retrying after {delay} seconds...")
+                                psrl_logger.info(f"{log_prefix}: Retrying after {delay}s...")
                                 await asyncio.sleep(delay)
                             continue  # Go to the next retry attempt
 
@@ -626,34 +624,34 @@ class SandboxFusionTool(Tool):
                         response.raise_for_status()
 
                         # If successful (status code 2xx)
-                        psrl_logger.debug(f"{log_prefix}Sandbox API call successful on attempt {attempt + 1}")
+                        psrl_logger.debug(f"{log_prefix} Sandbox API call successful on attempt {attempt + 1}")
                         response_json = await response.json()
                         return response_json, None
 
             except aiohttp.ClientResponseError as e:
-                last_error = f"{log_prefix}API Response Error: {e.status} - {e.message}"
+                last_error = f"{log_prefix} API Response Error: {e.status} - {e.message}"
                 psrl_logger.error(last_error)
                 break  # Exit retry loop on non-504 response errors
             except aiohttp.ClientError as e:
-                last_error = f"{log_prefix}API Client Error: {e}"
+                last_error = f"{log_prefix} API Client Error: {e}"
                 psrl_logger.error(last_error)
                 break  # Exit retry loop on client errors
             except asyncio.TimeoutError:
-                last_error = f"{log_prefix}API Request Timeout after {request_timeout}s"
+                last_error = f"{log_prefix} API Request Timeout after {request_timeout}s"
                 psrl_logger.error(last_error)
                 if attempt < MAX_RETRIES - 1:
                     delay = INITIAL_RETRY_DELAY * (attempt + 1)
-                    psrl_logger.info(f"{log_prefix}Retrying after timeout in {delay} seconds...")
+                    psrl_logger.info(f"{log_prefix}: Retrying after timeout in {delay}s...")
                     await asyncio.sleep(delay)
                     continue
                 break
             except Exception as e:
-                last_error = f"{log_prefix}Unexpected Error: {e}"
+                last_error = f"{log_prefix} Unexpected Error: {e}"
                 psrl_logger.error(last_error)
                 break
 
         # If loop finishes without returning success, return the last recorded error
-        psrl_logger.error(f"{log_prefix}Sandbox API call failed. Last error: {last_error}")
+        psrl_logger.error(f"{log_prefix} Sandbox API call failed. Last error: {last_error}")
         # Return the error message without the prefix, as the caller doesn't need the internal ID
         # Ensure API call failure returns error message, leading to -1 in check_correctness
         return None, last_error.replace(

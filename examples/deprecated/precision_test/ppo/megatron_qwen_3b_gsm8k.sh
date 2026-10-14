@@ -58,7 +58,6 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config --conf
     psrl.tms.range=null \
     psrl.tms.enable_nixl=False \
     \
-    gen_actor_rollout_ref.model.path="$HF_MODEL_PATH" \
     gen_actor_rollout_ref.rollout.tensor_model_parallel_size=${GEN_TP} \
     gen_actor_rollout_ref.rollout.pipeline_model_parallel_size=${GEN_PP} \
     gen_actor_rollout_ref.rollout.gpu_memory_utilization=0.95 \
@@ -93,7 +92,7 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config --conf
     critic.megatron.use_dist_checkpointing=True \
     critic.megatron.dist_checkpointing_path=$DIST_CKPT_PATH \
     \
-    reward_model.launch_reward_fn_async=True \
+    reward.launch_reward_fn_async=True \
     \
     algorithm.rollout_correction.rollout_is=${rollout_is} \
     algorithm.rollout_correction.rollout_is_threshold=${rollout_is_threshold} \

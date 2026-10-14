@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from psrl.tools.mcp_clients.schema import MCPToolSchema
-from psrl.tools.mcp_clients.token_bucket import TokenBucket
+from psrl.utils.concurrency import TokenBucket
 
 psrl_logger = logging.getLogger(__name__)
 
@@ -53,8 +53,7 @@ class MCPClientManager:
         # Load MCP servers from config.
         servers = self._load_servers(self.servers_config_path)
 
-        # Build clients list.
-        # fastmcp supports a dict config for non-SSE servers; we also support SSE servers.
+        # `fastmcp` accepts a dictionary for non-SSE servers and explicit transports for SSE servers.
         non_sse_config = {self.root_server_name: {}}
 
         for s in servers:

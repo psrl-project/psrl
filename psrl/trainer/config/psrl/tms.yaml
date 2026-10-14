@@ -1,0 +1,10 @@
+# Whether to use torch_memory_saver (TMS) for GPU management
+
+# `null` disables TMS, `train` enables train workers, and `all` enables every worker.
+range: null
+
+# Release CUDA graphs when TMS is enabled for all workers.
+enable_cuda_graph: False
+
+# Release NIXL temporary buffers to reduce GPU memory.
+enable_nixl: False

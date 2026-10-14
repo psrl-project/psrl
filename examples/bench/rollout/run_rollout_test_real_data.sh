@@ -1,10 +1,7 @@
 #!/usr/bin/env bash
 set -xeuo pipefail
 
-# Simplified rollout performance test script for real data mode
-# This script runs a simplified rollout performance test with real data using vLLM AsyncLLM directly
-
-# Set up environment
+# Run the real-data rollout benchmark with vLLM AsyncLLM.
 source ${PSRL_WORKSPACE}/env/psrl.sh
 
 HOME=${PSRL_WORKSPACE}
@@ -17,7 +14,7 @@ HF_MODEL_PATH=${PSRL_WORKSPACE}/models/Qwen2.5-32B
 TRAIN_FILE=${PSRL_WORKSPACE}/data/dapo/dapo-math-17k.parquet
 TEST_FILE=${PSRL_WORKSPACE}/data/dapo/aime-2024.parquet
 
-# vLLM configuration (simplified - no complex deployment)
+# Simplified vLLM configuration.
 GEN_TP=4  # Tensor parallel size for generation
 GEN_PP=1  # Pipeline parallel size for generation
 

@@ -245,6 +245,7 @@ RequestSnapshot parse_request(const Value &raw, std::size_t line_number,
   }
   request.is_waiting =
       bool_member_or(raw, "is_waiting", false, line_number, path);
+  request.movable = bool_member_or(raw, "movable", true, line_number, path);
   request.route_order =
       integer_member_or(raw, "route_order", 0, line_number, path);
 
@@ -438,11 +439,6 @@ RoleSnapshot parse_role(const Value &raw, const std::string &role_name,
       maximum != nullptr && !maximum->IsNull()) {
     role.max_concurrent_requests =
         integer_value(*maximum, line_number, path + ".max_concurrent_requests");
-  }
-  if (const Value *cap = member(raw, "waiting_admission_cap");
-      cap != nullptr && !cap->IsNull()) {
-    role.waiting_admission_cap =
-        integer_value(*cap, line_number, path + ".waiting_admission_cap");
   }
   role.delta_throughput_threshold = number_member_or(
       raw, "delta_throughput_threshold", 0.0, line_number, path);

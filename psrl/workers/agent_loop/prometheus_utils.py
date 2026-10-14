@@ -11,11 +11,13 @@ psrl_logger = logging.getLogger(__file__)
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
 
 
-def update_prometheus_config(config: PrometheusConfig, server_addresses: list[str]):
+def update_prometheus_config(config: PrometheusConfig, server_addresses: list[str], rollout_name: str | None = None):
     """
     Update Prometheus configuration file with server addresses and reload on first node.
 
-    server_addresses: rollout server addresses
+    server_addresses: vllm or sglang server addresses
+
+    rollout_name: name of the rollout backend (e.g., "vllm", "sglang")
     """
 
     if not server_addresses:
@@ -76,7 +78,8 @@ def update_prometheus_config(config: PrometheusConfig, server_addresses: list[st
 
         ray.get(write_tasks)
 
-        print(f"Updated Prometheus configuration at {config.file} with {len(server_addresses)} VLLM servers")
+        server_type = rollout_name.upper() if rollout_name else "rollout"
+        print(f"Updated Prometheus configuration at {config.file} with {len(server_addresses)} {server_type} servers")
 
         # Reload Prometheus on all nodes
         reload_tasks = []

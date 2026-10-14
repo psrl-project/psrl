@@ -1,0 +1,26 @@
+defaults:
+  - server: qwen35_9b
+  - topology: fleet
+  - _self_
+
+# Where endpoints.json, replica logs, and the resolved config are written. Must
+# be on shared storage for topology=multinode, since every host writes into it.
+output_dir: ???
+
+# Each replica sources this script for its runtime and required library paths.
+env_script: /apdcephfs_zwfy10/share_303541817/lhy/env/psrl.sh
+
+# Print what would launch, then exit without starting anything.
+dry_run: false
+
+# Block until every server is torn down. false returns immediately and leaves
+# them running, which is what an eval wrapper wants.
+wait_forever: false
+
+hydra:
+  # Keep Hydra artifacts with the evaluation output.
+  run:
+    dir: ${output_dir}
+  output_subdir: .hydra
+  job:
+    chdir: false

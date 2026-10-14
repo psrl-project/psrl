@@ -4,11 +4,12 @@ from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 
 import psutil
-from verl import DataProto
+from tensordict import TensorDict
+from verl.utils import tensordict_utils as tu
 
 from psrl.utils.reward_score import default_compute_score_async
-from psrl.workers.reward.reward_loop import register
-from psrl.workers.reward.reward_loop.base import RewardLoopManagerBase
+from psrl.workers.reward.reward_loop.base import RewardLoopBase
+from psrl.workers.reward.reward_loop.registry import register
 
 
 async def single_compute_score(
@@ -22,7 +23,6 @@ async def single_compute_score(
 ):
     loop = asyncio.get_running_loop()
     try:
-        # Ensure process_completion is called properly
         future = loop.run_in_executor(
             executor,
             partial(evaluation_func, task, completion, reference, task_extra_info),
@@ -30,31 +30,28 @@ async def single_compute_score(
         return await asyncio.wait_for(future, timeout=timeout)
     except asyncio.TimeoutError:
         print(f"[Timeout] Task timeout: {completion}")
-        return None  # Default value for timed-out rows
+        return None
     except Exception as e:
         print(f"[Error] Task failed: {e}, completion: {completion[:80]}")
-        return None  # Default value for failed rows
+        return None
 
 
 @register("prime")
-class PrimeRewardLoopManager(RewardLoopManagerBase):
-    """
-    The Reward Manager used in https://github.com/PRIME-RL/PRIME
-    """
+class PrimeRewardLoop(RewardLoopBase):
+    """Reward loop used by https://github.com/PRIME-RL/PRIME."""
 
     def __init__(
         self,
         config,
         tokenizer,
-        compute_score=None,
+        compute_score,
         is_validate=False,
         **reward_kwargs,
     ):
-        super().__init__(config, tokenizer, is_validate)
+        super().__init__(config, tokenizer, compute_score)
         self.compute_score = compute_score or default_compute_score_async
         self.is_async_reward_score = inspect.iscoroutinefunction(self.compute_score)
 
-        # PRIME specific config
         self.num_examine = reward_kwargs.get("num_examine", 1)
         self.reward_fn_key = reward_kwargs.get("reward_fn_key", "data_source")
         self.num_processes = reward_kwargs.get("num_processes", 64)
@@ -62,11 +59,11 @@ class PrimeRewardLoopManager(RewardLoopManagerBase):
 
         self.already_print_data_sources = {}
 
-    async def run_single(self, data: DataProto) -> dict:
+    async def run_single(self, data: TensorDict) -> dict:
         """Process a single data item and return reward score.
 
         Args:
-            data: DataProto containing a single data item
+            data: TensorDict containing a single data item
 
         Returns:
             dict: Dictionary containing 'reward_score' and 'reward_extra_info'
@@ -74,28 +71,27 @@ class PrimeRewardLoopManager(RewardLoopManagerBase):
         assert len(data) == 1, "Only support single data item"
         data_item = data[0]
 
-        response_ids = data_item.batch["responses"]
+        response_ids = data_item["responses"]
         response_length = response_ids.shape[-1]
-        valid_response_length = data_item.batch["attention_mask"][-response_length:].sum()
+        valid_response_length = data_item["attention_mask"][-response_length:].sum()
         valid_response_ids = response_ids[:valid_response_length]
 
-        data_source = data_item.non_tensor_batch.get(self.reward_fn_key, data_item.non_tensor_batch.get("data_source"))
-        ground_truth = data_item.non_tensor_batch["reward_model"]["ground_truth"]
-        extra_info = data_item.non_tensor_batch.get("extra_info", {})
-        num_turns = data_item.non_tensor_batch.get("__num_turns__", None)
-        rollout_reward_scores = data_item.non_tensor_batch.get("reward_scores", {})
-        extra_info["num_turns"] = num_turns
-        extra_info["rollout_reward_scores"] = rollout_reward_scores
+        data_source = tu.get(data_item, "data_source")
+        ground_truth = tu.get(data_item, "reward_model")["ground_truth"]
+        num_turns = tu.get(data_item, "num_turns", None)
+        rollout_reward_scores = tu.get(data_item, "reward_scores", {})
+        extra_info = self.merge_extra_info(
+            data_item,
+            num_turns=num_turns,
+            rollout_reward_scores=rollout_reward_scores,
+        )
 
         response_str = await self.loop.run_in_executor(
             None,
             lambda: self.tokenizer.decode(valid_response_ids, skip_special_tokens=True),
         )
 
-        # Use single_compute_score with ProcessPoolExecutor for PRIME's evaluation
-        # Check if compute_score is async or sync
         if self.is_async_reward_score:
-            # If it's async, call it directly without executor
             try:
                 result = await asyncio.wait_for(
                     self.compute_score(data_source, response_str, ground_truth, extra_info),
@@ -108,7 +104,6 @@ class PrimeRewardLoopManager(RewardLoopManagerBase):
                 print(f"[Error] PRIME scoring failed: {e}, completion: {response_str[:80]}")
                 result = None
         else:
-            # If it's sync, use ProcessPoolExecutor
             with ProcessPoolExecutor(max_workers=1) as executor:
                 try:
                     result = await single_compute_score(
@@ -124,7 +119,6 @@ class PrimeRewardLoopManager(RewardLoopManagerBase):
                     print(f"[Error] PRIME scoring failed: {e}, completion: {response_str[:80]}")
                     result = None
                 finally:
-                    # Clean up processes
                     for pid, proc in executor._processes.items():
                         try:
                             p = psutil.Process(pid)
@@ -138,7 +132,6 @@ class PrimeRewardLoopManager(RewardLoopManagerBase):
 
         reward_extra_info = {}
 
-        # Process result
         score: float
         if result is None or isinstance(result, Exception):
             score = 0.0
@@ -155,7 +148,6 @@ class PrimeRewardLoopManager(RewardLoopManagerBase):
         reward_extra_info["score"] = score
         reward = score
 
-        # Logging for examination
         if data_source not in self.already_print_data_sources:
             self.already_print_data_sources[data_source] = 0
 

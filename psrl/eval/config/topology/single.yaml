@@ -1,0 +1,19 @@
+# Use one server process to probe checkpoint loading and KV cache size.
+kind: single
+
+port: 8000
+tp: 1
+pp: 1
+
+# Raise `dp` only when the consumer accepts one URL.
+# The patched vLLM data parallel coordinator is unavailable.
+dp: 1
+
+# Empty inherits CUDA_VISIBLE_DEVICES, or all local GPUs if that is unset.
+gpu_ids: []
+
+host: 0.0.0.0
+
+# Allow 75 minutes for first-time fused MoE kernel compilation.
+# Crashed loads fail immediately, so this only bounds active startup.
+wait_ready_sec: 4500

@@ -2,7 +2,7 @@
 MetaBuffer: a single 1D buffer (per dtype) for meta tensor allocation.
 
 Allocates one contiguous block per dtype, registers it once, then hands out
-views by (offset, length) + reshape. Only dtype is needed in the mapping;
+views by (offset, length) + reshape. Only dtype is needed in the mapping.
 offset and shape are stored per key.
 """
 
@@ -14,7 +14,7 @@ import torch
 
 class MetaBuffer:
     """
-    One long 1D buffer per dtype. Allocates only; caller registers each buffer
+    One long 1D buffer per dtype. The caller registers each buffer
     externally. Tensors are views into slices (offset, numel) reshaped to the requested shape.
     """
 

@@ -1,9 +1,11 @@
 from abc import ABC, abstractmethod
+from importlib import import_module
 from typing import Any, Generic, SupportsFloat, TypedDict, TypeVar
 
-import ray
 from omegaconf import DictConfig
-from verl import DataProto
+from transformers import AutoProcessor, AutoTokenizer
+
+from psrl.workers.reward.client import RewardManagerClient
 
 ConversationType = list[dict[str, str]]
 
@@ -13,9 +15,9 @@ ActType = TypeVar("ActType")
 
 class EnvStepOutput(TypedDict):
     observation: ObsType
-    reward: SupportsFloat
+    reward: list[SupportsFloat]  # List of rewards for each tool call
     done: bool
-    info: dict[str, Any] | None = None
+    info: dict[str, Any] | None
 
 
 class Environment(ABC, Generic[ObsType, ActType]):
@@ -30,23 +32,37 @@ class Environment(ABC, Generic[ObsType, ActType]):
         ActType: Type of actions accepted by the environment
 
     Attributes:
-        reward_manager: Ray actor handle for computing rewards
+        reward_manager: Shared client for submitting reward requests.
         task: Current task being processed
     """
 
     _class_initialized = False
     _registry: dict[str, type["Environment"]] = {}
 
-    def __init__(self, config: DictConfig, reward_manager: ray.actor.ActorHandle):
+    def __init__(
+        self,
+        config: DictConfig,
+        reward_manager: RewardManagerClient,
+        tokenizer: AutoTokenizer,
+        processor: AutoProcessor | None = None,
+        dataset_cls=None,
+    ):
         """Initialize the environment.
 
         Args:
             config: Configuration object containing training settings
-            reward_manager: Ray actor handle for computing rewards
+            reward_manager: Shared client for submitting reward requests.
+            tokenizer: Tokenizer for converting between text and tokens
+            processor: Optional multimodal processor (e.g. Qwen2VLProcessor).
+            dataset_cls: Optional dataset class for loading data.
         """
         self.init_class(config=config)
+        self.config = config
         self.reward_manager = reward_manager
         self.task = None
+        self.tokenizer = tokenizer
+        self.processor = processor
+        self.dataset_cls = dataset_cls
 
     @classmethod
     def init_class(cls, config: DictConfig, **kwargs):
@@ -63,14 +79,14 @@ class Environment(ABC, Generic[ObsType, ActType]):
         cls._class_initialized = True
 
     @abstractmethod
-    async def reset(self, task: DataProto, **kwargs) -> tuple[ObsType, dict]:
+    async def reset(self, task: dict, **kwargs) -> tuple[ObsType, dict]:
         """Resets the environment to an initial state and returns the initial observation.
 
         This method should initialize the environment for a new episode based on the
         given task, resetting any internal state and returning the first observation.
 
         Args:
-            task: DataProto containing the initial task/prompt
+            task: dict containing the initial task/prompt
             **kwargs: Additional keyword arguments
 
         Returns:
@@ -80,7 +96,7 @@ class Environment(ABC, Generic[ObsType, ActType]):
         return None, {}
 
     @abstractmethod
-    async def step(self, action: ActType) -> EnvStepOutput:
+    async def step(self, action: ActType, **kwargs) -> EnvStepOutput:
         """
         Takes an action in the environment.
 
@@ -89,6 +105,7 @@ class Environment(ABC, Generic[ObsType, ActType]):
 
         Args:
             action: The action to take in the environment
+            **kwargs: Additional keyword arguments (e.g. tools_kwargs for ToolEnvironment)
 
         Returns:
             EnvStepOutput: Dictionary containing:
@@ -135,6 +152,14 @@ class Environment(ABC, Generic[ObsType, ActType]):
         Raises:
             ValueError: If the environment is not found in the registry
         """
+        if name not in cls._registry:
+            module_name = {
+                "tool_env": "psrl.environments.tool_env",
+                "mini_swe_env": "psrl.environments.mini_swe_env",
+                "mlgym_env": "psrl.environments.mlgym_env",
+            }.get(name)
+            if module_name is not None:
+                import_module(module_name)
         if name not in cls._registry:
             raise ValueError(f"Unknown environment: {name}")
         return cls._registry[name](*args, **kwargs)

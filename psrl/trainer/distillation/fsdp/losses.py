@@ -15,7 +15,6 @@
 
 import torch
 import torch.nn.functional as F
-
 from verl.utils.ulysses import (
     get_ulysses_sequence_parallel_world_size,
     slice_input_tensor,

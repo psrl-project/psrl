@@ -1,0 +1,27 @@
+{
+  "env": {
+    "http_proxy": "http://star-proxy.oa.com:3128",
+    "https_proxy": "http://star-proxy.oa.com:3128",
+    "HTTP_PROXY": "http://star-proxy.oa.com:3128",
+    "HTTPS_PROXY": "http://star-proxy.oa.com:3128",
+    "no_proxy": "localhost,127.0.0.1,::1",
+    "NO_PROXY": "localhost,127.0.0.1,::1"
+  },
+  "permissions": {
+    "allow": [
+      "Read(//**)",
+      "Bash",
+      "Bash(python3:*)",
+      "WebSearch",
+      "WebFetch",
+      "Bash(cd *)",
+      "Workflow(deep-research)"
+    ],
+    "deny": [
+      "Bash(git reset --hard:*)"
+    ]
+  },
+  "enabledPlugins": {
+    "superpowers@claude-plugins-official": true
+  }
+}

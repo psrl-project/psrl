@@ -5,25 +5,26 @@ from dataclasses import dataclass, field
 
 from verl.base_config import BaseConfig
 from verl.utils.profiler import ProfilerConfig
+from verl.workers.config.model import HFModelConfig
 
 from .model import HFModelConfig
-from .rollout import RolloutConfig, SamplingConfig, ServerConfig, PoolingConfig
-
-# __all__ = ["SandboxFusionConfig", "RewardModelDataProcessorConfig", "RewardModelConfig"]
+from .rollout import PoolingConfig, RolloutConfig, SamplingConfig, ServerConfig
 
 __all__ = [
     "SandboxFusionConfig",
-    "RewardModelDataProcessorConfig",
     "RewardModelConfig",
     "SingleRewardModelConfig",
+    "RewardLoopWorkerConfig",
     "MultiRewardModelConfig",
+    "resolve_active_managers",
 ]
+
 
 def get_custome_process_fn(file_path, function_name):
     if not file_path:
         return None
 
-    assert function_name is not None
+    assert function_name is not None, "Custom reward function name is required."
     module_name = f"custom_reward_module_{function_name}"
     module = sys.modules.get(module_name, None)
 
@@ -32,11 +33,11 @@ def get_custome_process_fn(file_path, function_name):
             raise FileNotFoundError(f"Reward process function file '{file_path}' not found.")
 
         spec = importlib.util.spec_from_file_location(module_name, file_path)
-        assert spec is not None
+        assert spec is not None, f"Could not load a custom reward module from {file_path!r}."
         module = importlib.util.module_from_spec(spec)
         try:
             sys.modules[module_name] = module
-            assert spec.loader is not None
+            assert spec.loader is not None, f"Custom reward module {module_name!r} has no loader."
             spec.loader.exec_module(module)
         except Exception as e:
             raise RuntimeError(f"Error loading module from '{file_path}': {e}") from e
@@ -65,24 +66,6 @@ class SandboxFusionConfig(BaseConfig):
 
 
 @dataclass
-class RewardModelDataProcessorConfig(BaseConfig):
-    path: str | None = None
-    preprocess_fn_name: str | None = None
-    postprocess_fn_name: str | None = None
-
-    def get_process_fn(self):
-        preprocess_fn = get_custome_process_fn(
-            file_path=self.path,
-            function_name=self.preprocess_fn_name,
-        )
-        postprocess_fn = get_custome_process_fn(
-            file_path=self.path,
-            function_name=self.postprocess_fn_name,
-        )
-        return preprocess_fn, postprocess_fn
-
-
-@dataclass
 class RewardModelConfig(BaseConfig):
     _mutable_fields = BaseConfig._mutable_fields
 
@@ -103,9 +86,7 @@ class RewardModelConfig(BaseConfig):
     free_cache_engine: bool = True
     tensor_model_parallel_size: int = 2
 
-    # for generative reward model
     sampling_config: SamplingConfig = field(default_factory=SamplingConfig)
-    data_processor_config: RewardModelDataProcessorConfig = field(default_factory=RewardModelDataProcessorConfig)
     max_new_tokens: int = 4096
 
     engine_kwargs: dict = field(default_factory=dict)
@@ -115,8 +96,8 @@ class RewardModelConfig(BaseConfig):
     profiler: ProfilerConfig = field(default_factory=ProfilerConfig)
     input_model_config: HFModelConfig = field(default_factory=HFModelConfig)
     model_config: HFModelConfig = field(default_factory=HFModelConfig)
-    # Server configuration for sglang server mode
     server_config: ServerConfig = field(default_factory=ServerConfig)
+
 
 @dataclass
 class SingleRewardModelConfig(BaseConfig):
@@ -160,15 +141,62 @@ class SingleRewardModelConfig(BaseConfig):
 
 
 @dataclass
+class RewardLoopWorkerConfig(BaseConfig):
+    """Configuration for the reward loop worker pool."""
+
+    num_workers: int = 8
+    max_concurrency_per_worker: int = 256
+    queue_size_per_worker: int = 4096
+    placement: str = "reward_service_ip"
+    result_queue_size: int = 65536
+    result_drain_batch_size: int = 1024
+
+
+@dataclass
 class MultiRewardModelConfig(BaseConfig):
     """Configuration for multi-reward model setup.
 
     Args:
         launch_reward_fn_async (bool): Whether to launch reward function asynchronously.
-        reward_models (list[SingleRewardModelConfig]): List of reward model configurations.
+        # reward_models (list[SingleRewardModelConfig]): List of reward model configurations.
+        active_managers (list[str]): Ordered list of manager names to activate.
+        managers (dict[str, SingleRewardModelConfig]): Named reward manager definitions.
         profiler (ProfilerConfig): Profiler configuration.
     """
 
     launch_reward_fn_async: bool = False
-    reward_models: list[SingleRewardModelConfig] = field(default_factory=list)
+    # reward_models: list[SingleRewardModelConfig] = field(default_factory=list)
+    # profiler: ProfilerConfig = field(default_factory=ProfilerConfig)
+    active_managers: list[str] = field(default_factory=list)
+    managers: dict[str, SingleRewardModelConfig] = field(default_factory=dict)
+    reward_loop_worker: RewardLoopWorkerConfig = field(default_factory=RewardLoopWorkerConfig)
     profiler: ProfilerConfig = field(default_factory=ProfilerConfig)
+
+
+def resolve_active_managers(reward_config) -> list:
+    """Resolve active_managers names to an ordered list of reward model configurations.
+
+    Takes the reward config (either a dataclass instance or an OmegaConf DictConfig)
+    and returns the list of manager configs corresponding to the names in active_managers.
+
+    Args:
+        reward_config: The reward configuration object containing ``active_managers``
+            and ``managers`` fields.
+
+    Returns:
+        list: Ordered list of reward model configurations (SingleRewardModelConfig or DictConfig).
+
+    Raises:
+        ValueError: If a name in active_managers is not found in managers.
+    """
+    active = reward_config.active_managers
+    managers = reward_config.managers
+    resolved = []
+    for name in active:
+        if name not in managers:
+            available = list(managers.keys())
+            raise ValueError(
+                f"Reward manager '{name}' in active_managers not found in managers. Available: {available}"
+            )
+        resolved.append(managers[name])
+    return resolved

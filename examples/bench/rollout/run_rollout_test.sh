@@ -1,11 +1,8 @@
 #!/usr/bin/env bash
 set -xeuo pipefail
 
-# Simplified rollout performance test script
-# This script runs a simplified rollout performance test using vLLM AsyncLLM directly
-
-# Set up environment
-source ${PSRL_WORKSPACE}/env/env_311.sh
+# Run the synthetic rollout benchmark with vLLM AsyncLLM.
+source ${PSRL_WORKSPACE}/env/psrl.sh
 
 HOME=${PSRL_WORKSPACE}
 PSRL_PATH=$(python -c "import psrl; import os; print(os.path.dirname(os.path.dirname(psrl.__file__)))")
@@ -14,8 +11,8 @@ PSRL_PATH=$(python -c "import psrl; import os; print(os.path.dirname(os.path.dir
 MODEL_NAME=${MODEL_NAME:-Qwen2.5-7B}
 HF_MODEL_PATH=${HF_MODEL_PATH:-${PSRL_WORKSPACE}/models/${MODEL_NAME}}
 
-# vLLM configuration (simplified - no complex deployment)
-GEN_TP=${1:-1}  # Tensor parallel size for generation
+# Simplified vLLM configuration.
+GEN_TP=${1:-4}  # Tensor parallel size for generation
 GEN_PP=1  # Pipeline parallel size for generation
 
 # Detect MoE and default EP=TP (same convention as deployment_modes/_common_deployment.sh).

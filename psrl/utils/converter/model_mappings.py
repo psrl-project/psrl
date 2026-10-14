@@ -1,9 +1,13 @@
 from abc import ABC, abstractmethod
+from collections import OrderedDict
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
 import torch
 from torch.nn import Parameter
+
+from psrl.utils.nixl.nixl_spec import NIXLSharding
 
 _MISSING = object()
 
@@ -92,43 +96,64 @@ def reshape_qkv_to_3d(
     hidden = param.shape[1] if param.ndim == 2 else 1
     assert rows % num_groups_local == 0, f"rows={rows} is not divisible by num_groups_local={num_groups_local}."
     new_shape = (num_groups_local, rows // num_groups_local, hidden)
-    # NOTE(lhy): param.data is always contiguous (it is directly from HF state_dict or vLLM
-    # fused split), so reshape produces a view, not a copy.
+    # NOTE(lhy): The `param.data` storage comes from contiguous HF state or a vLLM
+    # fused split, so reshaping returns a view rather than a copy.
     reshaped_data = param.data.reshape(new_shape)
     return make_slice_parameter(reshaped_data, param)
 
 
 def reshape_visual_block_qkv(param, vision_head_size: int | None = None):
-    """Reshape Qwen3.5 visual QKV into a row-contiguous head layout.
+    """
+    Reshape a visual QKV tensor to PSRL's flattened-head transfer layout.
 
-    The first dimension merges the Q/K/V selector and head index. This keeps an
-    FSDP dim-0 shard contiguous while preserving the head dimension explicitly.
-    TP clients describe their three local Q/K/V ranges with multiple shard
-    indices returned by :func:`visual_qkv_tp_shard_spec`.
+    The canonical layout is `[3 * num_heads_local, head_size, ...]`. Flattening
+    the Q/K/V component and head axes lets both of these native layouts describe
+    zero-copy views of the same global tensor:
+
+    - FSDP's contiguous flat-row shards.
+    - Tensor parallelism's non-contiguous Q/K/V head groups.
+
+    Their different ownership is represented by `NIXLSharding`, rather than by
+    forcing one backend to materialize or communicate a reordered tensor.
     """
     rows = param.shape[0]
-    if vision_head_size is not None:
-        assert vision_head_size > 0 and rows % vision_head_size == 0, (
-            f"Expected rows={rows} to be divisible by vision_head_size={vision_head_size}."
-        )
-        num_qkv_heads_local = rows // vision_head_size
-        if param.ndim == 1:
-            reshaped_data = param.data.reshape(num_qkv_heads_local, vision_head_size, 1)
-        else:
-            reshaped_data = param.data.reshape(num_qkv_heads_local, vision_head_size, *param.shape[1:])
+    assert rows % 3 == 0, f"Expected rows={rows} to be divisible by 3 for visual block qkv weights."
+    if vision_head_size is None:
+        raise ValueError("vision_head_size is required for visual QKV canonicalization.")
+    if param.ndim >= 2 and param.shape[1] == vision_head_size:
+        # Megatron's concatenated Q/K/V view is already in flattened-head form.
+        return make_slice_parameter(param.data, param)
+    assert rows % vision_head_size == 0, (
+        f"Expected rows={rows} to be divisible by vision_head_size={vision_head_size}."
+    )
+    if len(param.shape) == 1:
+        reshaped_data = param.data.reshape(rows // vision_head_size, vision_head_size, 1)
     else:
-        assert rows % 3 == 0, f"Expected rows={rows} to be divisible by 3 for visual block qkv weights."
-        reshaped_data = param.data.reshape(3, rows // 3, *param.shape[1:])
+        reshaped_data = param.data.reshape(rows // vision_head_size, vision_head_size, *param.shape[1:])
     return make_slice_parameter(reshaped_data, param)
 
 
-def visual_qkv_tp_shard_spec(tp_size: int, tp_rank: int) -> tuple[int, list[tuple[int]]]:
-    """Return the dim-0 shard mesh and indices for packed local Q/K/V ranges."""
+def make_visual_qkv_tp_sharding(
+    tp_size: int,
+    tp_rank: int,
+) -> NIXLSharding:
+    """
+    Describe TP ownership in the flattened-head visual QKV layout.
+
+    A TP rank owns one head range from each of Q, K, and V. In a mesh of
+    `3 * tp_size` equal head shards, rank `r` therefore owns shard indices
+    `r`, `tp_size + r`, and `2 * tp_size + r`.
+    """
     assert tp_size >= 1, f"tp_size must be positive, got {tp_size}."
-    assert 0 <= tp_rank < tp_size, f"tp_rank={tp_rank} must be in [0, {tp_size})."
-    if tp_size == 1:
-        return 1, [(0,)]
-    return 3 * tp_size, [(tp_rank,), (tp_rank + tp_size,), (tp_rank + 2 * tp_size,)]
+    assert 0 <= tp_rank < tp_size, f"tp_rank must be in [0, {tp_size}), got {tp_rank}."
+    return NIXLSharding(
+        shard_mesh=OrderedDict([(0, 3 * tp_size)]),
+        shard_indices=[
+            (tp_rank,),
+            (tp_size + tp_rank,),
+            (2 * tp_size + tp_rank,),
+        ],
+    )
 
 
 def reshape_q_to_5d(
@@ -151,12 +176,13 @@ def reshape_q_to_5d(
             where num_groups_local = gcd(num_heads_local, num_kv_heads_local).
     """
     num_groups_local, rows, hidden = param.shape
-    assert rows == num_heads_local // num_groups_local * head_size, \
+    assert rows == num_heads_local // num_groups_local * head_size, (
         f"Expected rows={num_heads_local * head_size} but got {rows}."
+    )
     q_num_heads_per_group = num_heads_local // num_groups_local // 2
     new_shape = (num_groups_local, q_num_heads_per_group, 2, head_size, hidden)
-    # NOTE(lhy): param.data is always contiguous (it is directly from HF state_dict or vLLM
-    # fused split), so reshape produces a view, not a copy.
+    # NOTE(lhy): The `param.data` storage comes from contiguous HF state or a vLLM
+    # fused split, so reshaping returns a view rather than a copy.
     reshaped_data = param.data.reshape(new_shape)
     return make_slice_parameter(reshaped_data, param)
 
@@ -168,40 +194,27 @@ def slice_gate_up_proj(
     output_dim: int = 0,
 ) -> list[Parameter]:
     """
-    Split a fused gate_up_proj parameter into two shards:
-      - gate_proj_param (shard index 0)
-      - up_proj_param   (shard index 1)
+    Split a fused `gate_up_proj` parameter into gate and up projection views.
 
-    Args
-    ----------
-    fused_param : Parameter
-        The fused parameter of shape [..., sum(output_sizes), ...].
-    output_sizes : List[int]
-        List of two sizes [gate_size, up_size].
-    tp_size : int, optional
-        Tensor parallel size (default is 1).
-    output_dim : int, optional
-        Dimension along which to split (default is 0).
+    Args:
+        fused_param (Parameter): Fused parameter to split.
+        output_sizes (list[int]): Global gate and up projection sizes.
+        tp_size (int): Tensor parallel size.
+        output_dim (int): Dimension along which to split.
 
-    Returns
-    -------
-    List[Parameter]
-        A list of two parameters:
-        [
-          gate_proj_param, # view of shape [..., gate_size, ...]
-          up_proj_param, # view of shape [..., up_size, ...]
-        ]
+    Returns:
+        list[Parameter]: Gate and up projection views.
     """
-    assert len(output_sizes) == 2, "Expected exactly two shards for gate_up_proj"
+    assert len(output_sizes) == 2, "Expected exactly two shards for gate_up_proj."
     assert all([output_size % tp_size == 0 for output_size in output_sizes]), (
-        "Output sizes must be divisible by tensor parallel size"
+        "Output sizes must be divisible by tensor parallel size."
     )
     gate_size, up_size = [output_size // tp_size for output_size in output_sizes]
 
-    # Create views for gate and up projections without copying data
+    # Preserve storage sharing when splitting the fused parameter.
     assert fused_param.data.shape[output_dim] == (gate_size + up_size), (
         f"Dim {output_dim} of fused parameter shape {fused_param.data.shape} "
-        f"must match the sum of gate and up sizes {[gate_size, up_size]}"
+        f"must match the sum of gate and up sizes {[gate_size, up_size]}."
     )
     gate_data = fused_param.data.narrow(output_dim, 0, gate_size)
     up_data = fused_param.data.narrow(output_dim, gate_size, up_size)
@@ -211,16 +224,65 @@ def slice_gate_up_proj(
     ]
 
 
+@dataclass(frozen=True)
+class QKVTPLayout:
+    """
+    Describe Q/KV head placement across a tensor-parallel group.
+
+    Attributes:
+        tp_size (int): Tensor-parallel world size.
+        num_heads_local (int): Number of query heads stored by each TP rank.
+        num_kv_heads_local (int): Number of key/value heads stored by each TP rank.
+        num_kv_head_replicas (int): Number of TP ranks sharing each KV shard.
+    """
+
+    tp_size: int
+    num_heads_local: int
+    num_kv_heads_local: int
+    num_kv_head_replicas: int
+
+    @property
+    def num_kv_shards(self) -> int:
+        """
+        Return the number of distinct KV shards across all TP ranks.
+        """
+        return self.tp_size // self.num_kv_head_replicas
+
+    def get_kv_shard_rank(self, tp_rank: int) -> int:
+        """
+        Return the distinct KV shard index owned by a TP rank.
+
+        Args:
+            tp_rank (int): Tensor-parallel rank.
+
+        Returns:
+            int: KV shard index shared by this TP rank and its replicas.
+        """
+        assert 0 <= tp_rank < self.tp_size, (
+            f"Tensor parallel rank must be in [0, {self.tp_size}), got tp_rank = {tp_rank}."
+        )
+        return tp_rank // self.num_kv_head_replicas
+
+
 def get_qkv_tp_layout(
     num_heads: int,
     num_kv_heads: int,
     tp_size: int,
-) -> tuple[int, int, int]:
-    """Return local Q/KV head counts and the KV replication factor for TP.
+) -> QKVTPLayout:
+    """
+    Build the complete Q/KV head layout for tensor parallelism.
 
     vLLM partitions KV heads when there are at least as many KV heads as TP
     ranks. When TP is larger, each KV head is replicated across a contiguous
     group of TP ranks.
+
+    Args:
+        num_heads (int): Global number of query heads.
+        num_kv_heads (int): Global number of key/value heads.
+        tp_size (int): Tensor-parallel world size.
+
+    Returns:
+        QKVTPLayout: Local head counts and KV shard replication metadata.
     """
     assert tp_size > 0, f"Tensor parallel size must be positive, got tp_size = {tp_size}."
     assert num_kv_heads > 0, f"Number of KV heads must be positive, got num_kv_heads = {num_kv_heads}."
@@ -244,7 +306,12 @@ def get_qkv_tp_layout(
         num_kv_heads_local = 1
         num_kv_head_replicas = tp_size // num_kv_heads
 
-    return num_heads // tp_size, num_kv_heads_local, num_kv_head_replicas
+    return QKVTPLayout(
+        tp_size=tp_size,
+        num_heads_local=num_heads // tp_size,
+        num_kv_heads_local=num_kv_heads_local,
+        num_kv_head_replicas=num_kv_head_replicas,
+    )
 
 
 def slice_qkv_proj(
@@ -273,18 +340,20 @@ def slice_qkv_proj(
         list[Parameter]: A list of three 2D parameters sharing storage with fused_param:
             [
               q_param, # shape (num_heads // tp_size * head_size, hidden)
-              k_param, # one partitioned or replicated local KV-head slice
-              v_param, # one partitioned or replicated local KV-head slice
+              k_param, # shape (num_kv_heads_local * head_size, hidden)
+              v_param, # shape (num_kv_heads_local * head_size, hidden)
             ]
+            When `num_kv_heads < tp_size`, `num_kv_heads_local` is 1 and the
+            same KV shard is replicated across multiple TP ranks.
     """
-    num_heads_local, num_kv_heads_local, _ = get_qkv_tp_layout(
+    layout = get_qkv_tp_layout(
         num_heads=num_heads,
         num_kv_heads=num_kv_heads,
         tp_size=tp_size,
     )
-    q_len = num_heads_local * head_size
-    k_len = num_kv_heads_local * head_size
-    v_len = num_kv_heads_local * head_size
+    q_len = layout.num_heads_local * head_size
+    k_len = layout.num_kv_heads_local * head_size
+    v_len = layout.num_kv_heads_local * head_size
 
     assert fused_param.data.shape[output_dim] == (q_len + k_len + v_len), (
         f"Dim {output_dim} of fused parameter shape {fused_param.data.shape} "
@@ -374,16 +443,11 @@ def slice_qkv_proj_megatron(
 
     qkv_params: list[Parameter] = []
     for i, (offset, size) in enumerate(offset_and_sizes):
-        # NOTE(lhy): Keep as a 3D non-contiguous view to share storage with fused_param.
-        # Do NOT reshape to 2D here: reshape() on a non-contiguous tensor triggers an implicit
-        # copy, producing an independent tensor whose storage is separate from fused_param.
-        # NIXL pull would then write to the copy and never update the actual
-        # linear_qkv.weight used by Megatron forward, causing training_ppl to explode.
-        # The 3D non-contiguous path in NIXL handles this via a temp buffer and
-        # original_tensor.data.copy_() after transfer, correctly updating fused_param.
+        # NOTE(lhy): Keep the 3D noncontiguous view because flattening copies storage.
+        # NIXL updates must reach the original Megatron `linear_qkv.weight`.
         data = fused_param.data.narrow(output_dim, offset, size)
         if attn_output_gate and i == 0:
-            # NOTE(zym) For Qwen3.5, megatron q_weights need special handling
+            # NOTE(zym): Qwen3.5 Megatron query weights require a gated layout.
             q_num_heads_per_group = num_heads // num_split_heads // 2
             data = data.view(num_split_heads // tp_size, 2, q_num_heads_per_group, head_size, -1).transpose(1, 2)
         qkv_params.append(make_slice_parameter(data, fused_param))
@@ -406,8 +470,9 @@ def slice_attn_conv1d(
     k_dim = num_k_heads * k_head_size // tp_size
     v_dim = num_v_heads * v_head_size // tp_size
     assert fused_param.data.shape[output_dim] == (k_dim * 2 + v_dim), (
-        f"Dim {output_dim} of fused parameter shape {fused_param.data.shape} must match "
-        f"the sum of k and v dims {[k_dim, v_dim]}"
+        f"Dim {output_dim} of fused parameter shape "
+        f"{fused_param.data.shape} must match the sum "
+        f"of k and v dims {[k_dim, v_dim]}"
     )
     offset_and_sizes = [
         (0, k_dim),
@@ -419,7 +484,6 @@ def slice_attn_conv1d(
         data = fused_param.data.narrow(output_dim, offset, size)
         params.append(make_slice_parameter(data, fused_param))
     return params
-
 
 
 def slice_fused_moe_w13_weight(
@@ -449,7 +513,7 @@ def slice_fused_moe_w2_weight(
 
 
 def get_fused_moe_expert_prefix(param_name: str, projection: str) -> str | None:
-    """Return the canonical ``...mlp.experts`` prefix for a fused MoE parameter."""
+    """Return the canonical `...mlp.experts` prefix for a fused MoE parameter."""
     for suffix in (f".{projection}.weight", f".{projection}"):
         if param_name.endswith(suffix):
             prefix = param_name[: -len(suffix)]
@@ -466,16 +530,10 @@ def slice_in_proj_qkvz(
     output_dim: int = 0,
 ) -> list[Parameter]:
     """
-    Split Qwen3.5 GDN fused in_proj_qkvz into (in_proj_qkv, in_proj_z).
+    Split Qwen3.5 GDN `in_proj_qkvz` into `in_proj_qkv` and `in_proj_z`.
 
-    vLLM implements Qwen3.5 Gated DeltaNet (linear attention) with two fused
-    MergedColumnParallelLinear layers:
-      - in_proj_qkvz: output_sizes=[key_dim, key_dim, value_dim, value_dim]
-      - in_proj_ba:   output_sizes=[num_v_heads, num_v_heads]
-
-    The checkpoint provides in_proj_qkv (stack of K, K, V) and in_proj_z
-    separately, which correspond to the first three shards and the last shard
-    of the fused in_proj_qkvz parameter.
+    The checkpoint separates the first three projection shards from the final
+    value projection shard used by vLLM's fused parameter.
 
     Args:
         fused_param (Parameter): Fused parameter tensor.
@@ -485,18 +543,16 @@ def slice_in_proj_qkvz(
         output_dim (int): Dimension along which to split.
 
     Returns:
-        list[Parameter]: [in_proj_qkv, in_proj_z] views sharing storage with fused_param.
+        list[Parameter]: Projection views that share storage with `fused_param`.
     """
     assert tp_size >= 1, f"tp_size must be >= 1, got: {tp_size!r}."
     qkv_size = 2 * key_dim + value_dim
     z_size = value_dim
     assert qkv_size % tp_size == 0, (
-        "in_proj_qkv size must be divisible by tensor parallel size, "
-        f"got qkv_size={qkv_size} and tp_size={tp_size}."
+        f"in_proj_qkv size must be divisible by tensor parallel size, got qkv_size={qkv_size} and tp_size={tp_size}."
     )
     assert z_size % tp_size == 0, (
-        "in_proj_z size must be divisible by tensor parallel size, "
-        f"got z_size={z_size} and tp_size={tp_size}."
+        f"in_proj_z size must be divisible by tensor parallel size, got z_size={z_size} and tp_size={tp_size}."
     )
     qkv_size_local = qkv_size // tp_size
     z_size_local = z_size // tp_size
@@ -534,8 +590,7 @@ def slice_in_proj_ba(
     """
     assert tp_size >= 1, f"tp_size must be >= 1, got: {tp_size!r}."
     assert num_v_heads % tp_size == 0, (
-        "num_v_heads must be divisible by tensor parallel size, "
-        f"got num_v_heads={num_v_heads} and tp_size={tp_size}."
+        f"num_v_heads must be divisible by tensor parallel size, got num_v_heads={num_v_heads} and tp_size={tp_size}."
     )
     size_local = num_v_heads // tp_size
     expected = 2 * size_local
@@ -563,7 +618,7 @@ def slice_qwen3_5_in_proj(
     """
     Split Megatron Qwen3.5 linear attention in_proj into 4 HF-like parameters.
 
-    mbridge maps Megatron's single in_proj.weight into:
+    Megatron-Bridge maps Megatron's single in_proj.weight into:
       - linear_attn.in_proj_qkv.weight
       - linear_attn.in_proj_z.weight
       - linear_attn.in_proj_b.weight
@@ -712,7 +767,22 @@ class ParameterMapping(ABC):
         if attn_output_gate:
             num_heads *= 2
 
+        qk_nope_head_dim = _get_attr(text_cfg, "qk_nope_head_dim", None)
+        qk_rope_head_dim = _get_attr(text_cfg, "qk_rope_head_dim", None)
+        v_head_dim = _get_attr(text_cfg, "v_head_dim", None)
+        kv_lora_rank = _get_attr(text_cfg, "kv_lora_rank", None)
+        q_lora_rank = _get_attr(text_cfg, "q_lora_rank", None)
+
+        uses_mla_attention = (
+            _is_int(qk_nope_head_dim)
+            and _is_int(qk_rope_head_dim)
+            and _is_int(kv_lora_rank)
+            and (qk_nope_head_dim + qk_rope_head_dim) > 0
+        )
+
         head_size = _get_attr(text_cfg, "head_dim", None)
+        if head_size is None and uses_mla_attention:
+            head_size = qk_nope_head_dim + qk_rope_head_dim
         if head_size is None:
             head_size = hidden_size // num_heads
 
@@ -722,7 +792,37 @@ class ParameterMapping(ABC):
             "head_size": head_size,
             "intermediate_size": intermediate_size,
             "attn_output_gate": attn_output_gate,
+            "uses_mla_attention": uses_mla_attention,
         }
+
+        if uses_mla_attention:
+            info.update(
+                {
+                    "qk_nope_head_dim": qk_nope_head_dim,
+                    "qk_rope_head_dim": qk_rope_head_dim,
+                    "qk_head_dim": qk_nope_head_dim + qk_rope_head_dim,
+                    "v_head_dim": v_head_dim,
+                    "kv_lora_rank": kv_lora_rank,
+                    "q_lora_rank": q_lora_rank,
+                }
+            )
+
+        num_experts = _get_attr(text_cfg, "num_experts", None)
+        if num_experts is None:
+            num_experts = _get_attr(text_cfg, "n_routed_experts", None)
+        moe_intermediate_size = _get_attr(text_cfg, "moe_intermediate_size", None)
+        n_shared_experts = _get_attr(text_cfg, "n_shared_experts", None)
+        shared_expert_intermediate_size = _get_attr(text_cfg, "shared_expert_intermediate_size", None)
+        if num_experts is not None:
+            info["num_experts"] = num_experts
+        if moe_intermediate_size is not None:
+            info["moe_intermediate_size"] = moe_intermediate_size
+        if n_shared_experts is not None:
+            info["n_shared_experts"] = n_shared_experts
+        if shared_expert_intermediate_size is not None:
+            info["shared_expert_intermediate_size"] = shared_expert_intermediate_size
+        elif moe_intermediate_size is not None and n_shared_experts is not None:
+            info["shared_expert_intermediate_size"] = moe_intermediate_size * n_shared_experts
 
         linear_num_key_heads = _get_attr(text_cfg, "linear_num_key_heads", None)
         linear_key_head_dim = _get_attr(text_cfg, "linear_key_head_dim", None)
@@ -748,9 +848,18 @@ class ParameterMapping(ABC):
                 }
             )
 
-        info["num_experts"] = _get_attr(text_cfg, "num_experts", None)
-        info["moe_intermediate_size"] = _get_attr(text_cfg, "moe_intermediate_size", None)
-        info["shared_expert_intermediate_size"] = _get_attr(text_cfg, "shared_expert_intermediate_size", None)
+        vision_cfg = _get_attr(cfg, "vision_config", None)
+        if vision_cfg is not None:
+            vision_num_heads = _get_attr(vision_cfg, "num_heads", None)
+            vision_hidden_size = _get_attr(vision_cfg, "hidden_size", None)
+            vision_head_size = _get_attr(vision_cfg, "head_dim", None)
+            if vision_head_size is None and _is_int(vision_num_heads) and _is_int(vision_hidden_size):
+                vision_head_size = vision_hidden_size // vision_num_heads
+            if _is_int(vision_num_heads):
+                info["vision_num_heads"] = vision_num_heads
+                info["vision_num_kv_heads"] = _get_attr(vision_cfg, "num_key_value_heads", vision_num_heads)
+            if _is_int(vision_head_size):
+                info["vision_head_size"] = vision_head_size
 
         vision_cfg = _get_attr(cfg, "vision_config", None)
         if vision_cfg is not None:
@@ -768,7 +877,7 @@ class ParameterMapping(ABC):
         return info
 
     def get_external_fp32_param_patterns(self) -> tuple[str, ...]:
-        """Return canonical parameter-name fragments that NIXL must expose as fp32."""
+        """Return unified key substrings for params that must be exposed to PS/vLLM as fp32."""
         return ("A_log",)
 
 

@@ -5,10 +5,11 @@ from collections.abc import Callable
 import torch
 from torch_memory_saver import torch_memory_saver
 from tqdm import tqdm
+from vllm.compilation.counter import compilation_counter
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import graph_capture, is_global_first_rank
 from vllm.model_executor.offloader.base import get_offloader
-from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor, CudaGraphManager
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor, CapturedAttentionState, CudaGraphManager
 
 from vllm_patches.core import min_vllm_version, vLLMPatch
 
@@ -16,26 +17,30 @@ psrl_logger = logging.getLogger(__file__)
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
 
 
-@min_vllm_version("0.18.1")
+@min_vllm_version("0.22.0")
 class TMSCudaGraphManagerPatch(vLLMPatch[CudaGraphManager]):
     """
     Replace `torch.cuda.graph()` with `torch_memory_saver.cuda_graph()`
 
-    Compatible with vLLM 0.18.1+
+    Compatible with vLLM 0.22.0+
     """
 
     @torch.inference_mode()
     def capture(
         self,
-        create_forward_fn: Callable[[BatchExecutionDescriptor], Callable[[CUDAGraphMode], None]],
+        create_forward_fn: Callable[
+            [BatchExecutionDescriptor],
+            tuple[Callable[[CUDAGraphMode], None], CapturedAttentionState],
+        ],
         progress_bar_desc: str = "Capturing CUDA graphs",
-    ) -> None:
+    ) -> dict[BatchExecutionDescriptor, CapturedAttentionState]:
         """Capture CUDA graphs.
 
         Args:
             create_forward_fn: Factory that prepares inputs (OUTSIDE graph) and
                 returns a function that runs forward with a given CUDAGraphMode.
         """
+        captured_attn_states: dict[BatchExecutionDescriptor, CapturedAttentionState] = {}
         with graph_capture(device=self.device):
             # Capture in order: PIECEWISE first, then FULL. PIECEWISE has larger
             # activations so FULL activations should fit in already allocated
@@ -49,7 +54,7 @@ class TMSCudaGraphManagerPatch(vLLMPatch[CudaGraphManager]):
                     descs = tqdm(descs, desc=f"{progress_bar_desc} ({mode.name})")
                 for desc in descs:
                     # Prepare inputs and get forward function
-                    forward_fn = create_forward_fn(desc)
+                    forward_fn, attn_state = create_forward_fn(desc)
 
                     # Warmup
                     forward_fn(CUDAGraphMode.NONE)
@@ -57,8 +62,15 @@ class TMSCudaGraphManagerPatch(vLLMPatch[CudaGraphManager]):
                     # Capture
                     psrl_logger.debug("CG Capture: mode=%s, batch_desc=%s", desc.cg_mode.name, desc)
                     if desc.cg_mode == CUDAGraphMode.PIECEWISE:
+                        captured_attn_states[desc] = attn_state
                         forward_fn(CUDAGraphMode.PIECEWISE)
                     else:
+                        # Capture with fresh attention state. The warmup
+                        # attention state is discarded because some backends
+                        # (e.g. FlashMLA) perform lazy initializations that
+                        # must be captured in the graph.
+                        forward_fn, attn_state = create_forward_fn(desc)
+                        captured_attn_states[desc] = attn_state
                         assert desc not in self.graphs, f"Graph already captured for {desc}"
                         graph = torch.cuda.CUDAGraph()
                         # Sync offloader's copy stream before capture.
@@ -72,4 +84,6 @@ class TMSCudaGraphManagerPatch(vLLMPatch[CudaGraphManager]):
                             # the next forward pass.
                             get_offloader().join_after_forward()
                         self.graphs[desc] = graph
+                        compilation_counter.num_cudagraph_captured += 1
         self._graphs_captured = True
+        return captured_attn_states

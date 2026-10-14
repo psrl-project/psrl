@@ -5,15 +5,18 @@ from dataclasses import dataclass, field
 from typing import Any, Generic, TypeVar
 
 import numpy as np
-import ray
+import torch
 from omegaconf import DictConfig
-from transformers import AutoTokenizer
-from verl import DataProto
+from PIL import Image
+from verl.utils import tensordict_utils as tu
+from verl.utils.ray_utils import get_event_loop
 
 from psrl.environments.base import ConversationType, Environment
-from psrl.utils.reward_token_metrics import extract_reward_model_token_counts
+from psrl.utils.dataset.utils import as_object_sample
+from psrl.workers.gen.utils import RolloutInstanceId, TokenOutput
+from psrl.workers.reward.client import RewardManagerClient
 
-psrl_logger = logging.getLogger(__file__)
+psrl_logger = logging.getLogger(__name__)
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
 
 
@@ -41,7 +44,7 @@ class Step:
     info: dict = field(default_factory=dict)
 
     # Reward from tool execution (if applicable)
-    tool_reward: float | None = None
+    tool_reward: list[float] | None = None
     # Reward from model evaluation (if applicable)
     model_reward: float | None = None
     # Combined or final reward for this step
@@ -85,7 +88,7 @@ class Step:
             action=data.get("action"),
             model_response=data.get("model_response", ""),
             info=data.get("info", {}),
-            tool_reward=data.get("tool_reward", 0.0),
+            tool_reward=data.get("tool_reward", []),
             model_reward=data.get("model_reward", 0.0),
             reward=data.get("reward", 0.0),
             done=data.get("done", False),
@@ -94,22 +97,69 @@ class Step:
 
 @dataclass
 class Trajectory:
-    """
-    Represents a complete trajectory of agent interactions.
+    # List of Step objects comprising this trajectory
+    steps: list[Step] = field(default_factory=list)
+    # Number of assistant (model) turns taken
+    assistant_turns: int = 0
+    # Number of user (environment) turns taken
+    user_turns: int = 0
+    # Total reward accumulated for this trajectory
+    reward: float | None = None
+    # Total length of generated responses in tokens
+    response_length: int = 0
 
-    A trajectory contains multiple steps and tracks the cumulative state and rewards
+    # State variables
+    prompt_ids: list[int] = field(default_factory=list)
+    response_ids: list[int] = field(default_factory=list)
+    response_mask: list[int] = field(default_factory=list)
+    response_logprobs: list[float] = field(default_factory=list)
+    routed_experts: list[int] = field(default_factory=list)
+
+    # Per-turn reward signals
+    # Rewards collected from tool execution at each user turn.
+    tool_rewards: list[float] = field(default_factory=list)
+    # Rewards collected from an Interaction at each user turn (e.g. human feedback).
+    turn_scores: list[float] = field(default_factory=list)
+
+    # Multimodal data accepted by the processor across turns.
+    image_data: list[Any] | None = None
+    video_data: list[Any] | None = None
+
+    # Arbitrary extra fields for dynamic addition (e.g. tools_kwargs, interaction_kwargs).
+    extra_fields: dict = field(default_factory=dict)
+
+
+@dataclass
+class SessionData:
+    """
+    Represents a complete session of agent interactions.
+
+    A session contains multiple trajectories and tracks the cumulative state and rewards
     throughout an episode. It includes both the conversation history and tokenized
     representations for model training.
     """
 
-    # Unique identifier for this trajectory
+    # Unique identifier for this session
     request_id: int = 0
-    # ID of parent trajectory (for group-based generation)
+    # ID of parent session (for group-based generation)
     parent_id: int | None = None
     # Current rollout instance ID
-    curr_rollout_instance_id: int | None = None
-    # Current version tag
-    curr_version_tag: int | None = None
+    curr_rollout_instance_id: RolloutInstanceId | None = None
+    # val/train session data
+    validate: bool = False
+
+    # Dataset-provided fields.
+    # Data source of current session
+    data_source: str = "unknown"
+    # Reward model info (e.g., ground truth)
+    reward_model: dict = field(default_factory=dict)
+    # Extra info of input request
+    extra_info: dict = field(default_factory=dict)
+    # List of reward model dict
+    reward_model_dicts: list[dict] = field(default_factory=list)
+
+    # Reward metadata produced by the agent loop during rollout
+    agent_reward_info: dict = field(default_factory=dict)
 
     # List of Step objects comprising this trajectory
     steps: list[Step] = field(default_factory=list)
@@ -124,11 +174,8 @@ class Trajectory:
     # Additional metadata or debug information
     info: dict = field(default_factory=dict)
 
-    # State variables
-    prompt_ids: list[int] = field(default_factory=list)
-    response_ids: list[int] = field(default_factory=list)
-    response_mask: list[int] = field(default_factory=list)
-    response_logprobs: list[float] = field(default_factory=list)
+    # Trajectories inside a session
+    trajectories: list[Trajectory] = field(default_factory=list)
 
 
 ObsType = TypeVar("ObsType")
@@ -155,8 +202,7 @@ class AgentData(ABC, Generic[ObsType, ActType]):
     def __init__(
         self,
         config: DictConfig,
-        reward_manager: ray.actor.ActorHandle,
-        tokenizer: AutoTokenizer,
+        reward_manager: RewardManagerClient,
         env: Environment,
         **kwargs,
     ):
@@ -164,16 +210,18 @@ class AgentData(ABC, Generic[ObsType, ActType]):
 
         Args:
             config: Configuration object containing training settings
-            reward_manager: Ray actor handle for computing rewards
-            tokenizer: Tokenizer for converting between text and tokens
+            reward_manager: Shared client for submitting reward requests.
+            env: Environment instance this agent interacts with
             **kwargs: Additional keyword arguments from configuration
         """
-        self.init_class(config=config, tokenizer=tokenizer, **kwargs)
+        self.init_class(config=config, **kwargs)
         self.config = config
         self.reward_manager = reward_manager
-        self.tokenizer = tokenizer
         self.env = env
-        self.trajectory = Trajectory()
+        self.tokenizer = self.env.tokenizer
+        self.processor = self.env.processor
+        self.session_data = SessionData()
+        self.loop = get_event_loop()
 
         # Discount factor for reward discounting (default: 0.0)
         self.gamma = self.config.gen_actor_rollout_ref.rollout.agent.gamma
@@ -181,7 +229,7 @@ class AgentData(ABC, Generic[ObsType, ActType]):
         self.reward_bonus_coeff = self.config.gen_actor_rollout_ref.rollout.agent.reward_bonus_coeff
 
     @classmethod
-    def init_class(cls, config: DictConfig, tokenizer: AutoTokenizer, **kwargs):
+    def init_class(cls, config: DictConfig, **kwargs):
         """This is used to do heavy initialization work that should shared across all instances. It's only called once.
 
         Args:
@@ -193,7 +241,10 @@ class AgentData(ABC, Generic[ObsType, ActType]):
             return
         cls._class_initialized = True
 
-    def start_step(self, observation: ObsType, reward: float | None, done: bool, info: dict | None) -> Step:
+    def create_trajectory(self):
+        self.session_data.trajectories.append(Trajectory())
+
+    def start_step(self, observation: ObsType, reward: list[float] | None, done: bool, info: dict | None) -> Step:
         """Start (append) a new step to the trajectory.
 
         Subclasses are encouraged to call this at the beginning of `update_from_env`
@@ -213,11 +264,13 @@ class AgentData(ABC, Generic[ObsType, ActType]):
             # Let subclasses decide how to convert observation into ConversationType.
             chat_completions=[],
             observation=observation,
+            info=info or {},
+            tool_reward=reward,
+            done=done,
         )
-        step.tool_reward = reward
-        step.done = done
-        step.info = info or {}
-        self.trajectory.steps.append(step)
+        # TODO(linsh): Check whether global steps are required.
+        self.session_data.steps.append(step)
+        self.session_data.trajectories[-1].steps.append(step)
         return step
 
     @abstractmethod
@@ -245,16 +298,16 @@ class AgentData(ABC, Generic[ObsType, ActType]):
         Raises a clearer error than an IndexError if subclasses call into
         step-dependent helpers before starting a step.
         """
-        if len(self.trajectory.steps) == 0:
+        if len(self.session_data.steps) == 0:
             raise RuntimeError(
                 "No step exists in trajectory yet. Ensure `update_from_env()` (or `start_step()`) "
                 "is called before `update_from_model_*()` methods."
             )
-        return self.trajectory.steps[-1]
+        return self.session_data.steps[-1]
 
     def append_prompt_ids(self, prompt_ids: list[int]) -> None:
         """Set prompt token ids for the trajectory."""
-        self.trajectory.prompt_ids = list(prompt_ids)
+        self.session_data.trajectories[-1].prompt_ids = list(prompt_ids)
 
     def append_user_tokens(self, token_ids: list[int]) -> None:
         """Append tokens that come from the environment/user side.
@@ -264,15 +317,25 @@ class AgentData(ABC, Generic[ObsType, ActType]):
         """
         if not token_ids:
             return
-        self.trajectory.user_turns += 1
-        self.trajectory.response_ids += list(token_ids)
-        self.trajectory.response_mask += [0] * len(token_ids)
-        self.trajectory.response_length += len(token_ids)
-        if len(self.trajectory.response_logprobs) > 0:
-            # Keep alignment if logprobs are being tracked.
-            self.trajectory.response_logprobs += [0.0] * len(token_ids)
+        # Session-level stats
+        self.session_data.user_turns += 1
+        self.session_data.response_length += len(token_ids)
 
-    def append_assistant_tokens(self, token_ids: list[int], logprobs: list[float] | None = None) -> None:
+        # Trajectory-level stats
+        self.session_data.trajectories[-1].user_turns += 1
+        self.session_data.trajectories[-1].response_ids += list(token_ids)
+        self.session_data.trajectories[-1].response_mask += [0] * len(token_ids)
+        self.session_data.trajectories[-1].response_length += len(token_ids)
+        if len(self.session_data.trajectories[-1].response_logprobs) > 0:
+            # Keep alignment if logprobs are being tracked.
+            self.session_data.trajectories[-1].response_logprobs += [0.0] * len(token_ids)
+
+    def append_assistant_tokens(
+        self,
+        token_ids: list[int],
+        logprobs: list[float] | None = None,
+        routed_experts: list[int] | None = None,
+    ) -> None:
         """Append tokens generated by the model/assistant side.
 
         Args:
@@ -281,12 +344,19 @@ class AgentData(ABC, Generic[ObsType, ActType]):
         """
         if not token_ids:
             return
-        self.trajectory.assistant_turns += 1
-        self.trajectory.response_ids += list(token_ids)
-        self.trajectory.response_mask += [1] * len(token_ids)
-        self.trajectory.response_length += len(token_ids)
+        # Session-level stats
+        self.session_data.assistant_turns += 1
+        self.session_data.response_length += len(token_ids)
+
+        # Trajectory-level stats
+        self.session_data.trajectories[-1].assistant_turns += 1
+        self.session_data.trajectories[-1].response_ids += list(token_ids)
+        self.session_data.trajectories[-1].response_mask += [1] * len(token_ids)
+        self.session_data.trajectories[-1].response_length += len(token_ids)
         if logprobs:
-            self.trajectory.response_logprobs += list(logprobs)
+            self.session_data.trajectories[-1].response_logprobs += list(logprobs)
+        if routed_experts:
+            self.session_data.trajectories[-1].routed_experts = routed_experts
 
     def set_step_action(self, action: ActType) -> None:
         """Set parsed action for the current step."""
@@ -312,8 +382,18 @@ class AgentData(ABC, Generic[ObsType, ActType]):
         return
 
     @abstractmethod
-    def encode_observation(self, observation: ObsType, *, is_init: bool) -> tuple[list[int], bool]:
-        """Encode an environment observation into token IDs.
+    async def encode_observation(
+        self,
+        observation: ObsType,
+        images: list[Image.Image] | None = None,
+        videos: list[tuple[torch.Tensor, dict]] | None = None,
+        is_init: bool = False,
+    ) -> tuple[list[int], bool]:
+        """Encode an environment observation into token IDs (async).
+
+        Implementations should offload blocking tokenizer calls to the default
+        executor (``asyncio.get_running_loop().run_in_executor(None, ...)``) so
+        the event loop is not blocked.
 
         Default implementation indicates "not implemented" so subclasses can
         keep implementing `update_from_env` directly.
@@ -351,7 +431,7 @@ class AgentData(ABC, Generic[ObsType, ActType]):
     async def update_from_env(
         self,
         observation: ObsType,
-        reward: float | None,
+        reward: float | list[float] | None,
         done: bool,
         info: dict,
         **kwargs,
@@ -395,6 +475,14 @@ class AgentData(ABC, Generic[ObsType, ActType]):
         """
         raise NotImplementedError(f"{self.__class__.__name__} must implement update_from_model_token_ids method.")
 
+    def prepare_chat_completion_request(self) -> tuple[list[dict], list[dict] | None]:
+        """Build (messages, tools) for the chat completion API.
+
+        Returns:
+            Tuple of (messages list, tools list or None).
+        """
+        raise NotImplementedError(f"{self.__class__.__name__} must implement prepare_chat_completion_request method.")
+
     async def update_from_model_chat_completion(self, output: Any, **kwargs) -> tuple[ActType, bool]:
         """Update agent data from model chat completion output.
 
@@ -416,35 +504,52 @@ class AgentData(ABC, Generic[ObsType, ActType]):
             f"{self.__class__.__name__} must implement update_from_model_chat_completion method."
         )
 
-    def update_trajectory_state_from_output(self, output: DataProto, **kwargs):
+    def update_trajectory_state_from_output(self, output: TokenOutput, **kwargs):
         """Update trajectory state based on model output dataproto."""
-        self.trajectory.curr_rollout_instance_id = output.non_tensor_batch.get("rollout_instance_id", [None])[0]
-        self.trajectory.curr_version_tag = output.non_tensor_batch.get("version_tag", [None])[0]
-        self.get_current_step().info["rollout_instance_id"] = output.non_tensor_batch.get(
-            "rollout_instance_id", [None]
-        )[0]
+        self.session_data.curr_rollout_instance_id = output.rollout_instance_id
+        self.get_current_step().info["rollout_instance_id"] = output.rollout_instance_id
 
-    def prepare_generation_request(self, request: DataProto) -> DataProto:
+    def prepare_generation_request(self, request: dict) -> dict:
         """Prepare the generation request based on the current agent data state.
 
         Args:
-            request (DataProto): Original input request.
+            request (dict): Original input request.
 
         Returns:
-            DataProto: Modified request for generation.
+            dict: Modified request for generation.
         """
-        assert len(request) == 1, "prepare_generation_request only supports single request."
-        assert "input_ids" in request.batch, "Request must contain 'input_ids' in batch."
+        request["raw_prompt_ids"] = np.array(self.session_data.trajectories[-1].prompt_ids)
+        request["raw_response_ids"] = np.array(self.session_data.trajectories[-1].response_ids)
+        if self.session_data.curr_rollout_instance_id is not None:
+            request["rollout_instance_id"] = self.session_data.curr_rollout_instance_id
 
-        request.non_tensor_batch["raw_prompt_ids"] = np.array(
-            [self.trajectory.prompt_ids + self.trajectory.response_ids]
-        )
-        if self.trajectory.curr_rollout_instance_id is not None:
-            request.non_tensor_batch["rollout_instance_id"] = np.array([self.trajectory.curr_rollout_instance_id])
-        if self.trajectory.curr_version_tag is not None:
-            request.non_tensor_batch["version_tag"] = np.array([self.trajectory.curr_version_tag])
+        # Propagate accumulated multi-modal data so generate_sequence() can
+        # forward it to the inference backend on every turn.
+        if (
+            self.session_data.trajectories[-1].image_data is not None
+            or self.session_data.trajectories[-1].video_data is not None
+        ):
+            mm: dict = {}
+            if self.session_data.trajectories[-1].image_data is not None:
+                mm["images"] = self.session_data.trajectories[-1].image_data
+            if self.session_data.trajectories[-1].video_data is not None:
+                mm["videos"] = self.session_data.trajectories[-1].video_data
+            request["multi_modal_data"] = mm
 
         return request
+
+    def prepare_chat_completion_multimodal_data(self) -> dict | None:
+        """Return accumulated multimodal media for session chat normalization."""
+        trajectory = self.session_data.trajectories[-1]
+        if trajectory.image_data is None and trajectory.video_data is None:
+            return None
+
+        mm_data: dict[str, Any] = {}
+        if trajectory.image_data is not None:
+            mm_data["images"] = trajectory.image_data
+        if trajectory.video_data is not None:
+            mm_data["videos"] = trajectory.video_data
+        return mm_data
 
     def compute_step_reward(self, step: Step) -> float:
         """
@@ -456,7 +561,8 @@ class AgentData(ABC, Generic[ObsType, ActType]):
         Returns:
             The computed step reward.
         """
-        tool_reward = step.tool_reward if step.tool_reward is not None else 0.0
+        # TODO(linsh): Preserve separate tool rewards for detailed credit assignment.
+        tool_reward = np.sum(step.tool_reward) if step.tool_reward is not None else 0.0
         model_reward = step.model_reward if step.model_reward is not None else 0.0
         step.reward = tool_reward + model_reward
         return step.reward
@@ -474,8 +580,7 @@ class AgentData(ABC, Generic[ObsType, ActType]):
         Args:
             trajectory: The trajectory to adjust the rewards for.
         """
-        # Reward shaping: add bonus proportional to reward deltas
-        # Formula: s[i].reward = s[i].reward + bonus * (s[i].reward - s[i-1].reward) for i > 0
+        # Reward shaping uses deltas from the unmodified rewards.
         if self.reward_bonus_coeff > 0.0:
             raw_rewards = [step.reward for step in trajectory.steps]
             for i in range(1, len(trajectory.steps)):
@@ -489,108 +594,110 @@ class AgentData(ABC, Generic[ObsType, ActType]):
                 G = step.reward + self.gamma * G
                 step.reward = G  # Replace the reward with MC return
 
-    async def finalize_output(self, request: DataProto) -> DataProto:
-        """Finalize the trajectory and prepare output for training.
+    async def finalize_output(self) -> TokenOutput | list[TokenOutput] | None:
+        """Finalize the trajectory and prepare output for reward computation."""
+        response_length = self.config.gen_actor_rollout_ref.rollout.response_length
 
-        This method truncates sequences to the maximum response length, computes
-        final rewards, and packages the trajectory data into a format suitable
-        for training.
+        outputs = []
+        for trajectory in self.session_data.trajectories:
+            trajectory.response_ids = trajectory.response_ids[:response_length]
+            trajectory.response_mask = trajectory.response_mask[:response_length]
+            trajectory.response_logprobs = trajectory.response_logprobs[:response_length]
+            if not trajectory.response_ids:
+                psrl_logger.error(
+                    "finalize_output: empty response_ids for uid=%s, "
+                    "prompt_ids_len=%d, response_length_cfg=%d, "
+                    "num_trajectories=%d, assistant_turns=%d, user_turns=%d",
+                    self.session_data.request_id,
+                    len(trajectory.prompt_ids),
+                    response_length,
+                    len(self.session_data.trajectories),
+                    self.session_data.assistant_turns,
+                    self.session_data.user_turns,
+                )
 
-        Args:
-            request: Original request DataProto containing metadata.
+            multi_modal_data = None
+            if trajectory.image_data is not None or trajectory.video_data is not None:
+                multi_modal_data = {}
+                if trajectory.image_data is not None:
+                    multi_modal_data["images"] = trajectory.image_data
+                if trajectory.video_data is not None:
+                    multi_modal_data["videos"] = trajectory.video_data
 
-        Returns:
-            DataProto: Finalized output with rewards and trajectory information.
-        """
-        self.trajectory.response_ids = self.trajectory.response_ids[
-            : self.config.gen_actor_rollout_ref.rollout.response_length
-        ]
-        self.trajectory.response_mask = self.trajectory.response_mask[
-            : self.config.gen_actor_rollout_ref.rollout.response_length
-        ]
-        self.trajectory.response_logprobs = self.trajectory.response_logprobs[
-            : self.config.gen_actor_rollout_ref.rollout.response_length
-        ]
-
-        non_tensor_batch = request.non_tensor_batch
-        non_tensor_batch["raw_prompt_ids"] = np.array([self.trajectory.prompt_ids])
-        non_tensor_batch["raw_response_ids"] = np.array([self.trajectory.response_ids])
-        non_tensor_batch["response_mask"] = np.array([self.trajectory.response_mask])
-        non_tensor_batch["rollout_instance_id"] = np.array([self.trajectory.curr_rollout_instance_id])
-        non_tensor_batch["__num_turns__"] = np.array(
-            [self.trajectory.assistant_turns + self.trajectory.user_turns + 1], dtype=np.int32
-        )
-        if len(self.trajectory.response_logprobs) > 0:
-            non_tensor_batch["rollout_log_probs"] = np.array([self.trajectory.response_logprobs])
-
-        data = DataProto(non_tensor_batch=non_tensor_batch, meta_info=request.meta_info)
-
-        output: DataProto = data
+            output: TokenOutput = TokenOutput(
+                prompt_ids=trajectory.prompt_ids,
+                response_ids=trajectory.response_ids,
+                response_mask=trajectory.response_mask,
+                response_log_probs=(trajectory.response_logprobs if len(trajectory.response_logprobs) > 0 else None),
+                routed_experts=(
+                    trajectory.routed_experts[: len(trajectory.prompt_ids) + response_length]
+                    if len(trajectory.routed_experts) > 0
+                    else None
+                ),
+                multi_modal_data=multi_modal_data,
+                # TODO(linsh): Check whether to use the global turn count.
+                num_turns=self.session_data.assistant_turns + self.session_data.user_turns + 1,
+                rollout_instance_id=self.session_data.curr_rollout_instance_id,
+                agent_reward_info=self.session_data.agent_reward_info,
+                extra_fields={
+                    "tool_rewards": trajectory.tool_rewards,
+                    "turn_scores": trajectory.turn_scores,
+                },
+            )
+            outputs.append(output)
 
         if self.config.gen_actor_rollout_ref.rollout.agent.traj_reward_mode == "step":
-            assert not self.config.reward_models_config.launch_reward_fn_async, (
+            assert not self.config.reward.launch_reward_fn_async, (
                 "Asynchronous reward computation is not supported in 'step' traj_reward_mode."
             )
-            self.trajectory.reward = np.sum([self.compute_step_reward(step) for step in self.trajectory.steps])
-            if len(self.trajectory.steps) > 1:
-                self.adjust_step_rewards(self.trajectory)
-            reward_result = {non_tensor_batch["uid"][0]: {"reward_score": self.trajectory.reward}}
-            output = self._post_process_and_merge_reward(reward_result, data)
+            for trajectory, output in zip(self.session_data.trajectories, outputs):
+                trajectory.reward = np.sum([self.compute_step_reward(step) for step in trajectory.steps])
+                if len(trajectory.steps) > 1:
+                    self.adjust_step_rewards(trajectory)
+                output.reward_score = trajectory.reward
         elif self.config.gen_actor_rollout_ref.rollout.agent.traj_reward_mode == "traj":
-            if not data.meta_info.get("validate", False):
-                reward_result = await self.reward_manager.compute_score.remote(data)
-                if not self.config.reward_models_config.launch_reward_fn_async:
-                    output = self._post_process_and_merge_reward(reward_result, data)
+            # NOTE(linsh): Only compute reward for the last trajectory.
+            final_output = outputs[-1]
+            tensor_dict = {
+                "prompts": torch.tensor(final_output.prompt_ids, dtype=torch.int64).unsqueeze(0),
+                "responses": torch.tensor(final_output.response_ids, dtype=torch.int64).unsqueeze(0),
+                "multi_modal_data": np.array([final_output.multi_modal_data], dtype=object),
+                "num_turns": np.array([final_output.num_turns]),
+                "tool_extra_fields": np.array([final_output.extra_fields], dtype=object),
+                "uid": np.array([self.session_data.request_id]),
+                "n_trajectory": np.array([len(outputs)]),
+                "data_source": np.array([self.session_data.data_source]),
+                "reward_model": np.array([self.session_data.reward_model], dtype=object),
+                "extra_info": np.array([self.session_data.extra_info], dtype=object),
+                "agent_reward_info": np.array([self.session_data.agent_reward_info], dtype=object),
+                "reward_model_dicts": as_object_sample(self.session_data.reward_model_dicts),
+            }
+            if self.session_data.parent_id is not None:
+                tensor_dict["parent_id"] = np.array([self.session_data.parent_id])
+
+            reward_data = tu.get_tensordict(
+                tensor_dict=tensor_dict,
+                non_tensor_dict={
+                    "validate": self.session_data.validate,
+                },
+            )
+
+            reward_result = await self.reward_manager.compute_score(reward_data)
+            if not self.config.reward.launch_reward_fn_async:
+                if not reward_result:
+                    return None
+                # Broadcast to all trajectories
+                for output in outputs:
+                    output.reward_score = reward_result["reward_score"]
+                    output.extra_fields["reward_extra_info"] = reward_result["reward_extra_info"]
+                    output.extra_fields["reward_metrics"] = reward_result.get("reward_metrics", {})
         else:
             raise ValueError(
                 f"Unknown traj_reward_mode: {self.config.gen_actor_rollout_ref.rollout.agent.traj_reward_mode}"
             )
 
-        return output
-
-    def _post_process_and_merge_reward(self, reward_result: dict[int, dict], outputs: DataProto) -> DataProto:
-        """Merge the computed reward results back into the output DataProto.
-
-        This method updates the output data with the reward scores and any additional
-        information returned by the reward model.
-
-        Args:
-            reward_result (Dict[int, dict]): Computed reward results indexed by data item.
-            outputs (DataProto): Original output data to be updated.
-
-        Returns:
-            DataProto: Updated output data with reward information.
-        """
-        if outputs.meta_info.get("validate", False):
-            return outputs  # Skip merging for validation data
-
-        filtered_request_ids = list(reward_result.keys())
-        filtered_request_idxs = [
-            idx for idx, uid in enumerate(outputs.non_tensor_batch["uid"].tolist()) if uid in filtered_request_ids
-        ]
-        outputs = outputs.select_idxs(filtered_request_idxs)
-        request_ids = outputs.non_tensor_batch["uid"].tolist()
-
-        rewards = []
-        reward_extra_infos = []
-        reward_metrics = []
-        rm_input_token_nums = []
-        rm_generated_token_nums = []
-        for request_id in request_ids:
-            assert request_id in reward_result, f"Missing reward result for request ID: {request_id}"
-            result = reward_result[request_id]
-            rewards.append(result["reward_score"])
-            extra_info = result.get("reward_extra_info", {})
-            reward_extra_infos.append(extra_info)
-            reward_metrics.append(result.get("reward_metrics", {}))
-            rm_input_token_num, rm_generated_token_num = extract_reward_model_token_counts(extra_info)
-            rm_input_token_nums.append(rm_input_token_num)
-            rm_generated_token_nums.append(rm_generated_token_num)
-        outputs.non_tensor_batch["reward_scores"] = np.array(rewards)
-        outputs.non_tensor_batch["reward_extra_infos"] = np.array(reward_extra_infos, dtype=object)
-        outputs.non_tensor_batch["reward_metrics"] = np.array(reward_metrics, dtype=object)
-        outputs.non_tensor_batch["rm_input_token_num"] = np.array(rm_input_token_nums, dtype=np.int64)
-        outputs.non_tensor_batch["rm_generated_token_num"] = np.array(rm_generated_token_nums, dtype=np.int64)
+        if len(outputs) == 1:
+            return outputs[0]
         return outputs
 
     @classmethod

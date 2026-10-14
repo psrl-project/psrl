@@ -9,9 +9,18 @@ from __future__ import annotations
 
 import importlib
 import os
+import sys
 from typing import Any
 
 from omegaconf import DictConfig, OmegaConf
+
+
+def prepend_python_library_path(ld_library_path: str | None = None) -> str:
+    """Prepend the active Python environment's native library directory."""
+    python_library_path = os.path.join(sys.prefix, "lib")
+    current_value = os.environ.get("LD_LIBRARY_PATH", "") if ld_library_path is None else ld_library_path
+    paths = [python_library_path, *current_value.split(os.pathsep)]
+    return os.pathsep.join(dict.fromkeys(path for path in paths if path))
 
 
 def build_ray_train_worker_tms_env(psrl_config: DictConfig | dict[str, Any] | None) -> dict[str, str] | None:
@@ -38,6 +47,7 @@ def build_ray_train_worker_tms_env(psrl_config: DictConfig | dict[str, Any] | No
 
     return {
         "LD_PRELOAD": dynlib_path,
+        "LD_LIBRARY_PATH": prepend_python_library_path(),
         "TMS_INIT_ENABLE": "1",
         "TMS_INIT_ENABLE_CPU_BACKUP": "0",
         "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:False",

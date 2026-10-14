@@ -1,5 +1,6 @@
 import math
 from collections.abc import Callable
+from datetime import datetime
 from typing import Any
 
 Processor = Callable[[dict[str, Any]], tuple[bool, dict[str, float], Any]]
@@ -18,6 +19,14 @@ def build_processor(processor_name: str) -> Processor:
         return make_instance_request_num_indexed_by_time_processor()
     elif processor_name == "instance_throughput_indexed_by_time":
         return make_instance_throughput_indexed_by_time_processor()
+    elif processor_name == "instance_kv_cache_indexed_by_time":
+        return make_instance_kv_cache_indexed_by_time_processor()
+    elif processor_name == "instance_request_num_indexed_by_time_smg":
+        return make_instance_request_num_indexed_by_time_smg_processor()
+    elif processor_name == "instance_throughput_indexed_by_time_smg":
+        return make_instance_throughput_indexed_by_time_smg_processor()
+    elif processor_name == "instance_kv_cache_indexed_by_time_smg":
+        return make_instance_kv_cache_indexed_by_time_smg_processor()
     else:
         raise ValueError(f"Invalid processor name: {processor_name}")
 
@@ -283,6 +292,149 @@ def make_instance_throughput_indexed_by_time_processor() -> Processor:
             True,
             {"generation_throughput": generation_throughput},
             total_elapsed_time,
+        )
+
+    return processor
+
+
+def make_instance_kv_cache_indexed_by_time_processor() -> Processor:
+    """
+    Return a processor(obj) -> (keep: bool, values: dict, x_value)
+
+    - x_value: total_elapsed_time
+    - values: {"kv_cache_usage": float}
+    """
+
+    def processor(obj: dict[str, Any]) -> tuple[bool, dict[str, float], int]:
+        if "total_elapsed_time" not in obj:
+            return False, {}, None
+
+        total_elapsed_time = float(obj["total_elapsed_time"])
+
+        scheduler_stats = obj.get("scheduler_stats")
+        if not isinstance(scheduler_stats, dict):
+            return False, {}, None
+
+        kv_cache_usage = scheduler_stats.get("kv_cache_usage")
+        if kv_cache_usage is None:
+            return False, {}, None
+        try:
+            kv_cache_usage_val = float(kv_cache_usage)
+        except Exception:
+            return False, {}, None
+        if not math.isfinite(kv_cache_usage_val):
+            return False, {}, None
+
+        return (
+            True,
+            {"kv_cache_usage": kv_cache_usage_val},
+            total_elapsed_time,
+        )
+
+    return processor
+
+
+# --- SMG flat schema processors ---
+
+
+def _smg_elapsed_seconds(obj: dict[str, Any], state: dict[str, Any]):
+    """
+    Return relative seconds for the x-axis, or None if unavailable.
+
+    Prefer `total_elapsed_time`. Otherwise, derive elapsed
+    seconds from the absolute ``ts`` timestamp using this file's first row as t0.
+    """
+    if "total_elapsed_time" in obj:
+        try:
+            return float(obj["total_elapsed_time"])
+        except Exception:
+            return None
+
+    ts = obj.get("ts")
+    if not isinstance(ts, str):
+        return None
+    try:
+        t = datetime.fromisoformat(ts)
+    except Exception:
+        return None
+    if state["t0"] is None:
+        state["t0"] = t
+    return (t - state["t0"]).total_seconds()
+
+
+def make_instance_request_num_indexed_by_time_smg_processor() -> Processor:
+    """SMG flat-schema variant of instance_request_num_indexed_by_time."""
+    state = {"t0": None}
+
+    def processor(obj: dict[str, Any]) -> tuple[bool, dict[str, float], int]:
+        x = _smg_elapsed_seconds(obj, state)
+        if x is None:
+            return False, {}, None
+
+        if "num_running_reqs" not in obj or "num_waiting_reqs" not in obj:
+            return False, {}, None
+        running_request_num = obj["num_running_reqs"]
+        waiting_request_num = obj["num_waiting_reqs"]
+        request_num = running_request_num + waiting_request_num
+
+        return (
+            True,
+            {"request_num": request_num, "running_request_num": running_request_num},
+            x,
+        )
+
+    return processor
+
+
+def make_instance_throughput_indexed_by_time_smg_processor() -> Processor:
+    """SMG flat-schema variant of instance_throughput_indexed_by_time."""
+    state = {"t0": None}
+
+    def processor(obj: dict[str, Any]) -> tuple[bool, dict[str, float], int]:
+        x = _smg_elapsed_seconds(obj, state)
+        if x is None:
+            return False, {}, None
+
+        generation_throughput = obj.get("generation_throughput")
+        if generation_throughput is None:
+            return False, {}, None
+        try:
+            generation_throughput = float(generation_throughput)
+        except Exception:
+            return False, {}, None
+
+        return (
+            True,
+            {"generation_throughput": generation_throughput},
+            x,
+        )
+
+    return processor
+
+
+def make_instance_kv_cache_indexed_by_time_smg_processor() -> Processor:
+    """SMG flat-schema variant of instance_kv_cache_indexed_by_time."""
+    state = {"t0": None}
+
+    def processor(obj: dict[str, Any]) -> tuple[bool, dict[str, float], int]:
+        x = _smg_elapsed_seconds(obj, state)
+        if x is None:
+            return False, {}, None
+
+        kv_cache_usage = obj.get("kv_cache_usage")
+        if kv_cache_usage is None:
+            return False, {}, None
+        try:
+            kv_cache_usage_val = float(kv_cache_usage)
+        except Exception:
+            return False, {}, None
+        if not math.isfinite(kv_cache_usage_val):
+            return False, {}, None
+
+        return (
+            True,
+            {"kv_cache_usage": kv_cache_usage_val},
+            x,
         )
 
     return processor

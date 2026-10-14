@@ -1,4 +1,3 @@
-# Modified from verl/utils/reward_score/sandbox_fusion/__init__.py and utils.py
 import asyncio
 import json
 import logging
@@ -9,11 +8,6 @@ from typing import Any
 from psrl.tools.base import Tool
 from psrl.tools.sandbox_fusion_tool import DEFAULT_TIMEOUT
 
-"""
-Verify code correctness using the Sandbox Fusion (https://github.com/bytedance/SandboxFusion).
-You can either deploy the sandbox_fusion service yourself or use the
-FaaS service provided by public cloud, eg: volcengine.com.
-"""
 psrl_logger = logging.getLogger(__file__)
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
 
@@ -28,10 +22,7 @@ async def compute_score(
     timeout=10,
 ):
     """
-    Computes the code score using the remote sandbox API via SandboxFusionTool.
-
-    This function now uses the SandboxFusionTool for code execution, which provides
-    a unified interface for both tool calling and reward scoring.
+    Compute the code score with the remote `SandboxFusionTool`.
 
     Args:
         completion: The completion string containing the code.
@@ -51,14 +42,13 @@ async def compute_score(
     if "```python" in completion:
         solution = completion.split("```python")[-1].split("```")[0]
     elif "```" in completion:
-        # Handle cases like ```\ncode\n```
+        # Accept unlabeled fenced blocks such as ````\ncode\n````.
         parts = completion.split("```")
         if len(parts) >= 2:
             solution = parts[1]
-            # Remove potential language specifier like 'python\n'
             if "\n" in solution:
                 first_line, rest = solution.split("\n", 1)
-                if first_line.strip().isalpha():  # Simple check for language name
+                if first_line.strip().isalpha():
                     solution = rest
     else:
         return 0.0, [{"error": "Invalid completion (missing code block)"}]
@@ -79,10 +69,6 @@ async def compute_score(
             psrl_logger.error("Invalid test_cases structure.")
             return 0.0, [{"error": "Invalid test_cases structure (missing inputs/outputs)"}]
 
-        # Check all test cases
-        # Note: The return value of check_correctness might need adaptation here
-        # Assume check_correctness returns (results_list, metadata_list)
-        # results_list contains True, False, or error codes (-1, -2, -3, etc.)
         res_list, metadata_list = await check_correctness(
             sandbox_fusion_url=sandbox_fusion_url,
             in_outs=test_cases,
@@ -92,22 +78,18 @@ async def compute_score(
             memory_limit_mb=memory_limit_mb,
         )
 
-        # Calculate score
-        if not res_list:  # If there are no results (e.g., invalid input)
+        if not res_list:
             return 0.0, metadata_list
 
         if continuous:
-            # Calculate pass rate for the first N (e.g., 10) test cases
             num_to_consider = min(len(res_list), 10)
             if num_to_consider == 0:
                 score = 0.0
             else:
                 passed_count = sum(1 for r in res_list[:num_to_consider] if r is True)
                 score = passed_count / num_to_consider
-            # Return all metadata, even if score is based on the first N
             final_metadata = metadata_list
         else:
-            # Calculate pass rate for all test cases
             passed_count = sum(1 for r in res_list if r is True)
             total_cases = len(res_list)
             score = passed_count / total_cases if total_cases > 0 else 0.0
@@ -117,10 +99,8 @@ async def compute_score(
         psrl_logger.error(f"Error during compute_score: {e}")
         traceback.print_exc()
         score = 0.0
-        # Try to return partial metadata if available, otherwise return error info
         final_metadata = metadata_list if "metadata_list" in locals() else [{"error": f"Unhandled exception: {e}"}]
 
-        # Ensure float and list are returned
     return float(score), final_metadata if isinstance(final_metadata, list) else [final_metadata]
 
 
@@ -164,9 +144,9 @@ async def check_correctness(
     expected_outputs = in_outs["outputs"]
     fn_name = in_outs.get("fn_name")
     num_cases = len(inputs)
-    assert_cases = in_outs.get("assert_case", [""] * num_cases)  # Default to empty strings if not provided
-    results = [None] * num_cases  # Initialize with placeholders
-    metadata_list = [None] * num_cases  # Initialize with placeholders
+    assert_cases = in_outs.get("assert_case", [""] * num_cases)
+    results = [None] * num_cases
+    metadata_list = [None] * num_cases
 
     if num_cases == 0:
         psrl_logger.warning("Empty inputs provided.")
@@ -176,10 +156,8 @@ async def check_correctness(
         psrl_logger.warning(
             f"Mismatch between number of inputs ({len(inputs)}) and outputs ({len(expected_outputs)})."
         )
-        # Return error based on the number of inputs provided
         return [-1] * num_cases, [{"error": "Input/output count mismatch", "case_index": i} for i in range(num_cases)]
 
-    # If assert_cases is provided, it overrides inputs and outputs
     if len(assert_cases) != num_cases:
         psrl_logger.warning(
             f"Mismatch between number of assert cases ({len(assert_cases)}) and inputs/outputs ({num_cases})."
@@ -188,7 +166,6 @@ async def check_correctness(
 
     first_compile_error_index = -1
 
-    # Get SandboxFusionTool from registry instead of direct import
     tool = Tool.get_tool(
         "sandbox_fusion",
         sandbox_fusion_url=sandbox_fusion_url,
@@ -197,10 +174,9 @@ async def check_correctness(
     )
     assert tool.has_async_forward, "SandboxFusionTool must have async_forward implemented."
 
-    # Create async tasks for all test cases
     tasks = [
         tool(
-            code=generation + "\n\n" + assert_cases[i],  # Append assert case to generation
+            code=generation + "\n\n" + assert_cases[i],
             case_index=i,
             stdin_data=stdin_data,
             expected_output=expected_outputs[i],
@@ -213,14 +189,12 @@ async def check_correctness(
         for i, stdin_data in enumerate(inputs)
     ]
 
-    # Process all tasks concurrently
     task_results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    # Process results
     for i, task_result in enumerate(task_results):
         if task_result.error:
-            psrl_logger.error(f"Test case {i} generated an error: {task_result.error}")
-            results[i] = -1  # Mark as API/internal error
+            psrl_logger.error(f"Test case index={i} generated an error: {task_result.error}")
+            results[i] = -1
             metadata_list[i] = {
                 "case_index": i,
                 "input": str(inputs[i]),
@@ -234,30 +208,26 @@ async def check_correctness(
             results[i] = result_status
             metadata_list[i] = metadata
 
-            # Check for compile error (-4)
             if result_status == -4:
                 if first_compile_error_index == -1 or i < first_compile_error_index:
                     first_compile_error_index = i
 
-    # Post-processing for compile errors
     if first_compile_error_index != -1:
         psrl_logger.warning(
             f"Compile error detected in case {first_compile_error_index}. Marking subsequent cases as compile errors."
         )
         for i in range(first_compile_error_index + 1, num_cases):
-            # Only update if not already a compile error
             if results[i] != -4:
                 results[i] = -4
-                # Update metadata for skipped cases due to compile error
                 if metadata_list[i] is None:
                     metadata_list[i] = {
                         "case_index": i,
                         "input": str(inputs[i]),
                         "expected_output": str(expected_outputs[i]) if expected_outputs[i] else None,
                         "api_request_error": None,
-                        "status": "compile_error_skipped",  # Indicate skipped due to prior compile error
+                        "status": "compile_error_skipped",
                     }
-                else:  # If future completed but result is overridden
+                else:
                     metadata_list[i]["status"] = "compile_error_skipped"
 
     psrl_logger.info(f"Correctness check finished. Results: {results}")

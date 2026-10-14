@@ -6,7 +6,6 @@ setup(
     description="Clean vLLM modifications via the plugin system",
     packages=find_packages(),
     install_requires=[
-        "vllm>=0.12.0",
         "packaging>=20.0",
     ],
     # Register with vLLM's plugin system

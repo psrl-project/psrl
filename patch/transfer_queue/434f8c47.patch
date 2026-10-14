@@ -1,0 +1,22 @@
+diff --git a/transfer_queue/controller.py b/transfer_queue/controller.py
+index 1182a44..7eb569e 100644
+--- a/transfer_queue/controller.py
++++ b/transfer_queue/controller.py
+@@ -527,9 +527,15 @@ class DataPartitionStatus:
+             # Register new fields if needed
+             new_fields = [f for f in field_names if f not in self.field_name_mapping]
+             if new_fields:
+-                # Add new fields to mapping
++                # Atomic dict replacement (copy-on-write): concurrent iterators
++                # on the old dict object are unaffected because CPython's GIL
++                # makes attribute store atomic.  This eliminates the
++                # "dictionary changed size during iteration" race between the
++                # _process_request thread (iterating) and this thread (adding).
++                updated = {**self.field_name_mapping}
+                 for f in new_fields:
+-                    self.field_name_mapping[f] = len(self.field_name_mapping)
++                    updated[f] = len(updated)
++                self.field_name_mapping = updated
+ 
+                 required_fields = len(self.field_name_mapping)
+                 self.ensure_fields_capacity(required_fields)

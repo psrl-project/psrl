@@ -1,0 +1,14 @@
+# Whether to enable redundant rollout
+enable: False
+
+# Global batch size for algorithm requirement
+alg_global_batch_size: ${psrl.staleness_buffer_entries}
+
+# Number of responses for algorithm requirement
+alg_rollout_n: ${psrl.rollout_n}
+
+# Actual global batch size (>= algorithm requirement)
+redundant_global_batch_size: ${psrl.staleness_buffer_entries}
+
+# Actual number of responses (>= algorithm requirement)
+redundant_rollout_n: ${psrl.rollout_n}

@@ -1,0 +1,113 @@
+- name: mini_swe_agent
+  _target_: psrl.workers.agent_loop.loops.mini_swe_agent_loop_v1.MiniSWEAgentLoopV1
+  sandbox_config:
+    # Cap concurrent Docker rollouts per AgentLoopWorker. Unlimited (0) overloads
+    # the local docker daemon and causes `docker run` to hit pull_timeout.
+    max_parallel_tasks_per_worker: 8
+    # Per-turn timeout forwarded to mini-swe-agent's model client.
+    rollout_turn_timeout: 480
+    environment:
+      image: "python:3.11-slim"
+      container_timeout: "2h"
+      grader_memory: "10g"   # toy repos don't need as much as real SWEbench
+  agent:
+    system_template: |
+      You are a helpful assistant that can interact with a computer to solve programming tasks.
+
+      Your response must contain exactly ONE bash code block with ONE command (or commands connected with && or ||).
+      Include a THOUGHT section before your command where you explain your reasoning process.
+      Format your response as shown in <format_example>.
+
+      <format_example>
+      Your reasoning and analysis here. Explain why you want to perform the action.
+
+      ```mswea_bash_command
+      your_command_here
+      ```
+      </format_example>
+
+      Failure to follow these rules will cause your response to be rejected.
+    problem_template: |
+      Please solve this issue:
+
+      {{ task }}
+
+      ## Working Directory
+
+      Your working directory is `{{ cwd }}`. This is a git repository.
+      All commands execute in a new subshell starting from `{{ cwd }}`, so directory
+      changes are NOT persistent. Always prefix commands with `cd {{ cwd }} && ...`
+      if you need to be in a specific subdirectory.
+
+      <IMPORTANT>
+      - MODIFY: Source code files in `{{ cwd }}`.
+      - DO NOT MODIFY: Test files, configuration files (pyproject.toml, setup.cfg, etc.).
+      </IMPORTANT>
+
+      ## Recommended Workflow
+
+      1. Explore the repository structure: `ls -la` or `find . -name '*.py'`
+      2. Read the relevant source file(s) to understand the bug
+      3. Make the minimal necessary changes to fix the issue
+      4. Verify your changes (run tests if available, or write a quick check)
+      5. Submit your changes as a git patch (see Submission below)
+
+      ## Submission
+
+      When you have completed your work, submit your changes as a git patch.
+      Follow these steps IN ORDER, with SEPARATE commands:
+
+      Step 1: Create the patch file.
+      ```mswea_bash_command
+      cd {{ cwd }} && git diff HEAD > /tmp/patch.txt
+      ```
+
+      Step 2: Verify the patch is non-empty and contains only your intended changes.
+      ```mswea_bash_command
+      cat /tmp/patch.txt
+      ```
+
+      Step 3: Submit with this EXACT command (do NOT modify it).
+      ```mswea_bash_command
+      echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat /tmp/patch.txt
+      ```
+
+      <CRITICAL>
+      - Creating the patch, verifying it, and submitting MUST be separate commands.
+      - If you modify files after creating the patch, you MUST recreate it before submitting.
+      - You CANNOT continue working on this task after submitting.
+      </CRITICAL>
+
+      <system_information>
+      {{ system }} {{ release }} {{ version }} {{ machine }}
+      </system_information>
+
+      ## Useful command examples
+
+      ### Create a new file:
+
+      ```mswea_bash_command
+      cat <<'EOF' > newfile.py
+      import numpy as np
+      hello = "world"
+      print(hello)
+      EOF
+      ```
+
+      ### Edit files with sed:
+
+      ```mswea_bash_command
+      sed -i 's/old_string/new_string/g' filename.py
+      ```
+
+      ### View file content:
+
+      ```mswea_bash_command
+      nl -ba filename.py | sed -n '10,20p'
+      ```
+  model:
+    # Training and evaluation share this action format.
+    # Update the system template when changing `action_regex`.
+    action_regex: "```mswea_bash_command\\s*\\n(.*?)\\n```"
+    observation_template: "{% if output.exception_info %}<exception>{{output.exception_info}}</exception>\n{% endif %}<returncode>{{output.returncode}}</returncode>\n<output>\n{{output.output}}</output>"
+    format_error_template: "Please always provide EXACTLY ONE action in triple backticks, found {{actions|length}} actions."

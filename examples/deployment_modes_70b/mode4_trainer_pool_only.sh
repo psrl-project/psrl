@@ -50,16 +50,16 @@ export PSRL_DEPLOY_RM_NUM_REPLICAS=4
 export PSRL_DEPLOY_SMOKE=${1:-0}
 shift || true
 
-# Mode 4 deliberately does NOT set the elastic_rm policy / cooldown / itl_policy /
+# Mode 4 deliberately does NOT set the elastic policy / cooldown / throughput_optimal /
 # coordinator_command_timeout_s block that mode 5 uses: resolve_deployment_mode
-# forces elastic_rm.enable=False + enable_policy=False for trainer_pool_only, so
+# forces elastic.enable=False + enable_policy=False for trainer_pool_only, so
 # no ElasticExecutor / ScalingPolicy / monitor loop is created and those knobs
 # are inert. Mode 4 drives its idle replicas directly via coordinator
 # exec_command (SLEEP/WAKE_UP) + actor NIXL sleep/wake, gated by the two counts
 # below. Override PSRL_DEPLOY_EXTRA to add any extra hydra flags if needed.
 export PSRL_DEPLOY_EXTRA="\
-psrl.deployment.trainer_pool_idle_rollout_instances=${IDLE_ROLLOUT_INSTANCES} \
-psrl.deployment.trainer_pool_idle_rm_instances=${IDLE_RM_INSTANCES} \
++psrl.deployment.trainer_pool_idle_rollout_instances=${IDLE_ROLLOUT_INSTANCES} \
++psrl.deployment.trainer_pool_idle_rm_instances=${IDLE_RM_INSTANCES} \
 "
 
 launch_deployment_mode "$@"

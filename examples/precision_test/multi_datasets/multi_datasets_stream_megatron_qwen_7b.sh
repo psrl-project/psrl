@@ -9,7 +9,7 @@ experiment_name='math-only-multi-datasets-stream-megatron-qwen-7b'
 # Get the directory where this script is located
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-source ${PSRL_WORKSPACE}/env/env_311.sh
+source ${PSRL_WORKSPACE}/env/psrl.sh
 
 HOME=${PSRL_WORKSPACE}
 PSRL_PATH=$(python -c "import psrl; import os; print(os.path.dirname(os.path.dirname(psrl.__file__)))")
@@ -18,9 +18,19 @@ HF_MODEL_PATH=${PSRL_WORKSPACE}/models/Qwen2.5-7B
 DIST_CKPT_PATH=${PSRL_WORKSPACE}/models/mcore_ckpt/Qwen2.5-7B
 # python ${PSRL_PATH}/scripts/convert_hf_to_mcore.py --hf_model_path $HF_MODEL_PATH --output_path $DIST_CKPT_PATH
 
-# data
-# TRAIN_FILE=${PSRL_WORKSPACE}/data/dapo/dapo-math-17k.parquet
-# TEST_FILE=${PSRL_WORKSPACE}/data/dapo/aime-2024.parquet
+GSM8K_TRAIN=${PSRL_WORKSPACE}/data/gsm8k_verl/train.parquet
+GSM8K_TEST=${PSRL_WORKSPACE}/data/gsm8k_verl/test.parquet
+DAPO_TRAIN=${PSRL_WORKSPACE}/data/dapo/dapo-math-17k.parquet
+DAPO_VAL=${PSRL_WORKSPACE}/data/dapo/aime-2024.parquet
+_DS_NAIVE="reward_fn_key:data_source,reward_loop_type:naive,reward_fn:default,reward_model_name:null,reward_coef:1.0"
+_DS_DAPO="reward_fn_key:data_source,reward_loop_type:dapo,reward_fn:default,reward_model_name:null,reward_coef:1.0"
+_DS_GEN="reward_fn_key:data_source,reward_loop_type:gen,reward_fn:default,reward_model_name:Qwen3-8B,reward_coef:1.0"
+_ROW_TRAIN_GSM8K="{file:${GSM8K_TRAIN},data_source_name:openai/gsm8k,prompt_key:prompt,reward_model_dicts:[{${_DS_NAIVE}},{${_DS_GEN}}]}"
+_ROW_TRAIN_DAPO="{file:${DAPO_TRAIN},data_source_name:dapo/dapo-math-17k,prompt_key:prompt,reward_model_dicts:[{${_DS_DAPO}},{${_DS_GEN}}]}"
+_ROW_VAL_GSM8K="{file:${GSM8K_TEST},prompt_key:prompt,reward_model_dicts:[{${_DS_NAIVE}}]}"
+_ROW_VAL_DAPO="{file:${DAPO_VAL},prompt_key:prompt,reward_model_dicts:[{${_DS_DAPO}}]}"
+TRAIN_DATAS="[${_ROW_TRAIN_GSM8K},${_ROW_TRAIN_DAPO}]"
+VAL_DATAS="[${_ROW_VAL_GSM8K},${_ROW_VAL_DAPO}]"
 
 # dapo-reward
 enable_overlong_buffer=True
@@ -71,12 +81,11 @@ rollout_is_threshold=2.0
 # May support this in the future
 offload=True
 
-PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config --config-name='ppo_megatron_trainer' \
+PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path="${PSRL_PATH}/psrl/trainer/config" --config-name='ppo_megatron_trainer' \
     psrl.ps_manager_ip=${LOCAL_IP} \
     psrl.rollout_n=${n_resp_per_prompt} \
     psrl.staleness=2 \
     psrl.staleness_buffer_entries=${train_prompt_bsz} \
-    psrl.gen_mode=stream \
     psrl.ps_mode=nixl_cpu \
     psrl.logging_path=${PSRL_PATH}/logs/multi_datasets_log/${experiment_name} \
     psrl.log_prob.enable_rollout_engine_log_prob=True \
@@ -85,10 +94,8 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config --conf
     psrl.deployment.rollout_ngpus_per_node_per_instance=${ROLL_NGPUS_PER_NODE_PER_INSTANCE} \
     psrl.deployment.train_nnodes=${NNODES} \
     psrl.deployment.train_ngpus_per_node=${TRAIN_NGPUS} \
-    psrl.nixl.server_mode=meta_server \
     psrl.nixl.server_port=23456 \
     \
-    gen_actor_rollout_ref.model.path="$HF_MODEL_PATH" \
     gen_actor_rollout_ref.rollout.mode=psrl_async \
     gen_actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     gen_actor_rollout_ref.rollout.tensor_model_parallel_size=${ROLL_TP} \
@@ -132,12 +139,16 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config --conf
     train_actor_rollout_ref.actor.megatron.use_dist_checkpointing=True \
     train_actor_rollout_ref.actor.megatron.dist_checkpointing_path=$DIST_CKPT_PATH \
     \
-    reward_models_config.reward_normalization=batch \
+    reward.reward_normalization=batch \
+    reward.active_managers='[naive,dapo,gen_qwen3_8b]' \
     \
     data.truncation='left' \
     data.max_prompt_length=${max_prompt_length} \
     data.max_response_length=${max_response_length} \
     data.train_batch_size=${train_prompt_bsz} \
+    data.train_datas="${TRAIN_DATAS}" \
+    data.val_datas="${VAL_DATAS}" \
+    data.train_datasets_ratios=[0.5,0.5] \
     \
     algorithm.adv_estimator=${adv_estimator} \
     algorithm.use_kl_in_reward=${use_kl_in_reward} \
@@ -155,14 +166,10 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config --conf
     trainer.total_epochs=10 \
     trainer.total_training_steps=200 2>&1 | tee ${PSRL_WORKSPACE}/logs/${experiment_name}_${LOCAL_IP}.log
 
-    # reward_model.reward_manager=dapo \
-    # reward_model.enable_resource_pool=False \
-    # +reward_model.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer} \
-    # +reward_model.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len} \
-    # +reward_model.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \
-    # +reward_model.reward_kwargs.overlong_buffer_cfg.log=False \
-    # +reward_model.reward_kwargs.max_resp_len=${max_response_length} \
+    # reward.active_managers='[dapo]' \
+    # reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer} \
+    # reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len} \
+    # reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \
+    # reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.log=False \
+    # reward.managers.dapo.reward_kwargs.max_resp_len=${max_response_length} \
 
-    # data.train_files="${TRAIN_FILE}" \
-    # data.val_files="${TEST_FILE}" \
-    # data.prompt_key=prompt \

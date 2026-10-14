@@ -1,0 +1,33 @@
+# TITO trajectory assignment: manual reads x-smg-tito-trajectory-id (default 0),
+# while auto derives IDs from matching prefix-tree leaves inside SMG.
+trajectory_id_strategy: manual
+
+# `rust` preprocesses pixels in SMG. `python` forwards exact HF tensors.
+multimodal_preprocessing: rust
+
+# `auto` uses `/dev/shm` only when SMG verifies a shared namespace.
+multimodal_tensor_transport: auto
+multimodal_shm_min_bytes: 65536
+
+# Global HTTP capacity is this value times the active rollout server count.
+server_max_concurrency: 256
+
+# Whether AgentLoopWorkers should route POST requests through a Ray actor pool.
+# The pool is created by AgentLoopManager and selected with round-robin.
+use_distributed_post: False
+
+# Number of HTTP POST actors to place on each alive Ray node when
+# use_distributed_post is enabled.
+post_actor_num_per_node: 8
+
+# Per-module Rust tracing filter. Empty uses the default warning level.
+rust_log_filter: "warn,smg::routers::grpc::kv_transfer=warn,smg::routers::grpc::common::stages::worker_selector::psrl=warn,route_trace=info,score_trace=info"
+
+# Wait for local VllmEngine.HealthCheck before POST /workers to SMG gateway.
+grpc_registration_health_timeout_s: 300
+grpc_registration_health_poll_interval_s: 1.0
+grpc_registration_health_rpc_timeout_s: 5.0
+
+# Buffer and replay KV events after sequence gaps.
+# Disabled because inline monitoring tolerates gaps and avoids replay indexing failures.
+enable_kv_event_replay: False

@@ -37,11 +37,10 @@ def get_gen_reward_function_cls(name: str) -> type[GenRewardFunctionBase]:
     Returns:
         `(type)`: The gen reward function class.
     """
-    
+
     if name not in GEN_REWARD_FUNCTION_REGISTRY:
         raise ValueError(
-            f"Unknown gen reward function: {name}. "
-            f"Available options: {list(GEN_REWARD_FUNCTION_REGISTRY.keys())}"
+            f"Unknown gen reward function: {name}. Available options: {list(GEN_REWARD_FUNCTION_REGISTRY.keys())}"
         )
     cls = GEN_REWARD_FUNCTION_REGISTRY[name]
 

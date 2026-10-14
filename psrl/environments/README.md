@@ -1,4 +1,3 @@
-
 # Custom Environments & AgentData in PSRL
 
 This document explains **what an Environment and AgentData are in PSRL**, and how to **create your own** and plug them into `multi_turn_agent_loop` **without changing the agent loop code**.
@@ -21,8 +20,8 @@ An **Environment** is the “world” that the agent interacts with. It:
 
 In PSRL, `multi_turn_agent_loop` calls:
 
-- `await env.reset(task=request, ...) -> (observation, info)`
-- `await env.step(action) -> {observation, reward, done, info}`
+- `await env.reset(task=request, ...) -> (observation, info)` where `task` is a `dict`
+- `await env.step(action) -> EnvStepOutput` (`observation`, `reward`, `done`, `info`)
 
 Your `ObsType` and `ActType` can be **anything** (dicts, strings, custom dataclasses, etc.). For example, in multi-turn tool use cases, `ObsType` can be `ConversationType` (list of messages) and `ActType` can be a dict representing a tool call.
 
@@ -31,9 +30,9 @@ Your `ObsType` and `ActType` can be **anything** (dicts, strings, custom datacla
 **AgentData** is the adapter between:
 
 - **Environment space** (`ObsType`/`ActType`)
-- **Model space** (token IDs and logprobs in `DataProto`)
+- **Model space** (token IDs and logprobs)
 
-AgentData also builds a `Trajectory` consisting of `Step`s for training (prompt/response ids, masks, optional per-step reward, etc.).
+AgentData also builds `Trajectory` / `Step` records under `session_data` for training (prompt/response ids, masks, optional per-step reward, etc.). The tokenizer is taken from the paired `Environment` (`self.tokenizer = self.env.tokenizer`).
 
 In PSRL, `multi_turn_agent_loop` calls on AgentData:
 
@@ -68,7 +67,7 @@ from typing import Any
 
 import ray
 from omegaconf import DictConfig
-from verl import DataProto
+from transformers import AutoProcessor, AutoTokenizer
 
 from psrl.environments.base import Environment, EnvStepOutput
 
@@ -86,22 +85,29 @@ class MyEnvironment(Environment[MyObs, MyAct]):
         cls._class_initialized = True
         # heavy init here (load resources, build tool set, etc.)
 
-    def __init__(self, config: DictConfig, reward_manager: ray.actor.ActorHandle, max_turns: int):
-        super().__init__(config, reward_manager)
+    def __init__(
+        self,
+        config: DictConfig,
+        reward_manager: ray.actor.ActorHandle,
+        tokenizer: AutoTokenizer,
+        processor: AutoProcessor | None = None,
+        max_turns: int = 10,
+        **kwargs,
+    ):
+        super().__init__(config, reward_manager, tokenizer, processor=processor)
         self.max_turns = max_turns
         self.turn = 0
 
-    async def reset(self, task: DataProto, **kwargs) -> tuple[MyObs, dict]:
+    async def reset(self, task: dict, **kwargs) -> tuple[MyObs, dict]:
         self.turn = 0
-        # build initial observation from task
-        obs: MyObs = {"raw_task": task.non_tensor_batch.get("raw_prompt", None)}
+        # build initial observation from task dict
+        obs: MyObs = {"raw_task": task.get("raw_prompt")}
         return obs, {}
 
-    async def step(self, action: MyAct) -> EnvStepOutput:
+    async def step(self, action: MyAct, **kwargs) -> EnvStepOutput:
         self.turn += 1
-        # apply action to update state
         next_obs: MyObs = {"turn": self.turn, "last_action": action}
-        reward = 0.0
+        reward = [0.0]
         done = self.turn >= self.max_turns
         return EnvStepOutput(observation=next_obs, reward=reward, done=done, info={})
 
@@ -116,8 +122,8 @@ class MyEnvironment(Environment[MyObs, MyAct]):
 You need to implement:
 
 - `init_class`: class-level heavy initialization (loading resources, etc.) which are shared across env instances.
-- `__init__`: instance-level initialization (config, reward manager, etc.)
-- `reset`: reset the env for a new episode/task.
+- `__init__`: instance-level initialization (config, reward manager, tokenizer, etc.)
+- `reset`: reset the env for a new episode/task (`task: dict`).
 - `step`: apply an action and return next observation, reward, done, info.
 - `close`: clean up resources.
 - `state` (optional): property returning serializable env state for checkpointing.
@@ -125,6 +131,7 @@ You need to implement:
 Notes:
 
 - Return `info` as a dict (use `{}`) for best compatibility.
+- `reward` in `EnvStepOutput` is a **list** of floats (one entry per tool call when applicable).
 - `max_turns` is passed by `multi_turn_agent_loop` when constructing the env.
 
 ### Implement a custom AgentData
@@ -140,11 +147,12 @@ from typing import Any
 import numpy as np
 import ray
 from omegaconf import DictConfig
-from transformers import AutoTokenizer
-from verl import DataProto
+from PIL import Image
+import torch
 
 from psrl.environments.base import ConversationType, Environment
-from psrl.workers.agent_loop.agent_data.base import AgentData, Trajectory
+from psrl.workers.agent_loop.agent_data.base import AgentData, SessionData, Trajectory
+from psrl.workers.gen.utils import TokenOutput
 
 # should match the Env Obs/Act types
 MyObs = dict[str, Any]
@@ -154,24 +162,22 @@ MyAct = dict[str, Any]
 @AgentData.register("my_agent_data")
 class MyAgentData(AgentData[MyObs, MyAct]):
 
-    @classmethod
-    def init_class(cls, config: DictConfig, tokenizer: AutoTokenizer, **kwargs):
-        if cls._class_initialized:
-            return
-        cls._class_initialized = True
-        cls.tokenizer = tokenizer
-
-    def __init__(self, config: DictConfig, reward_manager: ray.actor.ActorHandle, tokenizer: AutoTokenizer, env: Environment, **kwargs):
-        self.init_class(config=config, tokenizer=tokenizer, **kwargs)
-        super().__init__(config, reward_manager, tokenizer, env)
+    def __init__(
+        self,
+        config: DictConfig,
+        reward_manager: ray.actor.ActorHandle,
+        env: Environment,
+        **kwargs,
+    ):
+        super().__init__(config, reward_manager, env, **kwargs)
 
     def reset(self) -> None:
-        self.trajectory = Trajectory()
+        self.session_data = SessionData()
 
-    def init_trajectory(self, request: DataProto) -> None:
-        assert len(request) == 1
-        request_id = request.non_tensor_batch.get("uid", 0)[0]
-        self.trajectory = Trajectory(request_id=request_id)
+    def init_trajectory(self, request) -> None:
+        self.create_trajectory()
+        request_id = request.get("uid", 0) if isinstance(request, dict) else 0
+        self.session_data.trajectories[-1].request_id = request_id
 
     # --- Required hooks (recommended minimal customization surface) ---
     def format_chat_completions(self, observation: MyObs, *, is_init: bool) -> ConversationType:
@@ -179,49 +185,64 @@ class MyAgentData(AgentData[MyObs, MyAct]):
         # For non-chat envs, a simple strategy is to serialize observation to JSON.
         return [{"role": "user", "content": json.dumps(observation, ensure_ascii=False)}]
 
-    def encode_observation(self, observation: MyObs, *, is_init: bool) -> tuple[list[int], bool]:
-        # Convert observation to tokens. Here we reuse the chat template.
+    async def encode_observation(
+        self,
+        observation: MyObs,
+        images: list[Image.Image] | None = None,
+        videos: list[tuple[torch.Tensor, dict]] | None = None,
+        is_init: bool = False,
+    ) -> tuple[list[int], bool]:
+        # Convert observation to tokens (offload blocking tokenizer work to an executor).
         messages = self.format_chat_completions(observation, is_init=is_init)
-        token_ids = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=True)
+        token_ids = await self.loop.run_in_executor(
+            None,
+            lambda: self.tokenizer.apply_chat_template(
+                messages, add_generation_prompt=True, tokenize=True
+            ),
+        )
         return token_ids, is_init
 
     def decode_action_from_token_ids(self, token_ids: list[int]) -> MyAct:
-        # Convert model output tokens to an env action.
-        # This can be JSON parsing, regex parsing, tool-call parsing, etc.
         text = self.tokenizer.decode(token_ids, skip_special_tokens=True)
         return {"raw_text": text}
 
     # --- Main loop-facing methods ---
-    async def update_from_env(self, observation: MyObs, reward: float | None, done: bool, info: dict, **kwargs) -> bool:
-        is_init = len(self.trajectory.steps) == 0
+    async def update_from_env(
+        self,
+        observation: MyObs,
+        reward: float | list[float] | None,
+        done: bool,
+        info: dict,
+        **kwargs,
+    ) -> bool:
+        trajectory = self.session_data.trajectories[-1]
+        is_init = len(trajectory.steps) == 0
 
-        step = self.start_step(observation=observation, reward=reward, done=done, info=info)
+        step_reward = reward if isinstance(reward, list) or reward is None else [float(reward)]
+        step = self.start_step(observation=observation, reward=step_reward, done=done, info=info)
         step.chat_completions = self.format_chat_completions(observation, is_init=is_init)
 
-        token_ids, is_prompt = self.encode_observation(observation, is_init=is_init)
+        token_ids, is_prompt = await self.encode_observation(observation, is_init=is_init)
         if token_ids:
             if is_prompt:
                 self.append_prompt_ids(token_ids)
             else:
                 self.append_user_tokens(token_ids)
 
-        return self.trajectory.response_length >= self.config.gen_actor_rollout_ref.rollout.response_length
+        return trajectory.response_length >= self.config.gen_actor_rollout_ref.rollout.response_length
 
-    async def update_from_model_token_ids(self, output: DataProto, **kwargs) -> tuple[MyAct, bool]:
+    async def update_from_model_token_ids(self, output: TokenOutput, **kwargs) -> tuple[MyAct, bool]:
+        trajectory = self.session_data.trajectories[-1]
         self.update_trajectory_state_from_output(output)
 
-        response_ids = output.non_tensor_batch.pop("raw_response_ids", [None])[0]
-        rollout_logprobs = output.non_tensor_batch.pop("rollout_log_probs", [None])[0]
-
-        self.append_assistant_tokens(response_ids, logprobs=rollout_logprobs)
+        response_ids = list(output.response_ids)
+        self.append_assistant_tokens(response_ids, logprobs=output.response_log_probs)
 
         action = self.decode_action_from_token_ids(response_ids)
         self.set_step_action(action)
-
-        # optional: store raw response for debugging
         self.set_step_model_response(self.tokenizer.decode(response_ids, skip_special_tokens=True))
 
-        overlong = self.trajectory.response_length >= self.config.gen_actor_rollout_ref.rollout.response_length
+        overlong = trajectory.response_length >= self.config.gen_actor_rollout_ref.rollout.response_length
         return action, overlong
 ```
 
@@ -230,16 +251,18 @@ What you MUST implement in a custom AgentData:
 - `reset()`: reset internal state for a new episode.
 - `init_trajectory(request)`: initialize a new trajectory for the incoming task (request).
 - `format_chat_completions(observation, is_init)`: convert env observation to `ConversationType` for logging.
-- `encode_observation(observation, is_init)`: convert env observation to model input token IDs.
+- `encode_observation(...)`: async; convert env observation to model input token IDs (optional multimodal args).
 - `decode_action_from_token_ids(token_ids)`: convert model output token IDs to env action.
 - `update_from_env(observation, reward, done, info)`: update internal state from env step.
 - `update_from_model_token_ids(output)`: update internal state from model output tokens, return env action and done flag.
 
 It's recommended to use the provided `AgentData` helper methods to keep step logs consistent across different env types.
 
-- `start_step`, `append_prompt_ids`, `append_user_tokens`, `append_assistant_tokens` to build up the trajectory steps.
+- `create_trajectory`, `start_step`, `append_prompt_ids`, `append_user_tokens`, `append_assistant_tokens` to build up the trajectory steps.
 - `set_step_action`, `set_step_model_response` to set per-step action and model response text.
 - `format_chat_completions` to keep step logs consistent across different env types.
+
+Prefer subclassing `ConversationAgentData` when your observations are already chat messages — see `psrl/workers/agent_loop/agent_data/conversation_agent_data.py`.
 
 ### Register and configure
 

@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 
 from omegaconf import DictConfig
-from verl import DataProto
+from tensordict import TensorDict
 
 
 class BaseGroupPostProcessor(ABC):
@@ -24,15 +24,15 @@ class BaseGroupPostProcessor(ABC):
         self.config = config
 
     @abstractmethod
-    def __call__(self, data: DataProto) -> DataProto | None:
+    def __call__(self, data: TensorDict) -> TensorDict | None:
         """
         Process the grouped data.
 
         Args:
-            data (DataProto): The grouped data to be processed.
+            data (TensorDict): The grouped data to be processed.
 
         Returns:
-            Optional[DataProto]: The processed data, or None if the data
+            Optional[TensorDict]: The processed data, or None if the data
                                should be filtered out.
         """
         pass
@@ -58,15 +58,15 @@ class BaseBufferPostProcessor(ABC):
         self.config = config
 
     @abstractmethod
-    def __call__(self, data: DataProto) -> DataProto | None:
+    def __call__(self, data: TensorDict) -> TensorDict | None:
         """
         Process the buffer data.
 
         Args:
-            data (DataProto): The buffer data to be processed.
+            data (TensorDict): The buffer data to be processed.
 
         Returns:
-            Optional[DataProto]: The processed data, or None if the data
+            Optional[TensorDict]: The processed data, or None if the data
                                should be filtered out.
         """
         pass

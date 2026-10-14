@@ -1,0 +1,756 @@
+From af2fd45499da34349ca3b89dfbbae7141e873213 Mon Sep 17 00:00:00 2001
+From: Somoku <linsh0@protonmail.com>
+Date: Tue, 23 Jun 2026 23:49:57 +0800
+Subject: [PATCH] v0.22.0 patch
+
+---
+ vllm/config/scheduler.py                      |  12 +
+ .../device_communicators/nccl_suspend.py      | 208 ++++++++++++++++++
+ vllm/entrypoints/grpc_server.py               |  26 ++-
+ vllm/model_executor/models/qwen2.py           |  13 +-
+ vllm/v1/core/sched/scheduler.py               |  12 +
+ vllm/v1/engine/core_client.py                 |   4 +
+ vllm/v1/metrics/loggers.py                    |  13 +-
+ vllm/v1/metrics/stats.py                      |   4 +
+ vllm/v1/worker/gpu/cudagraph_utils.py         |  10 +
+ vllm/v1/worker/gpu/model_runner.py            |  42 ++++
+ vllm/v1/worker/gpu_model_runner.py            |  76 +++++++
+ vllm/v1/worker/gpu_worker.py                  |  75 +++++++
+ 12 files changed, 486 insertions(+), 9 deletions(-)
+ create mode 100644 vllm/distributed/device_communicators/nccl_suspend.py
+
+diff --git a/vllm/config/scheduler.py b/vllm/config/scheduler.py
+index fb6951ea7..893a242bc 100644
+--- a/vllm/config/scheduler.py
++++ b/vllm/config/scheduler.py
+@@ -154,6 +154,18 @@ class SchedulerConfig:
+     while a larger value (e.g., 10) reduces host overhead and may increase throughput
+     by batching multiple tokens before sending."""
+ 
++    preemption_notification_threshold: int | None = Field(default=None, ge=0)
++    """Number of waiting sequences above which a preempted request is forwarded
++    to an external gateway (via StatLoggers) for global re-scheduling rather than
++    being silently re-queued locally.
++
++    - ``None`` (default): feature disabled; zero runtime overhead.
++    - ``0``: notify whenever any request is waiting after a preemption.
++    - ``N``: notify when ``len(waiting) > N`` after a preemption.
++
++    This is a generic observability hook; it is not tied to any specific gateway.
++    """
++
+     @staticmethod
+     def default_factory(**kwargs):
+         """
+diff --git a/vllm/distributed/device_communicators/nccl_suspend.py b/vllm/distributed/device_communicators/nccl_suspend.py
+new file mode 100644
+index 000000000..76deb7eb7
+--- /dev/null
++++ b/vllm/distributed/device_communicators/nccl_suspend.py
+@@ -0,0 +1,208 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++"""NCCL communicator suspend/resume for sleep mode (NCCL >= 2.29.7).
++
++Releases the GPU memory held by idle NCCL communicators while vLLM is asleep,
++using NCCL's native ``ncclCommSuspend`` / ``ncclCommResume`` (memory manager).
++Topology and connection state are preserved, so resume is cheap (no re-init /
++no bootstrap rendezvous). On NCCL < 2.29.7 the API is absent and every entry
++point is a graceful no-op (``is_supported()`` returns False).
++
++This is a ctypes shim over the ``libnccl.so`` that torch already loaded, so the
++``ncclComm_t`` handles (raw pointers owned by vLLM's ``PyNcclCommunicator``)
++refer to the same library state.
++"""
++
++from __future__ import annotations
++
++import ctypes
++
++import torch
++
++from vllm.logger import init_logger
++
++logger = init_logger(__name__)
++
++# Bitmask for ncclCommSuspend: release dynamic GPU memory allocations while
++# keeping topology / connection state.
++NCCL_SUSPEND_MEM = 0x01
++NCCL_SUCCESS = 0
++
++_nccl_lib: ctypes.CDLL | None = None
++_load_attempted = False
++
++
++def _get_nccl_lib() -> ctypes.CDLL | None:
++    """Resolve the ``libnccl.so`` torch already loaded and bind the API.
++
++    Returns None if NCCL is not loaded or is older than 2.29.7 (no suspend
++    symbols).
++    """
++    global _nccl_lib, _load_attempted
++    if _load_attempted:
++        return _nccl_lib
++    _load_attempted = True
++
++    try:
++        import psutil
++
++        nccl_path = next(
++            (
++                m.path
++                for m in psutil.Process().memory_maps()
++                if "libnccl.so" in m.path.lower()
++            ),
++            None,
++        )
++    except Exception:
++        nccl_path = None
++
++    if nccl_path is None:
++        logger.warning(
++            "libnccl not found in process memory maps; NCCL suspend/resume disabled."
++        )
++        return None
++
++    try:
++        lib = ctypes.CDLL(nccl_path)
++    except OSError as e:
++        logger.warning("Failed to load %s: %s; NCCL suspend disabled.", nccl_path, e)
++        return None
++
++    if not hasattr(lib, "ncclCommSuspend") or not hasattr(lib, "ncclCommResume"):
++        logger.warning(
++            "NCCL at %s lacks ncclCommSuspend/Resume (needs >= 2.29.7); NCCL "
++            "memory offload disabled.",
++            nccl_path,
++        )
++        return None
++
++    lib.ncclCommSuspend.argtypes = [ctypes.c_void_p, ctypes.c_int]
++    lib.ncclCommSuspend.restype = ctypes.c_int
++    lib.ncclCommResume.argtypes = [ctypes.c_void_p]
++    lib.ncclCommResume.restype = ctypes.c_int
++    logger.info("NCCL suspend/resume enabled via %s", nccl_path)
++    _nccl_lib = lib
++    return lib
++
++
++def is_supported() -> bool:
++    """Whether the loaded NCCL supports ncclCommSuspend/Resume (>= 2.29.7)."""
++    return _get_nccl_lib() is not None
++
++
++def _collect_pynccl_comm_handles() -> list[tuple[str, int]]:
++    """Enumerate ``(name, ncclComm_t)`` for every active PyNcclCommunicator.
++
++    Walks the well-known process-group coordinators (TP / PP / DP / EP / ... /
++    world) and reads the raw ``ncclComm_t`` from each one's device
++    communicator. Handles are de-duplicated by pointer value because a single
++    communicator can be shared across coordinators.
++    """
++    from vllm.distributed import parallel_state as ps
++
++    handles: list[tuple[str, int]] = []
++    seen: set[int] = set()
++
++    group_getters = {
++        "world": "_WORLD",
++        "tp": "_TP",
++        "dcp": "_DCP",
++        "pp": "_PP",
++        "dp": "_DP",
++        "ep": "_EP",
++        "eplb": "_EPLB",
++        "pcp": "_PCP",
++    }
++    for name, attr in group_getters.items():
++        group = getattr(ps, attr, None)
++        if group is None:
++            continue
++        device_comm = getattr(group, "device_communicator", None)
++        if device_comm is None:
++            continue
++        pynccl = getattr(device_comm, "pynccl_comm", None)
++        if pynccl is None or getattr(pynccl, "disabled", True):
++            continue
++        comm = getattr(pynccl, "comm", None)
++        if comm is None:
++            continue
++        # ncclComm_t is a ctypes.c_void_p; .value is the raw pointer int.
++        ptr = comm.value if isinstance(comm, ctypes.c_void_p) else int(comm)
++        if not ptr or ptr in seen:
++            continue
++        seen.add(ptr)
++        handles.append((name, ptr))
++    return handles
++
++
++def _gpu_used_bytes() -> int:
++    free, total = torch.cuda.mem_get_info()
++    return total - free
++
++
++def suspend_nccl_comms() -> dict:
++    """Suspend (release the memory of) all active PyNccl communicators.
++
++    Must be called collectively on every rank with the communicators idle;
++    ``ncclCommSuspend`` performs an internal cross-rank barrier. Returns a
++    small telemetry dict. No-op (and reports ``skipped``) if NCCL is too old
++    or there are no warm communicators.
++    """
++    lib = _get_nccl_lib()
++    if lib is None:
++        return {"skipped": "nccl_suspend_unsupported", "freed_bytes": 0, "n": 0}
++
++    handles = _collect_pynccl_comm_handles()
++    if not handles:
++        return {"skipped": "no_pynccl_comms", "freed_bytes": 0, "n": 0}
++
++    before = _gpu_used_bytes()
++    n_ok = 0
++    for name, ptr in handles:
++        rc = lib.ncclCommSuspend(ctypes.c_void_p(ptr), NCCL_SUSPEND_MEM)
++        if rc != NCCL_SUCCESS:
++            logger.warning("ncclCommSuspend(%s) failed rc=%d", name, rc)
++        else:
++            n_ok += 1
++    freed = before - _gpu_used_bytes()
++    logger.info(
++        "NCCL suspend: %d/%d comms, freed %.1f MiB",
++        n_ok,
++        len(handles),
++        freed / 1024**2,
++    )
++    return {"freed_bytes": freed, "n": n_ok, "total": len(handles)}
++
++
++def resume_nccl_comms() -> dict:
++    """Resume all previously suspended PyNccl communicators.
++
++    Must be called collectively on every rank before any collective op uses the
++    communicators again. No-op if NCCL is too old or there are no comms.
++    """
++    lib = _get_nccl_lib()
++    if lib is None:
++        return {"skipped": "nccl_suspend_unsupported", "reclaimed_bytes": 0, "n": 0}
++
++    handles = _collect_pynccl_comm_handles()
++    if not handles:
++        return {"skipped": "no_pynccl_comms", "reclaimed_bytes": 0, "n": 0}
++
++    before = _gpu_used_bytes()
++    n_ok = 0
++    for name, ptr in handles:
++        rc = lib.ncclCommResume(ctypes.c_void_p(ptr))
++        if rc != NCCL_SUCCESS:
++            logger.warning("ncclCommResume(%s) failed rc=%d", name, rc)
++        else:
++            n_ok += 1
++    torch.accelerator.synchronize()
++    reclaimed = _gpu_used_bytes() - before
++    logger.info(
++        "NCCL resume: %d/%d comms, reclaimed %.1f MiB",
++        n_ok,
++        len(handles),
++        reclaimed / 1024**2,
++    )
++    return {"reclaimed_bytes": reclaimed, "n": n_ok, "total": len(handles)}
+\ No newline at end of file
+diff --git a/vllm/entrypoints/grpc_server.py b/vllm/entrypoints/grpc_server.py
+index b9173b302..c1809d97e 100644
+--- a/vllm/entrypoints/grpc_server.py
++++ b/vllm/entrypoints/grpc_server.py
+@@ -22,6 +22,7 @@ import argparse
+ import asyncio
+ import signal
+ import sys
++import os
+ import time
+ 
+ try:
+@@ -29,6 +30,7 @@ try:
+     from grpc_health.v1 import health_pb2_grpc
+     from grpc_reflection.v1alpha import reflection
+     from smg_grpc_proto import vllm_engine_pb2, vllm_engine_pb2_grpc
++    from smg_grpc_servicer.vllm.preemption import PreemptionStatLogger
+     from smg_grpc_servicer.vllm.health_servicer import VllmHealthServicer
+     from smg_grpc_servicer.vllm.servicer import VllmEngineServicer
+ except ImportError as e:
+@@ -73,16 +75,34 @@ async def serve_grpc(args: argparse.Namespace):
+         usage_context=UsageContext.OPENAI_API_SERVER,
+     )
+ 
+-    # Create AsyncLLM
++    # Create a preemption queue for bridging scheduler stats to gRPC stream.
++    # This queue receives preempted request IDs from PreemptionStatLogger
++    # (which is registered as a stat logger) and feeds them to
++    # SubscribePreemptionEvents for client streaming.
++    preemption_queue: asyncio.Queue[list[str]] = asyncio.Queue()
++
++    # Create PreemptionStatLogger as a stat logger factory.
++    # This captures threshold-crossed preemptions and enqueues them to the queue.
++    # The factory will be instantiated for each engine instance during AsyncLLM init.
++    def preemption_stat_logger_factory(vllm_config, engine_index=0):
++        return PreemptionStatLogger(
++            vllm_config,
++            engine_index=engine_index,
++            preemption_queue=preemption_queue,
++        )
++
++    # Create AsyncLLM with preemption stat logger registered.
+     async_llm = AsyncLLM.from_vllm_config(
+         vllm_config=vllm_config,
+         usage_context=UsageContext.OPENAI_API_SERVER,
+         enable_log_requests=args.enable_log_requests,
+         disable_log_stats=args.disable_log_stats,
++        stat_loggers=[preemption_stat_logger_factory],
+     )
+ 
+-    # Create servicer
+-    servicer = VllmEngineServicer(async_llm, start_time)
++    # Create servicer with preemption queue
++    servicer = VllmEngineServicer(async_llm, start_time, preemption_queue=preemption_queue)
++    logger.info("VllmEngineServicer initialized with preemption event streaming support")
+ 
+     # Create gRPC server
+     server = grpc.aio.server(
+diff --git a/vllm/model_executor/models/qwen2.py b/vllm/model_executor/models/qwen2.py
+index b83fedc70..6b1aa16e9 100644
+--- a/vllm/model_executor/models/qwen2.py
++++ b/vllm/model_executor/models/qwen2.py
+@@ -189,6 +189,13 @@ class Qwen2Attention(nn.Module):
+             if attn_type == AttentionType.ENCODER_ONLY
+             else Attention
+         )
++
++        self.disable_attn = False
++        import os
++        if "VLLM_DISABLE_ATTN" in os.environ and os.environ["VLLM_DISABLE_ATTN"] == "1":
++            print("Hijacking the attention in Qwen2 to forbid the use of the attention.")
++            self.disable_attn = True
++
+         self.attn = attn_cls(
+             self.num_heads,
+             self.head_dim,
+@@ -231,7 +238,11 @@ class Qwen2Attention(nn.Module):
+             k = k.view(total_tokens, self.kv_size)
+ 
+         q, k = self.rotary_emb(positions, q, k)
+-        attn_output = self.attn(q, k, v)
++        # For profiling, we hijack here to forbid the use of the attention.
++        if self.disable_attn:
++            attn_output = q
++        else:
++            attn_output = self.attn(q, k, v)
+         output, _ = self.o_proj(attn_output)
+         return output
+ 
+diff --git a/vllm/v1/core/sched/scheduler.py b/vllm/v1/core/sched/scheduler.py
+index c69c9a811..436a648c4 100644
+--- a/vllm/v1/core/sched/scheduler.py
++++ b/vllm/v1/core/sched/scheduler.py
+@@ -81,6 +81,10 @@ class Scheduler(SchedulerInterface):
+         self.kv_events_config = vllm_config.kv_events_config
+         self.parallel_config = vllm_config.parallel_config
+         self.log_stats = log_stats
++        # Accumulates request IDs to forward to an external gateway when
++        # preemption_notification_threshold is configured. Cleared each step
++        # in make_stats(). Empty list when feature is disabled.
++        self.preemption_req_ids: list[str] = []
+         self.observability_config = vllm_config.observability_config
+         self.kv_metrics_collector: KVCacheMetricsCollector | None = None
+         if self.observability_config.kv_cache_metrics:
+@@ -947,6 +951,11 @@ class Scheduler(SchedulerInterface):
+ 
+         # Put the request back to the waiting queue.
+         self.waiting.prepend_request(request)
++        # Notify external gateway if threshold is configured and waiting queue
++        # is already congested — local re-queuing would only worsen the load.
++        threshold = self.scheduler_config.preemption_notification_threshold
++        if self.log_stats and threshold is not None and len(self.waiting) > threshold:
++            self.preemption_req_ids.append(request.request_id)
+ 
+     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
+         # Advance the number of computed tokens for the request AFTER
+@@ -1989,6 +1998,8 @@ class Scheduler(SchedulerInterface):
+         connector_stats_payload = (
+             kv_connector_stats.data if kv_connector_stats else None
+         )
++        preemption_req_ids = self.preemption_req_ids
++        self.preemption_req_ids = []
+         return SchedulerStats(
+             num_running_reqs=len(self.running),
+             num_waiting_reqs=len(self.waiting),
+@@ -2001,6 +2012,7 @@ class Scheduler(SchedulerInterface):
+             kv_connector_stats=connector_stats_payload,
+             cudagraph_stats=cudagraph_stats,
+             perf_stats=perf_stats,
++            preemption_req_ids=preemption_req_ids,
+         )
+ 
+     def make_spec_decoding_stats(
+diff --git a/vllm/v1/engine/core_client.py b/vllm/v1/engine/core_client.py
+index c26380e6e..4e57d916a 100644
+--- a/vllm/v1/engine/core_client.py
++++ b/vllm/v1/engine/core_client.py
+@@ -642,6 +642,10 @@ class MPClient(EngineCoreClient):
+             if not success:
+                 self._finalizer()
+ 
++    @property
++    def num_engines(self) -> int:
++        return len(self.core_engines)
++
+     def shutdown(self, timeout: float | None = None) -> None:
+         """Shutdown engine manager under timeout and clean up resources."""
+         if self._finalizer.detach() is not None:
+diff --git a/vllm/v1/metrics/loggers.py b/vllm/v1/metrics/loggers.py
+index 6855efd9f..8c81f52f8 100644
+--- a/vllm/v1/metrics/loggers.py
++++ b/vllm/v1/metrics/loggers.py
+@@ -1153,8 +1153,20 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
+         # Labeled prompt token counters by source
+         pts = iteration_stats.prompt_token_stats
+         for source in PromptTokenStats.ALL_SOURCES:
++            # PSRL: when externally loaded KV blocks fail to load, the scheduler's
++            # _handle_invalid_blocks decrements request.num_external_computed_tokens
++            # (see scheduler.py). That can leave num_external_computed_tokens larger
++            # than num_cached_tokens for the iteration, so the per-source delta
++            # computed in PromptTokenStats.update_from_output goes negative. A
++            # Prometheus Counter rejects a negative inc() with ValueError, which
++            # otherwise crashes the whole EngineCore. Clamp to 0 to keep the metric
++            # monotonic and the engine alive; correctness is unaffected because the
++            # affected tokens are recomputed regardless.
++            source_tokens = pts.get_by_source(source)
++            if source_tokens < 0:
++                source_tokens = 0
+             self.counter_prompt_tokens_by_source[source][engine_idx].inc(
+-                pts.get_by_source(source)
++                source_tokens
+             )
+         self.counter_prompt_tokens_cached[engine_idx].inc(pts.cached_tokens)
+         self.counter_generation_tokens[engine_idx].inc(
+@@ -1318,11 +1330,14 @@ class StatLoggerManager:
+                     custom_prometheus_logger = True
+             else:
+                 # per engine logger
+-                global_stat_logger = PerEngineStatLoggerAdapter(
+-                    vllm_config=vllm_config,
+-                    engine_indexes=self.engine_indexes,
+-                    per_engine_stat_logger_factory=stat_logger_factory,  # type: ignore[arg-type]
+-                )
++                if not isinstance(stat_logger_factory, Callable):
++                    global_stat_logger = stat_logger_factory
++                else:
++                    global_stat_logger = PerEngineStatLoggerAdapter(
++                        vllm_config=vllm_config,
++                        engine_indexes=self.engine_indexes,
++                        per_engine_stat_logger_factory=stat_logger_factory,  # type: ignore[arg-type]
++                    )
+             self.stat_loggers.append(global_stat_logger)
+         if not custom_prometheus_logger:
+             self.stat_loggers.append(
+diff --git a/vllm/v1/metrics/stats.py b/vllm/v1/metrics/stats.py
+index a7a5fb7a2..c3a40dd95 100644
+--- a/vllm/v1/metrics/stats.py
++++ b/vllm/v1/metrics/stats.py
+@@ -170,6 +170,10 @@ class KVCacheEvictionEvent:
+ @dataclass
+ class SchedulerStats:
+     """Stats associated with the scheduler."""
++    # NOTE(lhy): we need to add this field to the scheduler stats for PSRL.
++    req_id_to_prompt_token_num: dict[str, int] | None = None
++    req_id_to_response_token_num: dict[str, int] | None = None
++    preemption_req_ids: list[str] = field(default_factory=list)
+
+     num_running_reqs: int = 0
+
+diff --git a/vllm/v1/worker/gpu/cudagraph_utils.py b/vllm/v1/worker/gpu/cudagraph_utils.py
+index c7a7ffe44..88827f41a 100644
+--- a/vllm/v1/worker/gpu/cudagraph_utils.py
++++ b/vllm/v1/worker/gpu/cudagraph_utils.py
+@@ -184,6 +184,16 @@ class CudaGraphManager:
+     def needs_capture(self) -> bool:
+         return len(self._capture_descs) > 0
+
++    def release(self) -> bool:
++        """Drop captured graph objects and make dispatch fall back to eager."""
++        if not self.needs_capture():
++            return False
++
++        released = self._graphs_captured or bool(self.graphs)
++        self.graphs.clear()
++        self._graphs_captured = False
++        return released
++
+     @torch.inference_mode()
+     def capture(
+         self,
+diff --git a/vllm/v1/worker/gpu/model_runner.py b/vllm/v1/worker/gpu/model_runner.py
+index 52b447550..c145bd9f8 100644
+--- a/vllm/v1/worker/gpu/model_runner.py
++++ b/vllm/v1/worker/gpu/model_runner.py
+@@ -27,7 +27,9 @@ import numpy as np
+ import torch
+ import torch.nn as nn
+
++from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphWrapper
+ from vllm.compilation.counter import compilation_counter
++from vllm.compilation.cuda_graph import CUDAGraphWrapper
+ from vllm.config import VllmConfig
+ from vllm.config.compilation import CUDAGraphMode
+ from vllm.distributed.parallel_state import (
+@@ -665,6 +667,46 @@ class GPUModelRunner(LoRAModelRunnerMixin):
+         )
+         return cuda_graph_size
+
++    def _release_speculator_cudagraphs(self) -> bool:
++        if self.speculator is None:
++            return False
++
++        released = False
++        for name in ("prefill_cudagraph_manager", "decode_cudagraph_manager"):
++            manager = getattr(self.speculator, name, None)
++            if manager is not None:
++                released |= manager.release()
++        return released
++
++    def release_cudagraphs(self) -> bool:
++        """Drop captured CUDA graphs before cumem sleep unmaps GPU memory."""
++        if self.cudagraph_manager is None:
++            return False
++
++        # Ensure no captured graph is mid-replay before we drop references.
++        torch.accelerator.synchronize()
++
++        released = self.cudagraph_manager.release()
++        released |= self._release_speculator_cudagraphs()
++        if not released:
++            return False
++
++        CUDAGraphWrapper.clear_all_graphs()
++        BreakableCUDAGraphWrapper.clear_all_graphs()
++
++        # Force graph finalizers to run before cumem walks the VA space.
++        gc.collect()
++        torch.accelerator.synchronize()
++        torch.accelerator.empty_cache()
++        logger.info("Released CUDA graphs ahead of sleep.")
++        return True
++
++    def recapture_cudagraphs(self) -> None:
++        """Re-capture CUDA graphs after cumem wake_up remaps model memory."""
++        if self.cudagraph_manager is None or not self.cudagraph_manager.needs_capture():
++            return
++        self.capture_model()
++
+     def _remove_request(self, req_id: str) -> bool:
+         if not self.req_states.remove_request(req_id):
+             return False
+diff --git a/vllm/v1/worker/gpu_model_runner.py b/vllm/v1/worker/gpu_model_runner.py
+index d51bf2284..000000000 100644
+--- a/vllm/v1/worker/gpu_model_runner.py
++++ b/vllm/v1/worker/gpu_model_runner.py
+@@ -1369,6 +1369,26 @@ class GPUModelRunner(
+                 # Replace the existing block IDs with the new ones.
+                 req_state.block_ids = new_block_ids
+
++            # Resync block_ids to the scheduler's authoritative length. When a KV
++            # load failure rolls back num_computed_tokens without preemption (the
++            # scheduler's recompute policy keeps the request RUNNING, so the
++            # resumed_from_preemption replace path above is skipped), the scheduler
++            # frees the orphaned tail blocks but the runner only ever extends its
++            # own block_ids. Across repeated rollbacks the list drifts longer than
++            # the scheduler's req_to_blocks and can exceed the block_table row width
++            # (cdiv(max_model_len, block_size)), overflowing it on add_row. The
++            # surplus is always a dead tail (positions past max_model_len are never
++            # addressed), so clamp each group to its row capacity.
++            block_tables = self.input_batch.block_table.block_tables
++            if len(req_state.block_ids) == len(block_tables):
++                for g, group_block_ids in enumerate(req_state.block_ids):
++                    bt = block_tables[g]
++                    # block_ids are KV-manager blocks; the row width is in kernel
++                    # blocks, so convert back to the KV-block capacity.
++                    cap = bt.max_num_blocks_per_req // bt.blocks_per_kv_block
++                    if len(group_block_ids) > cap:
++                        del group_block_ids[cap:]
++
+             if req_index is None:
+                 # The request is not in the persistent batch.
+                 # The request was either preempted and resumed later, or was not
+@@ -6460,6 +6480,62 @@ class GPUModelRunner(
+         )
+         return cuda_graph_size
+
++    def release_cudagraphs(self) -> bool:
++        """Drop all captured CUDA graphs so their capture-pool memory is freed
++        before a cumem ``sleep()`` unmaps the virtual-address space.
++
++        With CUDA-graph capture pools resident, per-allocation cumem VMM
++        unmap/remap operations slow dramatically (field-measured ~6-9s for a
++        32B model vs ~2s without graphs), because every block the graph pool
++        touches forces an individual VMM op. Releasing the graphs first lets
++        the unmap take the fast path; ``recapture_cudagraphs()`` rebuilds them
++        after wake.
++
++        Returns ``True`` if there were graphs to release (i.e. the caller
++        should re-capture on wake), ``False`` otherwise (no-op when
++        ``cudagraph_mode`` is ``NONE``).
++        """
++        if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
++            return False
++
++        # Ensure no captured graph is mid-replay before we drop references.
++        torch.accelerator.synchronize()
++
++        CUDAGraphWrapper.clear_all_graphs()
++        BreakableCUDAGraphWrapper.clear_all_graphs()
++        if self.encoder_cudagraph_manager is not None:
++            self.encoder_cudagraph_manager = None
++
++        # Force the dropped torch.cuda.CUDAGraph objects to finalize now so the
++        # backing capture pool is actually returned to the driver before the
++        # cumem unmap walks the address space. All three calls are required and
++        # ordered: gc.collect() runs the CUDAGraph finalizers that release the
++        # underlying graph exec + capture pool (clearing references alone is not
++        # enough -- the C++ objects free only on __del__); synchronize() then
++        # waits for any in-flight stream work referencing those pools to drain
++        # so the free is safe; and empty_cache() returns the now-unused caching
++        # allocator blocks (including the capture pool) to the driver, which is
++        # what lets the subsequent cumem unmap take the fast path instead of
++        # walking per-block VMM ops. Dropping any one leaves the pool resident
++        # and reintroduces the slow ~6-9s unmap.
++        gc.collect()
++        torch.accelerator.synchronize()
++        torch.accelerator.empty_cache()
++        logger.info("Released CUDA graphs ahead of sleep.")
++        return True
++
++    def recapture_cudagraphs(self) -> None:
++        """Re-capture CUDA graphs after a cumem ``wake_up()`` has remapped the
++        weights and KV cache. Counterpart to :meth:`release_cudagraphs`.
++
++        No-op when ``cudagraph_mode`` is ``NONE``. Safe to call even if no
++        graphs were previously captured -- ``capture_model`` simply rebuilds
++        the dispatch set.
++        """
++        if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
++            return
++        self.capture_model()
++
+     def _warmup_and_capture(
+         self,
+         desc: BatchDescriptor,
+diff --git a/vllm/v1/worker/gpu_worker.py b/vllm/v1/worker/gpu_worker.py
+index 582c6a17c..0bfa32120 100644
+--- a/vllm/v1/worker/gpu_worker.py
++++ b/vllm/v1/worker/gpu_worker.py
+@@ -134,6 +134,22 @@ class Worker(WorkerBase):
+         # Buffers saved before sleep
+         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
+
++        # Whether CUDA graphs were released in the most recent sleep() and
++        # therefore need to be re-captured once the model is fully awake again.
++        self._cudagraphs_released: bool = False
++
++        # Whether the model weights / KV cache are currently offloaded or
++        # unmapped by a sleep(). Re-capturing CUDA graphs runs a forward pass
++        # through the weights AND uses the KV cache, so recapture MUST be
++        # deferred until a wake_up() has restored BOTH -- otherwise (e.g. the
++        # RLHF sleep() -> wake_up(["kv_cache"]) partial-wake sequence, which
++        # leaves the weights unmapped) the capture forward pass would read
++        # unmapped memory and fault with CUDA_ERROR_ILLEGAL_ADDRESS. These are
++        # tracked independently because weights and kv_cache can be woken in
++        # either order across separate wake_up() calls.
++        self._weights_suspended: bool = False
++        self._kv_cache_suspended: bool = False
++
+         # Weight transfer engine is created in `load_model` once the model
+         # is available, since the engine needs a reference to the model.
+         self.weight_transfer_engine: WeightTransferEngine | None = None
+@@ -166,8 +182,32 @@ class Worker(WorkerBase):
+                 name: buffer.cpu().clone() for name, buffer in model.named_buffers()
+             }
+
++        # Drop captured CUDA graphs before the cumem unmap. With graph capture
++        # pools resident, per-allocation VMM unmap/remap ops slow to ~6-9s for a
++        # 32B model (vs ~2s without graphs); releasing graphs first restores the
++        # fast unmap path. Re-captured lazily on wake_up(). No-op when
++        # cudagraph_mode is NONE.
++        self._cudagraphs_released = self.model_runner.release_cudagraphs()
++
++        # The cumem unmap below drops the weights and KV cache from GPU virtual
++        # memory (weights are offloaded to CPU on level-1 sleep, discarded on
++        # level-2; the KV cache is always discarded). Mark both suspended so a
++        # subsequent partial wake does NOT trigger a CUDA graph recapture (which
++        # would run a forward pass through unmapped weights). Recapture is
++        # deferred until BOTH are restored.
++        self._weights_suspended = True
++        self._kv_cache_suspended = True
++
+         allocator = CuMemAllocator.get_instance()
+         allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
++
++        # Release idle NCCL communicator memory (NCCL >= 2.29.7). Collective
++        # across ranks; no-op at world_size 1 or on older NCCL. Done after the
++        # cumem unmap so the reported freed bytes include the NCCL release.
++        from vllm.distributed.device_communicators import nccl_suspend
++
++        nccl_suspend.suspend_nccl_comms()
++
+         free_bytes_after_sleep, total = torch.cuda.mem_get_info()
+         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
+         used_bytes = total - free_bytes_after_sleep
+@@ -183,6 +223,23 @@ class Worker(WorkerBase):
+
+         allocator = CuMemAllocator.get_instance()
+         allocator.wake_up(tags)
++
++        # Restore NCCL communicator memory before any collective runs again.
++        # Collective across ranks; no-op at world_size 1 or on older NCCL.
++        from vllm.distributed.device_communicators import nccl_suspend
++
++        nccl_suspend.resume_nccl_comms()
++
++        # Track whether this wake has restored the weights / KV cache to GPU
++        # memory. A wake with no tags restores everything; an explicit tag list
++        # restores only the named segments. This must happen BEFORE the
++        # recapture gate below, since recapture needs both mapped. The flags are
++        # sticky across wake_up() calls so weights and kv_cache may be woken in
++        # either order (e.g. weights-only then kv_cache-only, or vice versa).
++        if tags is None or "weights" in tags:
++            self._weights_suspended = False
++        if tags is None or "kv_cache" in tags:
++            self._kv_cache_suspended = False
+
+         # Restore the buffers after level 2 sleep
+         if len(self._sleep_saved_buffers):
+@@ -195,6 +252,24 @@ class Worker(WorkerBase):
+         if tags is None or "kv_cache" in tags:
+             self.model_runner.post_kv_cache_wake_up()
+
++        # Re-capture CUDA graphs that were released in sleep(), now that the
++        # model is fully awake. Recapture runs a forward pass through the
++        # weights AND uses the KV cache, so BOTH must be mapped before it can
++        # run. We gate on the sticky suspension flags rather than this wake's
++        # tags so that the deferred recapture fires on whichever wake completes
++        # the pair -- handling the RLHF partial-wake pattern (kv_cache woken
++        # first, weights later) as well as the weights-first ordering. Until
++        # both are awake `_cudagraphs_released` stays True so a later wake still
++        # triggers it. No-op when cudagraph_mode is NONE (release_cudagraphs()
++        # returned False, so _cudagraphs_released is False).
++        if (
++            self._cudagraphs_released
++            and not self._weights_suspended
++            and not self._kv_cache_suspended
++        ):
++            self.model_runner.recapture_cudagraphs()
++            self._cudagraphs_released = False
++
+     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
+         if not self.vllm_config.model_config.enable_cumem_allocator:
+             return nullcontext()
+--
+2.43.0
+

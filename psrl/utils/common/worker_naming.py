@@ -63,12 +63,12 @@ class WorkerKey:
 
         For validate workers, the NIXL instance_id is offset by
         n_rollout_instances to avoid collision with rollout workers.
-        This offset is encapsulated here; callers must not compute it
+        This offset is encapsulated here. Callers must not compute it
         themselves.
 
         Args:
             n_rollout_instances (int): Total number of rollout instances.
-                Only used when role='validate'; ignored for 'rollout' and 'actor'. Defaults to 0.
+                Only used when role='validate' and ignored for 'rollout' and 'actor'. Defaults to 0.
 
         Returns:
             str: NIXL client name, e.g. 'NIXLGenClient_I2_R0'.

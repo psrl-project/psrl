@@ -15,7 +15,6 @@
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Optional
 
 from verl.base_config import BaseConfig
 
@@ -60,11 +59,11 @@ class DistillationLossConfig(BaseConfig):
     """
 
     loss_mode: str = "k3"
-    topk: Optional[int] = 128
+    topk: int | None = 128
     use_task_rewards: bool = True
     distillation_loss_coef: float = 1.0
-    loss_max_clamp: Optional[float] = 10.0
-    log_prob_min_clamp: Optional[float] = -10.0
+    loss_max_clamp: float | None = 10.0
+    log_prob_min_clamp: float | None = -10.0
 
     use_policy_gradient: bool = True
     policy_loss_mode: str = "vanilla"
@@ -80,7 +79,7 @@ class DistillationLossConfig(BaseConfig):
 
     # Store distillation loss settings for computing the specified loss_mode
     # Not set by user, populated at runtime
-    loss_settings: Optional[dict] = None
+    loss_settings: dict | None = None
 
     def __post_init__(self):
         self._mutable_fields.add("loss_settings")
@@ -311,5 +310,3 @@ class DistillationConfig(BaseConfig):
 #                 raise NotImplementedError(
 #                     f"DistillationTeacherModelConfig does not support inference engine {engine_name}"
 #                 )
-
-

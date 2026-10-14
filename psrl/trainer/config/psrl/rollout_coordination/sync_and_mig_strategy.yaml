@@ -1,0 +1,42 @@
+# Method for model synchronization and rollout migration
+# Available options: "status_based" or "greedy"
+method: greedy
+
+# Check interval in millisecond for model synchronization and rollout migration
+check_interval_in_ms: 100
+
+# Model synchronization config
+sync:
+  # Select request count, throughput, or KV cache as the synchronization indicator.
+  # `hypothesis_test` is reserved for future benefit estimation.
+  indicator: request_num
+
+  # Interpret this threshold in the units of the selected indicator.
+  # `hypothesis_test` ignores it.
+  threshold: null
+
+  # Whether to check the request that can be routed to the instance before synchronization
+  check_req_before_sync: True
+
+  # Through this version, the next buffer must be ready after the PS pull.
+  seamless_train_version: 0
+
+# Migration aborts requests on overloaded instances so they return to the router.
+# Routing itself does not consult this switch.
+mig:
+  # Whether to enable coordinator-side imbalance migration
+  enable: False
+
+  # Indicator for rollout migration
+  # Available options: "request_num", "throughput", "kv_cache"
+  indicator: request_num
+
+  # Migrate when the maximum-to-minimum indicator ratio exceeds this value.
+  threshold: null
+
+  # Stop migration when the indicator is less than the threshold
+  # Available options: "request_num", "throughput", "kv_cache"
+  stop_indicator: request_num
+
+  # Threshold for stopping migration
+  stop_threshold: null

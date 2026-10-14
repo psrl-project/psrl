@@ -1,0 +1,3 @@
+# False uses UCX-safe per-rank saves.
+# DCP disables NIXL progress threads and applies the NCCL no-fork patch.
+use_dcp_save: True

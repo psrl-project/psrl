@@ -1,10 +1,4 @@
-"""
-Periodic and on-demand GPU memory logging.
-
-Provides MemoryLogger: specify a log file (via logging_path + log_prefix) and an
-interval; periodically logs GPU memory stats. Also supports external calls to log
-at a specific time with a custom prefix (log_now(prefix=...)).
-"""
+"""Log GPU memory periodically and on demand."""
 
 import logging
 import os
@@ -31,7 +25,7 @@ def _get_device_memory_info(device_id: int, unit: str = "GB", precision: int = 2
         Dict with keys: allocated, reserved, free, total, used (device-level).
         All values are formatted strings in the given unit.
     """
-    assert unit in ("GB", "MB", "KB")
+    assert unit in ("GB", "MB", "KB"), f"Expected memory unit GB, MB, or KB, got {unit!r}."
     divisor = 1024**3 if unit == "GB" else 1024**2 if unit == "MB" else 1024
 
     allocated = torch.cuda.memory_allocated(device_id)
@@ -83,11 +77,11 @@ def log_gpu_memory_now(
     level: int = logging.INFO,
     unit: str = "GB",
 ) -> str:
-    """Log current GPU memory for all devices at this moment. Safe to call from anywhere.
+    """Log current GPU memory for all devices at this moment.
 
     Args:
         prefix: Optional prefix string for the log line.
-        logger: If given, log via this logger at `level`; otherwise message is only returned.
+        logger: If given, log via this logger at `level`. Otherwise only return the message.
         level: Log level when logger is provided.
         unit: "GB", "MB", or "KB".
 
@@ -103,11 +97,9 @@ def log_gpu_memory_now(
 
 
 class MemoryLogger:
-    """Periodically log GPU memory to a file (and optional logger), and support on-demand logs with a prefix.
+    """Log GPU memory periodically and on demand.
 
-    Similar in spirit to configuring a logger with DualOutputHandler(logging_path, log_prefix):
-    you pass logging_path and log_prefix; memory is written to logging_path / (log_prefix + "_memory.log").
-    Asserts that the process has GPU (torch.cuda.is_available()).
+    Memory is written to `logging_path / (log_prefix + "_memory.log")`.
 
     Example:
         logger = MemoryLogger("/path/to/logs", "TrainWorker_R0", interval_seconds=60.0)
@@ -137,7 +129,6 @@ class MemoryLogger:
         self._memory_logger = logging.getLogger(f"{__name__}.MemoryLogger.{log_prefix}")
         self._memory_logger.setLevel(logging.DEBUG)
         self._memory_logger.propagate = False
-        # Same pattern as fsdp_train_worker: DualOutputHandler -> file + stdout
         memory_prefix = f"{log_prefix}_memory"
         self._memory_logger.addHandler(DualOutputHandler(self.logging_path, memory_prefix))
 
@@ -193,9 +184,9 @@ class MemoryLogger:
 
 
 def gpu_memory_logger_decorator(log_only_rank_0: bool = True) -> Callable[[F], F]:
-    """Decorator that logs GPU memory before and after the wrapped method, using self.memory_logger.
+    """Log GPU memory before and after the wrapped method.
 
-    No logger is passed in; at call time the decorator checks self.memory_logger. If it is None
+    No logger is passed in. At call time the decorator checks self.memory_logger. If it is None
     (e.g. no GPU), the method runs without logging. Otherwise it logs "Before {name}" and
     "After {name}" via self.memory_logger.log_now(prefix=...).
 

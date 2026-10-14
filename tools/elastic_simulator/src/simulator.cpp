@@ -342,12 +342,6 @@ std::optional<int> rollout_select(const RoleEvaluationContext &context,
 bool rm_can_admit(const RoleEvaluationContext &context,
                   const InstanceState &state) {
   const std::int64_t load = state.route_request_count;
-  if (context.waiting_admission_cap.has_value()) {
-    const std::int64_t cap = *context.waiting_admission_cap;
-    if (state.waiting_count >= cap || load >= state.running_count + cap) {
-      return false;
-    }
-  }
   return !context.max_concurrent_requests.has_value() ||
          load < *context.max_concurrent_requests;
 }
@@ -761,7 +755,6 @@ prepare_role_evaluation_context(const RoleSnapshot &snapshot) {
   context.strategy = snapshot.strategy;
   context.queue_scope = snapshot.queue_scope;
   context.max_concurrent_requests = snapshot.max_concurrent_requests;
-  context.waiting_admission_cap = snapshot.waiting_admission_cap;
   context.delta_throughput_threshold = snapshot.delta_throughput_threshold;
   context.itl_max_itl = snapshot.itl_max_itl;
 
@@ -810,9 +803,13 @@ prepare_role_evaluation_context(const RoleSnapshot &snapshot) {
         ++prepared_instance.visible_request_count;
         prepared_instance.visible_token_count +=
             std::max<std::int64_t>(0, request.snapshot.seq_len);
-        prepared_instance.movable_requests.push_back(request);
+        if (request.snapshot.movable) {
+          prepared_instance.movable_requests.push_back(request);
+        }
       }
-      prepared_instance.reroute_requests.push_back(request);
+      if (request.snapshot.movable) {
+        prepared_instance.reroute_requests.push_back(request);
+      }
     }
     std::sort(prepared_instance.movable_requests.begin(),
               prepared_instance.movable_requests.end(),

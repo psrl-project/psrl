@@ -1,0 +1,45 @@
+# Sandbox execution is disabled by default so existing recipes are unaffected.
+
+# Whether to build the env worker pool at startup.
+enable: False
+
+# `colocated` uses every alive node. `dedicated` uses only `dedicated_node_ips`.
+placement: colocated
+
+# Node IPs that host env workers. Required when placement is dedicated.
+dedicated_node_ips: []
+
+# Number of worker actors per selected node.
+workers_per_node: 1
+
+# Concurrent sandboxes one worker may host.
+cpu_slots_per_worker: 8
+
+# GPUs one worker owns. 0 means the worker only hosts CPU sandboxes.
+gpu_slots_per_worker: 0
+
+# Ray CPU reservation for the worker actor process itself, not for its sandboxes.
+worker_num_cpus: 1
+
+# Default docker --cpus applied to a sandbox when the caller does not specify one.
+sandbox_cpus: 4.0
+
+# Default docker --memory applied to a sandbox when the caller does not specify one.
+sandbox_memory: 16g
+
+routing:
+  # How the coordinator picks a worker.
+  # Available options: least_loaded, round_robin, random
+  method: least_loaded
+
+# Seconds of inactivity after which the watchdog reaps a sandbox.
+idle_sandbox_timeout_s: 7200
+
+# Default seconds allowed for one sandbox command. Matches MLGym training_timeout.
+exec_default_timeout_s: 3600
+
+# Head and tail character budget per observation. 0 disables truncation.
+max_observation_chars: 8000
+
+# Max concurrent RPCs the coordinator actor serves.
+coordinator_max_concurrency: 64

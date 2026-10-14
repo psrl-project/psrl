@@ -87,10 +87,13 @@ logger = logging.getLogger(__name__)
 class CustomRLHFDataset(RLHFDataset):
     """Custom dataset class to process dapo/aime-2024, dapo/aime-2025 datasets."""
 
+    AGENT_NAME = "multi_turn_completion_agent"
+
     def _get_cache_file_path(self, parquet_file: str) -> str:
-        """Generate cache file path based on parquet file path."""
-        # Create a hash of the file path to ensure unique cache file names
-        file_hash = hashlib.md5(parquet_file.encode()).hexdigest()
+        """Generate cache file path based on parquet file path and agent_name."""
+        # Include agent_name in the hash so cache invalidates when it changes
+        cache_key = f"{parquet_file}|agent_name={self.AGENT_NAME}"
+        file_hash = hashlib.md5(cache_key.encode()).hexdigest()
         cache_dir = os.path.join(self.cache_dir, "processed_datasets")
         os.makedirs(cache_dir, exist_ok=True)
         cache_file = os.path.join(cache_dir, f"{file_hash}.parquet")
@@ -161,14 +164,14 @@ class CustomRLHFDataset(RLHFDataset):
             "prompt": [{"role": "user", "content": prompt}],
             "ability": "MATH",
             "reward_model": {"ground_truth": str(answer)},
-            "agent_name": "multi_turn_agent",
+            "agent_name": self.AGENT_NAME,
         }
         return data
 
     def map_fn2(self, row: dict):
         content = row["prompt"][0]["content"]
         row["prompt"][0]["content"] = content + answer_format
-        row["agent_name"] = "multi_turn_agent"
+        row["agent_name"] = self.AGENT_NAME
         return row
 
 

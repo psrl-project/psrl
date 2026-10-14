@@ -14,21 +14,23 @@ HF_MODEL_PATH=${PSRL_WORKSPACE}/models/Qwen2.5-Math-7B
 TRAIN_FILE=${PSRL_WORKSPACE}/data/gsm8k/train.parquet
 TEST_FILE=${PSRL_WORKSPACE}/data/gsm8k/test.parquet
 
+GEN_DP=1 # DP in the generation side
 GEN_TP=1 # TP in the generation side
 GEN_PP=1 # PP in the generation side
 
+VAL_DP=1 # DP in the training side for validation
 VAL_TP=1 # TP in the training side for validation
 VAL_PP=1 # PP in the training side for validation
 
-NNODES=4
-NGPUS_PER_NODE=8
+NNODES=1
+NGPUS_PER_NODE=4
 
-GEN_NNODES=2 # Number of nodes for generation
+GEN_NNODES=1 # Number of nodes for generation
 GEN_NGPUS_PER_NODE=${NGPUS_PER_NODE} # Number of GPUs per node for generation
 GEN_INSTANCES=$(( (${GEN_NNODES} * ${GEN_NGPUS_PER_NODE}) / ( ${GEN_TP} * ${GEN_PP} ) )) # Number of generation instances
 GEN_NGPUS_PER_NODE_PER_INSTANCE=$(( ${GEN_TP} * ${GEN_PP} )) # Number of GPUs per node for generation per instance
 
-TRAIN_NNODES=2 # Number of nodes for training
+TRAIN_NNODES=1 # Number of nodes for training
 TRAIN_NGPUS_PER_NODE=${NGPUS_PER_NODE}
 
 VAL_INSTANCES=$(( (${TRAIN_NNODES} * ${TRAIN_NGPUS_PER_NODE}) / ( ${VAL_TP} * ${VAL_PP} ) )) # Number of validation instances
@@ -61,12 +63,11 @@ top_k=-1 # 0 for HF rollout, -1 for vLLM rollout
 val_top_p=0.7
 filter_groups_metric=acc
 
-# NOTE(lhy): parameters of the actor cannot be offloaded when using nixl_cpu mode
-# May support this in the future
+# NOTE(lhy): Actor parameters cannot be offloaded in `nixl_cpu` mode.
 offload=True
 use_dynamic_bsz=True
 
-PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config --config-name='ppo_trainer' \
+PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path="${PSRL_PATH}/psrl/trainer/config" --config-name='ppo_trainer' \
     psrl.ps_manager_ip=${LOCAL_IP} \
     psrl.reward_service_ip=${LOCAL_IP} \
     psrl.rollout_n=${n_resp_per_prompt} \
@@ -86,41 +87,40 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config --conf
     psrl.deployment.train_nnodes=${TRAIN_NNODES} \
     psrl.deployment.train_ngpus_per_node=${TRAIN_NGPUS_PER_NODE} \
     psrl.deployment.total_nnodes=${NNODES} \
-    psrl.nixl.server_port=23456 \
     psrl.group_post_process.enable=False \
     psrl.group_post_process.name=dynamic_sampling_filter \
     \
-    psrl.redundant_rollout.enable=True \
-    psrl.redundant_rollout.redundant_global_batch_size=${redundant_train_prompt_bsz} \
-    psrl.redundant_rollout.redundant_rollout_n=${redundant_n_resp_per_prompt} \
+    psrl.rollout_coordination.redundant_rollout.enable=True \
+    psrl.rollout_coordination.redundant_rollout.redundant_global_batch_size=${redundant_train_prompt_bsz} \
+    psrl.rollout_coordination.redundant_rollout.redundant_rollout_n=${redundant_n_resp_per_prompt} \
     \
-    psrl.partial_rollout.enable=True \
+    psrl.rollout_coordination.partial_rollout.enable=True \
     \
-    psrl.routing_strategy.method="throughput_optimal" \
-    psrl.routing_strategy.candidate_sort_indicator=reserve_capability \
-    psrl.routing_strategy.enable_multi_priority_queue=True \
-    psrl.routing_strategy.enable_group_sampling_on_multi_instances=True \
-    psrl.routing_strategy.cost_model_path=${PSRL_PATH}/psrl/trainer/config/cost_model/qwen_7b.json \
-    psrl.routing_strategy.delta_throughput_threshold=0.2 \
-    psrl.routing_strategy.request_budget=1024 \
-    psrl.routing_strategy.max_num_waiting_reqs_after_preemption=3 \
-    psrl.routing_strategy.max_concurrent_seqs_per_instance=512 \
+    psrl.rollout_coordination.routing_strategy.method="throughput_optimal" \
+    psrl.rollout_coordination.routing_strategy.candidate_sort_indicator=reserve_capability \
+    psrl.rollout_coordination.routing_strategy.enable_multi_priority_queue=True \
+    psrl.rollout_coordination.routing_strategy.enable_group_sticky=False \
+    psrl.rollout_coordination.routing_strategy.cost_model_path=${PSRL_PATH}/psrl/trainer/config/cost_model/qwen_7b.json \
+    psrl.rollout_coordination.routing_strategy.delta_throughput_threshold=0.2 \
+    psrl.rollout_coordination.routing_strategy.request_budget=1024 \
+    psrl.rollout_coordination.routing_strategy.max_num_waiting_reqs_after_preemption=3 \
+    psrl.rollout_coordination.routing_strategy.max_concurrent_seqs_per_instance=512 \
     \
-    psrl.sync_and_mig_strategy.method="status_based" \
-    psrl.sync_and_mig_strategy.sync.indicator="kv_cache" \
-    psrl.sync_and_mig_strategy.sync.threshold=0.6 \
-    psrl.sync_and_mig_strategy.sync.check_req_before_sync=False \
-    psrl.sync_and_mig_strategy.mig.enable=True \
-    psrl.sync_and_mig_strategy.mig.indicator="throughput" \
-    psrl.sync_and_mig_strategy.mig.threshold=5 \
-    psrl.sync_and_mig_strategy.mig.stop_indicator="request_num" \
-    psrl.sync_and_mig_strategy.mig.stop_threshold=10 \
+    psrl.rollout_coordination.sync_and_mig_strategy.method="status_based" \
+    psrl.rollout_coordination.sync_and_mig_strategy.sync.indicator="kv_cache" \
+    psrl.rollout_coordination.sync_and_mig_strategy.sync.threshold=0.6 \
+    psrl.rollout_coordination.sync_and_mig_strategy.sync.check_req_before_sync=False \
+    psrl.rollout_coordination.sync_and_mig_strategy.mig.enable=True \
+    psrl.rollout_coordination.sync_and_mig_strategy.mig.indicator="throughput" \
+    psrl.rollout_coordination.sync_and_mig_strategy.mig.threshold=5 \
+    psrl.rollout_coordination.sync_and_mig_strategy.mig.stop_indicator="request_num" \
+    psrl.rollout_coordination.sync_and_mig_strategy.mig.stop_threshold=10 \
     \
-    psrl.proactive_filter_strategy.method="retry" \
-    psrl.proactive_filter_strategy.threshold=4 \
+    psrl.rollout_coordination.proactive_filter_strategy.method="retry" \
+    psrl.rollout_coordination.proactive_filter_strategy.threshold=4 \
     \
-    gen_actor_rollout_ref.model.path="$HF_MODEL_PATH" \
     gen_actor_rollout_ref.rollout.gpu_memory_utilization=0.9 \
+    gen_actor_rollout_ref.rollout.data_parallel_size=${GEN_DP} \
     gen_actor_rollout_ref.rollout.tensor_model_parallel_size=${GEN_TP} \
     gen_actor_rollout_ref.rollout.pipeline_model_parallel_size=${GEN_PP} \
     gen_actor_rollout_ref.rollout.enable_chunked_prefill=True \
@@ -143,8 +143,11 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config --conf
     train_actor_rollout_ref.rollout.val_kwargs.top_p=${val_top_p} \
     train_actor_rollout_ref.rollout.val_kwargs.top_k=${top_k} \
     train_actor_rollout_ref.rollout.val_kwargs.n=1 \
+    train_actor_rollout_ref.rollout.data_parallel_size=${VAL_DP} \
     train_actor_rollout_ref.rollout.tensor_model_parallel_size=${VAL_TP} \
+    train_actor_rollout_ref.rollout.pipeline_model_parallel_size=${VAL_PP} \
     train_actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
+    train_actor_rollout_ref.actor.strategy=fsdp2 \
     train_actor_rollout_ref.actor.use_kl_loss=${use_kl_loss} \
     train_actor_rollout_ref.actor.kl_loss_coef=${kl_loss_coef} \
     train_actor_rollout_ref.actor.clip_ratio_low=${clip_ratio_low} \
@@ -162,16 +165,18 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config --conf
     train_actor_rollout_ref.actor.grad_clip=1.0 \
     train_actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode} \
     \
-    reward_model.reward_manager=dapo \
-    +reward_model.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer} \
-    +reward_model.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len} \
-    +reward_model.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \
-    +reward_model.reward_kwargs.overlong_buffer_cfg.log=False \
-    +reward_model.reward_kwargs.max_resp_len=${max_response_length} \
+    reward.active_managers='[dapo]' \
+    reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer} \
+    reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len} \
+    reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \
+    reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.log=False \
+    reward.managers.dapo.reward_kwargs.max_resp_len=${max_response_length} \
     \
-    data.train_files="${TRAIN_FILE}" \
-    data.val_files="${TEST_FILE}" \
-    data.prompt_key=prompt \
+    +data.train_files="${TRAIN_FILE}" \
+    data.reward_model_dicts.0.reward_loop_type=dapo \
+    data.reward_model_dicts.0.reward_fn=compute_score \
+    +data.val_files="${TEST_FILE}" \
+    +data.prompt_key=prompt \
     data.truncation='left' \
     data.max_prompt_length=${max_prompt_length} \
     data.max_response_length=${max_response_length} \

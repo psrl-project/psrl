@@ -185,10 +185,7 @@ def validate_reward_cache_config(config: dict[str, Any]) -> str:
     validate_node_cache_directory(config.get("reward_node_cache_dir", "/dev/shm/psrl-rm-weight-cache"))
     backend = config.get("reward_node_cache_backend", "auto")
     if backend not in ("auto", "shm", "memfd"):
-        raise RuntimeError(
-            "reward_node_cache_backend must be 'auto', 'shm', or 'memfd', "
-            f"got {backend!r}."
-        )
+        raise RuntimeError(f"reward_node_cache_backend must be 'auto', 'shm', or 'memfd', got {backend!r}.")
     for key, default in (
         ("reward_node_cache_shm_reserve_gb", _DEFAULT_SHM_RESERVE_GB),
         ("reward_node_cache_memfd_reserve_gb", _DEFAULT_MEMFD_RESERVE_GB),
@@ -221,9 +218,9 @@ def validate_node_cache_directory(cache_root: str | os.PathLike[str]) -> Path:
         raise RuntimeError(f"Reward node cache root must be owned by the current user: {root}.")
     fs_type, mount_point = _filesystem_for_path(root)
     if fs_type not in _MEMORY_FILESYSTEMS:
-        storage_kind = "network" if (
-            fs_type in _NETWORK_FILESYSTEMS or fs_type.startswith(("fuse.s3", "fuse.gcs"))
-        ) else "disk"
+        storage_kind = (
+            "network" if (fs_type in _NETWORK_FILESYSTEMS or fs_type.startswith(("fuse.s3", "fuse.gcs"))) else "disk"
+        )
         raise RuntimeError(
             f"Reward node cache must use node-local shared memory, but {root} is on {storage_kind} "
             f"filesystem {fs_type!r} mounted at {mount_point}."
@@ -407,17 +404,15 @@ def publish_or_map_weight_arena(
                     _mark_prefer_memfd(lease.namespace)
                     selected_backend = "memfd"
             if selected_backend == "memfd":
-                manifest, mapping, arenas, inode, unique_cache_bytes, backend_release = (
-                    _publish_memfd(
-                        handle,
-                        lease=lease,
-                        node_id=node_id,
-                        cache_key=cache_key,
-                        key_payload=key_payload,
-                        timeout_s=timeout_s,
-                        memfd_reserve_bytes=memfd_reserve_bytes,
-                        topology=topology,
-                    )
+                manifest, mapping, arenas, inode, unique_cache_bytes, backend_release = _publish_memfd(
+                    handle,
+                    lease=lease,
+                    node_id=node_id,
+                    cache_key=cache_key,
+                    key_payload=key_payload,
+                    timeout_s=timeout_s,
+                    memfd_reserve_bytes=memfd_reserve_bytes,
+                    topology=topology,
                 )
     except Exception:
         if mapping is not None:
@@ -534,14 +529,17 @@ def _try_map_memfd(
     node_id: str,
     timeout_s: float,
     start_broker: bool,
-) -> tuple[
-    dict[str, Any],
-    mmap.mmap,
-    tuple[torch.Tensor, ...],
-    int,
-    int,
-    Callable[[], None],
-] | None:
+) -> (
+    tuple[
+        dict[str, Any],
+        mmap.mmap,
+        tuple[torch.Tensor, ...],
+        int,
+        int,
+        Callable[[], None],
+    ]
+    | None
+):
     token = _broker_token(lease, node_id)
     if start_broker:
         _ensure_broker(token, timeout_s)
@@ -624,9 +622,7 @@ def _publish_memfd(
         except AttributeError:
             os.ftruncate(fd, total_bytes)
         except OSError as exc:
-            raise RuntimeError(
-                f"Failed to reserve {total_bytes} DRAM bytes for reward memfd cache: {exc}."
-            ) from exc
+            raise RuntimeError(f"Failed to reserve {total_bytes} DRAM bytes for reward memfd cache: {exc}.") from exc
         mapping = mmap.mmap(fd, total_bytes, access=mmap.ACCESS_WRITE)
         try:
             _copy_handle_to_mapping(handle, mapping, arena_layout, total_bytes)
@@ -787,9 +783,7 @@ def _publish_arena(
             os.ftruncate(fd, offset)
         except OSError as exc:
             error_type = SharedMemoryCapacityError if exc.errno in (errno.ENOSPC, errno.ENOMEM) else RuntimeError
-            raise error_type(
-                f"Failed to reserve {offset} bytes for reward node cache at {temp_data}: {exc}."
-            ) from exc
+            raise error_type(f"Failed to reserve {offset} bytes for reward node cache at {temp_data}: {exc}.") from exc
         mapping = mmap.mmap(fd, offset, access=mmap.ACCESS_WRITE)
         try:
             _copy_handle_to_mapping(handle, mapping, arena_layout, offset)
@@ -910,9 +904,7 @@ def _validate_manifest(
     expected_sizes = [_tensor_nbytes(arena) for arena in handle.arenas]
     actual_sizes = [int(item["nbytes"]) for item in manifest.get("arenas", ())]
     if actual_sizes != expected_sizes:
-        raise RuntimeError(
-            f"Reward node cache arena layout changed: expected={expected_sizes} actual={actual_sizes}."
-        )
+        raise RuntimeError(f"Reward node cache arena layout changed: expected={expected_sizes} actual={actual_sizes}.")
     if data_path.stat().st_size != sum(expected_sizes):
         raise RuntimeError(
             f"Reward node cache data is truncated: expected={sum(expected_sizes)} "
@@ -933,14 +925,10 @@ def _validate_memfd_manifest(
     expected_sizes = [_tensor_nbytes(arena) for arena in handle.arenas]
     actual_sizes = [int(item["nbytes"]) for item in manifest.get("arenas", ())]
     if actual_sizes != expected_sizes:
-        raise RuntimeError(
-            f"Reward memfd arena layout changed: expected={expected_sizes} actual={actual_sizes}."
-        )
+        raise RuntimeError(f"Reward memfd arena layout changed: expected={expected_sizes} actual={actual_sizes}.")
     actual_bytes = os.fstat(fd).st_size
     if actual_bytes != sum(expected_sizes):
-        raise RuntimeError(
-            f"Reward memfd is truncated: expected={sum(expected_sizes)} actual={actual_bytes}."
-        )
+        raise RuntimeError(f"Reward memfd is truncated: expected={sum(expected_sizes)} actual={actual_bytes}.")
 
 
 def _read_manifest(path: Path) -> dict[str, Any] | None:

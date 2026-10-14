@@ -121,11 +121,9 @@ class RayLock:
         ray.get(self._lock.release.remote())
 
     def __enter__(self):
-        # block until acquired
         self.acquire()
 
     def __exit__(self, exc_type, exc, tb):
-        # release regardless of exception
         self.release()
 
 
@@ -144,11 +142,9 @@ class AsyncRayLock:
         await self._lock.release.remote()
 
     async def __aenter__(self):
-        # block until acquired
         await self.acquire()
 
     async def __aexit__(self, exc_type, exc, tb):
-        # release regardless of exception
         await self.release()
 
 
@@ -176,13 +172,10 @@ class BusyPollingRayLock:
         Acquire the lock using busy polling, blocking until it is available.
         Continuously polls the acquire() method at the specified interval.
         """
-        # Busy polling loop: check if lock is available
         while True:
-            # Check if lock is available by checking acquire() method
             got_locked = ray.get(self._lock.acquire.remote())
             if got_locked:
                 return
-            # Lock is still held, wait for poll_interval before checking again
             time.sleep(self._poll_interval)
 
     def release(self):
@@ -190,12 +183,10 @@ class BusyPollingRayLock:
         ray.get(self._lock.release.remote())
 
     def __enter__(self):
-        # block until acquired using busy polling
         self.acquire()
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        # release regardless of exception
         self.release()
 
 
@@ -224,11 +215,9 @@ class AsyncBusyPollingRayLock:
         Continuously polls the acquire() method at the specified interval.
         """
         while True:
-            # Check if lock is available by checking acquire() method
             got_locked = await self._lock.acquire.remote()
             if got_locked:
                 return
-            # Lock is still held, wait for poll_interval before checking again
             await asyncio.sleep(self._poll_interval)
 
     async def release(self):
@@ -236,12 +225,10 @@ class AsyncBusyPollingRayLock:
         await self._lock.release.remote()
 
     async def __aenter__(self):
-        # block until acquired using busy polling
         await self.acquire()
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
-        # release regardless of exception
         await self.release()
 
 
@@ -264,16 +251,11 @@ class _ExclusivePushModelContext:
 
     def __enter__(self):
         """Enter the context, acquiring exclusive lock."""
-        # Busy polling until we can acquire the exclusive lock
-        # We need to wait until:
-        # 1. No push is in progress (_exclusive_push_locked == False)
-        # 2. No pull is in progress (_shared_pull_count == 0)
+        # Acquire only when neither a push nor a pull is active.
         while True:
-            # Check if we can acquire the lock
             can_acquire = ray.get(self.ps_manager._try_acquire_exclusive_push_lock.remote())
             if can_acquire:
                 return self
-            # Lock is still held, wait for poll_interval before checking again
             time.sleep(self.poll_interval)
 
     def __exit__(self, exc_type, exc, exc_tb):
@@ -301,14 +283,10 @@ class _SharedPullModelContext:
 
     def __enter__(self):
         """Enter the context, acquiring shared lock."""
-        # Busy polling until we can acquire the shared lock
-        # We need to wait until no push is in progress (_exclusive_push_locked == False)
         while True:
-            # Check if we can acquire the lock
             can_acquire = ray.get(self.ps_manager._try_acquire_shared_pull_lock.remote())
             if can_acquire:
                 return self
-            # Lock is still held, wait for poll_interval before checking again
             time.sleep(self.poll_interval)
 
     def __exit__(self, exc_type, exc, exc_tb):
@@ -336,16 +314,11 @@ class _AsyncExclusivePushModelContext:
 
     async def __aenter__(self):
         """Enter the context, acquiring exclusive lock."""
-        # Busy polling until we can acquire the exclusive lock
-        # We need to wait until:
-        # 1. No push is in progress (_exclusive_push_locked == False)
-        # 2. No pull is in progress (_shared_pull_count == 0)
+        # Acquire only when neither a push nor a pull is active.
         while True:
-            # Check if we can acquire the lock
             can_acquire = await self.ps_manager._try_acquire_exclusive_push_lock.remote()
             if can_acquire:
                 return self
-            # Lock is still held, wait for poll_interval before checking again
             await asyncio.sleep(self.poll_interval)
 
     async def __aexit__(self, exc_type, exc, exc_tb):
@@ -373,14 +346,10 @@ class _AsyncSharedPullModelContext:
 
     async def __aenter__(self):
         """Enter the context, acquiring shared lock."""
-        # Busy polling until we can acquire the shared lock
-        # We need to wait until no push is in progress (_exclusive_push_locked == False)
         while True:
-            # Check if we can acquire the lock
             can_acquire = await self.ps_manager._try_acquire_shared_pull_lock.remote()
             if can_acquire:
                 return self
-            # Lock is still held, wait for poll_interval before checking again
             await asyncio.sleep(self.poll_interval)
 
     async def __aexit__(self, exc_type, exc, exc_tb):

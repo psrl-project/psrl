@@ -1,0 +1,124 @@
+# Configure continued RL with XML function calls.
+# `XmlFcModel` converts parsed calls into sandbox commands.
+- name: mini_swe_agent
+  _target_: psrl.workers.agent_loop.loops.mini_swe_agent_loop_v1.MiniSWEAgentLoopV1
+  sandbox_config:
+    # Cap concurrent Docker rollouts per AgentLoopWorker. Unlimited (0) overloads
+    # the local docker daemon and causes `docker run` to hit pull_timeout.
+    max_parallel_tasks_per_worker: 8
+    rollout_turn_timeout: 2400
+    environment:
+      image: "swebench-sentinel-override-per-instance"
+      cwd: "/testbed"
+      container_timeout: "2h"
+      grader_memory: "30g"
+  agent:
+    system_template: |
+      You are a helpful assistant that can interact with a computer to solve tasks.
+      <IMPORTANT>
+      * If user provides a path, you should NOT assume it's relative to the current working directory. Instead, you should explore the file system to find the file before working on it.
+      </IMPORTANT>
+
+      You have access to the following functions:
+
+      ---- BEGIN FUNCTION #1: bash ----
+      Description: Execute a bash command in the terminal.
+
+      Parameters:
+        (1) command (string, required): The bash command to execute. Can be empty to view additional logs when previous exit code is `-1`. Can be `ctrl+c` to interrupt the currently running process.
+      ---- END FUNCTION #1 ----
+
+      ---- BEGIN FUNCTION #2: str_replace_editor ----
+      Description: Custom editing tool for viewing, creating and editing files.
+
+      Parameters:
+        (1) command (string, required): The command to run. Allowed options are: `view`, `create`, `str_replace`, `insert`, `undo_edit`.
+        (2) path (string, required): Absolute path to file or directory, e.g. `/testbed/file.py` or `/testbed`.
+        (3) file_text (string, optional): Required for `create` command, containing the content of the file to be created.
+        (4) old_str (string, optional): Required for `str_replace` command containing the string in `path` to replace.
+        (5) new_str (string, optional): Optional for `str_replace` (if not given, no string will be added). Required for `insert` command.
+        (6) insert_line (integer, optional): Required for `insert` command. The `new_str` will be inserted AFTER the line `insert_line` of `path`.
+        (7) view_range (array, optional): Optional for `view` command. If provided, only the indicated line range is shown, e.g. [11, 12] shows lines 11-12.
+      ---- END FUNCTION #2 ----
+
+      ---- BEGIN FUNCTION #3: submit ----
+      Description: Finish the interaction when the task is complete OR if the assistant cannot proceed further with the task.
+      No parameters are required for this function.
+      ---- END FUNCTION #3 ----
+
+
+      If you choose to call a function ONLY reply in the following format with NO suffix:
+
+      Provide any reasoning for the function call here.
+      <function=example_function_name>
+      <parameter=example_parameter_1>value_1</parameter>
+      </function>
+
+      <IMPORTANT>
+      Reminder:
+      - Function calls MUST follow the specified format, start with <function= and end with </function>
+      - Required parameters MUST be specified
+      - Only call one function at a time
+      - Always provide reasoning for your function call in natural language BEFORE the function call (not after)
+      </IMPORTANT>
+    problem_template: |
+      <uploaded_files>
+      /testbed
+      </uploaded_files>
+      I've uploaded a python code repository in the directory /testbed. Consider the following PR description:
+
+      <pr_description>
+      {{task}}
+      </pr_description>
+
+      Can you help me implement the necessary changes to the repository so that the requirements specified in the <pr_description> are met?
+      I've already taken care of all changes to any of the test files described in the <pr_description>. This means you DON'T have to modify the testing logic or any of the tests in any way!
+      Your task is to make the minimal changes to non-tests files in the /testbed directory to ensure the <pr_description> is satisfied.
+      Follow these steps to resolve the issue:
+      1. As a first step, it might be a good idea to find and read code relevant to the <pr_description>
+      2. Create a script to reproduce the error and execute it with `python <filename.py>` using the bash tool, to confirm the error
+      3. Edit the source code of the repo to resolve the issue
+      4. Rerun your reproduce script and confirm that the error is fixed!
+      5. Think about edgecases and make sure your fix handles them as well
+      Your thinking should be thorough and so it's fine if it's very long.
+  model:
+    model_class: "examples.mini_swe.eval.xml_fc_model.XmlFcModel"
+    # Sentinel value consumed by XmlFcModel's multi-pattern XML parser.
+    action_regex: "__XML_FUNCTION_CALLING__"
+    observation_template: |
+      OBSERVATION:
+      {% if output.output | length < 10000 -%}
+      {{ output.output }}
+      {%- else -%}
+      <warning>
+      The output of your last command was too long.
+      Please try a different command that produces less output.
+      If you're looking at a file you can try use head, tail or sed to view a smaller number of lines selectively.
+      If you're using grep or find and it produced too much output, you can use a more selective search pattern.
+      If you really need to see something from the full command's output, you can redirect output to a file and then search in that file.
+      </warning>
+      {{ output.output[:5000] }}
+      ... ({{ output.output | length - 10000 }} characters elided) ...
+      {{ output.output[-5000:] }}
+      {%- endif %}
+    format_error_template: |
+      Your last output did not use any valid function call!
+      Please make sure your output includes exactly ONE function call using the correct format.
+      Available functions: bash, str_replace_editor, submit.
+
+      Example for bash:
+      <function=bash>
+      <parameter=command>your_command_here</parameter>
+      </function>
+
+      Example for file editing:
+      <function=str_replace_editor>
+      <parameter=command>str_replace</parameter>
+      <parameter=path>/path/to/file</parameter>
+      <parameter=old_str>text to replace</parameter>
+      <parameter=new_str>replacement text</parameter>
+      </function>
+
+      If you have completed your work, call submit:
+      <function=submit>
+      </function>

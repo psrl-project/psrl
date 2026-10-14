@@ -78,25 +78,9 @@ def model_name_to_cost_model_stems(model_name: str) -> list[str]:
     return _dedupe_stems(stems)
 
 
-def resolve_cost_model_json_path(cost_model_path: str, model_name: str) -> str | None:
-    """
-    Resolve a cost-model JSON file from ``cost_model_path``.
-
-    If ``cost_model_path`` is a file, return it as-is. If it is a directory, pick
-    ``{stem}.json`` using :func:`model_name_to_cost_model_stems`, then fall back to
-    the best filename match in the directory.
-    """
-    if not cost_model_path:
-        return None
-
-    path = os.path.expanduser(str(cost_model_path))
-    if os.path.isfile(path):
-        return path
-    if not os.path.isdir(path):
-        return None
-
+def _lookup_cost_model_json_in_dir(directory: str, model_name: str) -> str | None:
     for stem in model_name_to_cost_model_stems(model_name):
-        candidate = os.path.join(path, f"{stem}.json")
+        candidate = os.path.join(directory, f"{stem}.json")
         if os.path.isfile(candidate):
             return candidate
 
@@ -106,7 +90,7 @@ def resolve_cost_model_json_path(cost_model_path: str, model_name: str) -> str |
 
     best_path: str | None = None
     best_score = 0
-    for entry in sorted(os.listdir(path)):
+    for entry in sorted(os.listdir(directory)):
         if not entry.endswith(".json") or "deprecated" in entry.lower():
             continue
         stem = entry[:-5]
@@ -117,8 +101,44 @@ def resolve_cost_model_json_path(cost_model_path: str, model_name: str) -> str |
             score = len(norm_stem)
             if score > best_score:
                 best_score = score
-                best_path = os.path.join(path, entry)
+                best_path = os.path.join(directory, entry)
     return best_path
+
+
+def resolve_cost_model_json_path(cost_model_path: str, model_name: str) -> str | None:
+    """
+    Resolve a cost-model JSON file from a JSON path or a directory.
+
+    A JSON file path is returned as-is. A directory is searched for ``{stem}.json``
+    using :func:`model_name_to_cost_model_stems`, then the best filename match.
+    """
+    if not cost_model_path:
+        return None
+
+    path = os.path.expanduser(str(cost_model_path))
+    if os.path.isdir(path):
+        return _lookup_cost_model_json_in_dir(path, model_name)
+    return path
+
+
+def require_cost_model_json_path(cost_model_path: str, model_name: str) -> str:
+    """
+    Resolve a cost-model JSON path and raise if a directory has no matching file.
+
+    Args:
+        cost_model_path (str): JSON file path, or a directory of cost-model files.
+        model_name (str): Model name used to pick ``{stem}.json`` in a directory.
+
+    Returns:
+        str: Resolved JSON file path.
+
+    Raises:
+        ValueError: If the path is empty, or a directory has no matching file.
+    """
+    resolved = resolve_cost_model_json_path(cost_model_path, model_name)
+    if not resolved:
+        raise ValueError(f"cost_model_path {cost_model_path!r} does not resolve for model {model_name!r}.")
+    return resolved
 
 
 def load_cost_model_json(cost_model_path: str, model_name: str) -> dict[str, Any] | None:

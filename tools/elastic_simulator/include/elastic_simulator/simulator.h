@@ -34,6 +34,7 @@ struct RequestSnapshot {
   std::int64_t seq_len = 0;
   std::optional<int> source_instance_id;
   bool is_waiting = false;
+  bool movable = true;
   std::int64_t route_order = 0;
   std::vector<PriorityValue> routing_priority;
   std::optional<std::vector<int>> eligible_instance_ids;
@@ -64,7 +65,6 @@ struct RoleSnapshot {
   std::vector<RequestSnapshot> pending_requests;
   std::string queue_scope = "running";
   std::optional<std::int64_t> max_concurrent_requests;
-  std::optional<std::int64_t> waiting_admission_cap;
   double delta_throughput_threshold = 0.0;
   std::optional<double> itl_max_itl;
 };
@@ -138,7 +138,6 @@ struct RoleEvaluationContext {
   RoutingStrategy strategy = RoutingStrategy::kThroughputOptimal;
   std::string queue_scope;
   std::optional<std::int64_t> max_concurrent_requests;
-  std::optional<std::int64_t> waiting_admission_cap;
   double delta_throughput_threshold = 0.0;
   std::optional<double> itl_max_itl;
   std::vector<PreparedInstance> instances;

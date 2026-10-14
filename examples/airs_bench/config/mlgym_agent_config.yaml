@@ -1,0 +1,8 @@
+- name: mlgym_agent
+  runtime:
+    image: ${oc.env:SANDBOX_IMAGE,psrl/airs-bench-agent:latest}
+    data_root: ${oc.env:AIRS_DATA_ROOT,/apdcephfs_zwfy10/share_303541817/lhy/airs_bench_data}
+    sandbox_memory: 32g
+    sandbox_cpus: 8.0
+    episode_timeout_s: 10800.0
+    per_action_timeout_s: 3600.0

@@ -31,8 +31,8 @@ export PSRL_DEPLOY_SMOKE=${1:-0}
 shift || true
 
 export PSRL_DEPLOY_EXTRA="\
-psrl.deployment.trainer_pool_idle_rollout_instances=${IDLE_ROLLOUT_INSTANCES} \
-psrl.deployment.trainer_pool_idle_rm_instances=${IDLE_RM_INSTANCES} \
++psrl.deployment.trainer_pool_idle_rollout_instances=${IDLE_ROLLOUT_INSTANCES} \
++psrl.deployment.trainer_pool_idle_rm_instances=${IDLE_RM_INSTANCES} \
 "
 
 launch_qwen7b_rm32b_deployment_mode "$@"

@@ -1,0 +1,3021 @@
+From 4595f699e25f2eafd8e747110c98740d9b61cde0 Mon Sep 17 00:00:00 2001
+From: Somoku <linsh0@protonmail.com>
+Date: Wed, 18 Mar 2026 09:56:40 +0800
+Subject: [PATCH] v0.14.0 patch
+
+---
+ docs/serving/openai_compatible_server.md  |   4 +
+ pyproject.toml                            |   7 -
+ requirements/build.txt                    |   2 -
+ requirements/common.txt                   |   2 -
+ requirements/cpu-build.txt                |   2 -
+ requirements/cpu.txt                      |   7 -
+ requirements/cuda.txt                     |   4 -
+ requirements/rocm-build.txt               |   4 -
+ requirements/rocm-test.txt                |   4 -
+ requirements/rocm.txt                     |   1 -
+ requirements/test.txt                     | 114 ------
+ requirements/xpu.txt                      |   5 -
+ setup.py                                  |  86 +----
+ tests/v1/distributed/test_async_llm_dp.py |  20 +
+ vllm/engine/protocol.py                   |  39 +-
+ vllm/entrypoints/cli/serve.py             |  13 +
+ vllm/entrypoints/grpc_server.py           | 439 ++--------------------
+ vllm/entrypoints/openai/protocol.py       |  32 ++
+ vllm/entrypoints/openai/serving_chat.py   |   8 +
+ vllm/entrypoints/openai/serving_engine.py |  21 ++
+ vllm/entrypoints/serve/disagg/protocol.py |  21 +-
+ vllm/entrypoints/serve/disagg/serving.py  |  20 +-
+ vllm/grpc/__init__.py                     |  17 -
+ vllm/grpc/compile_protos.py               |  94 -----
+ vllm/grpc/vllm_engine.proto               | 195 ----------
+ vllm/model_executor/models/qwen2.py       |  13 +-
+ vllm/v1/engine/async_llm.py               | 217 ++++++++---
+ vllm/v1/engine/core_client.py             | 200 +++++++---
+ vllm/v1/engine/output_processor.py        |  60 ++-
+ vllm/v1/metrics/loggers.py                |  13 +-
+ vllm/v1/metrics/stats.py                  |   4 +
+ 31 files changed, 603 insertions(+), 1065 deletions(-)
+ delete mode 100644 vllm/grpc/__init__.py
+ delete mode 100755 vllm/grpc/compile_protos.py
+ delete mode 100644 vllm/grpc/vllm_engine.proto
+
+diff --git a/docs/serving/openai_compatible_server.md b/docs/serving/openai_compatible_server.md
+index 8c3cfe46a..3089fbd91 100644
+--- a/docs/serving/openai_compatible_server.md
++++ b/docs/serving/openai_compatible_server.md
+@@ -239,6 +239,10 @@ The following extra parameters are supported:
+     --8<-- "vllm/entrypoints/openai/protocol.py:chat-completion-extra-params"
+     ```
+ 
++  When `return_routed_experts=true`, the final non-streaming chat response may
++  include `choices[*].routed_experts` as a vLLM-specific extension field.
++  This field is not part of the OpenAI API specification.
++
+ ### Responses API
+ 
+ Our Responses API is compatible with [OpenAI's Responses API](https://platform.openai.com/docs/api-reference/responses);
+diff --git a/pyproject.toml b/pyproject.toml
+index a5d41c673..3b491b129 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -6,10 +6,8 @@ requires = [
+     "packaging>=24.2",
+     "setuptools>=77.0.3,<81.0.0",
+     "setuptools-scm>=8.0",
+-    "torch == 2.9.1",
+     "wheel",
+     "jinja2",
+-    "grpcio-tools>=1.76.0",
+ ]
+ build-backend = "setuptools.build_meta"
+ 
+@@ -56,10 +54,6 @@ include = ["vllm*"]
+ "vllm/third_party/**" = ["ALL"]
+ "vllm/version.py" = ["F401"]
+ "vllm/_version.py" = ["ALL"]
+-# Exclude generated protobuf files
+-"vllm/grpc/*_pb2.py" = ["ALL"]
+-"vllm/grpc/*_pb2_grpc.py" = ["ALL"]
+-"vllm/grpc/*_pb2.pyi" = ["ALL"]
+ 
+ [tool.ruff.lint]
+ select = [
+@@ -308,4 +302,3 @@ windo = "windo"
+ [tool.typos.type.vimscript.extend-words]
+ 
+ [tool.uv]
+-no-build-isolation-package = ["torch"]
+\ No newline at end of file
+diff --git a/requirements/build.txt b/requirements/build.txt
+index b3ef0a710..7f9b15478 100644
+--- a/requirements/build.txt
++++ b/requirements/build.txt
+@@ -4,10 +4,8 @@ ninja
+ packaging>=24.2
+ setuptools>=77.0.3,<81.0.0
+ setuptools-scm>=8
+-torch==2.9.1
+ wheel
+ jinja2>=3.1.6
+ regex
+ build
+ protobuf>=6.33.2
+-grpcio-tools>=1.76.0
+diff --git a/requirements/common.txt b/requirements/common.txt
+index 26d53f80a..07c79fb7c 100644
+--- a/requirements/common.txt
++++ b/requirements/common.txt
+@@ -51,5 +51,3 @@ openai-harmony >= 0.0.3  # Required for gpt-oss
+ anthropic == 0.71.0
+ model-hosting-container-standards >= 0.1.10, < 1.0.0
+ mcp
+-grpcio>=1.76.0
+-grpcio-reflection>=1.76.0
+\ No newline at end of file
+diff --git a/requirements/cpu-build.txt b/requirements/cpu-build.txt
+index a7bd3b17b..f3de058b9 100644
+--- a/requirements/cpu-build.txt
++++ b/requirements/cpu-build.txt
+@@ -3,8 +3,6 @@ ninja
+ packaging>=24.2
+ setuptools==77.0.3 # this version can reuse CMake build dir
+ setuptools-scm>=8
+-torch==2.9.1+cpu; platform_machine == "x86_64" or platform_machine == "s390x"
+-torch==2.9.1; platform_system == "Darwin" or platform_machine == "ppc64le" or platform_machine == "aarch64"
+ scons; platform_machine == "aarch64"    # needed to build Arm Compute Library (ACL)
+ wheel
+ jinja2>=3.1.6
+diff --git a/requirements/cpu.txt b/requirements/cpu.txt
+index 111b8a551..d82b6cd2b 100644
+--- a/requirements/cpu.txt
++++ b/requirements/cpu.txt
+@@ -6,16 +6,9 @@ setuptools==77.0.3 # this version can reuse CMake build dir
+ numba == 0.61.2; platform_machine != "s390x" # Required for N-gram speculative decoding
+ 
+ # Dependencies for CPUs
+-torch==2.9.1+cpu; platform_machine == "x86_64" or platform_machine == "s390x"
+-torch==2.9.1; platform_system == "Darwin" or platform_machine == "ppc64le" or platform_machine == "aarch64"
+ 
+-# required for the image processor of minicpm-o-2_6, this must be updated alongside torch
+-torchaudio; platform_machine != "s390x"
+ 
+-# required for the image processor of phi3v, this must be updated alongside torch
+-torchvision; platform_machine != "s390x"
+ 
+-# Intel Extension for PyTorch, only for x86_64 CPUs
+ intel-openmp==2024.2.1; platform_machine == "x86_64"
+ 
+ # Use this to gather CPU info and optimize based on ARM Neoverse cores
+diff --git a/requirements/cuda.txt b/requirements/cuda.txt
+index 1417fb991..9075aee54 100644
+--- a/requirements/cuda.txt
++++ b/requirements/cuda.txt
+@@ -5,9 +5,5 @@ numba == 0.61.2 # Required for N-gram speculative decoding
+ 
+ # Dependencies for NVIDIA GPUs
+ ray[cgraph]>=2.48.0 # Ray Compiled Graph, required for pipeline parallelism in V1.
+-torch==2.9.1
+-torchaudio==2.9.1
+-# These must be updated alongside torch
+-torchvision==0.24.1 # Required for phi3v processor. See https://github.com/pytorch/vision?tab=readme-ov-file#installation for corresponding version
+ # FlashInfer should be updated together with the Dockerfile
+ flashinfer-python==0.5.3
+diff --git a/requirements/rocm-build.txt b/requirements/rocm-build.txt
+index 54af9d995..c36fbe2bb 100644
+--- a/requirements/rocm-build.txt
++++ b/requirements/rocm-build.txt
+@@ -1,10 +1,6 @@
+ # Common dependencies
+ -r common.txt
+ 
+---extra-index-url https://download.pytorch.org/whl/rocm6.4
+-torch==2.9.1
+-torchvision==0.24.1
+-torchaudio==2.9.1
+ 
+ triton==3.5.1
+ cmake>=3.26.1,<4
+diff --git a/requirements/rocm-test.txt b/requirements/rocm-test.txt
+index be8622065..7ddff6281 100644
+--- a/requirements/rocm-test.txt
++++ b/requirements/rocm-test.txt
+@@ -68,9 +68,6 @@ multiprocess==0.70.16
+ ray[cgraph,default]>=2.48.0
+ 
+ # Plugins test
+-terratorch @ git+https://github.com/IBM/terratorch.git@07184fcf91a1324f831ff521dd238d97fe350e3e
+-torchgeo==0.7.0
+-    # via terratorch
+ # MTEB Benchmark Test
+ mteb==2.1.2
+ 
+@@ -85,7 +82,6 @@ fastsafetensors @ git+https://github.com/foundation-model-stack/fastsafetensors.
+ # Required for suffix decoding test
+ arctic-inference == 0.1.1
+ # Required for Nemotron test
+-open-clip-torch==2.32.0
+ # Required for isaac Multi-Modal generation test
+ perceptron==0.1.4
+ # Required for the multi-modal models test
+diff --git a/requirements/rocm.txt b/requirements/rocm.txt
+index 5aeb16599..f5b2fe713 100644
+--- a/requirements/rocm.txt
++++ b/requirements/rocm.txt
+@@ -15,4 +15,3 @@ setuptools-scm>=8
+ runai-model-streamer[s3,gcs]==0.15.3
+ conch-triton-kernels==1.2.1
+ timm>=1.0.17
+-grpcio-tools>=1.76.0
+\ No newline at end of file
+diff --git a/requirements/test.txt b/requirements/test.txt
+index e78431ab3..e770524fa 100644
+--- a/requirements/test.txt
++++ b/requirements/test.txt
+@@ -1,5 +1,4 @@
+ # This file was autogenerated by uv via the following command:
+-#    uv pip compile requirements/test.in -o requirements/test.txt --index-strategy unsafe-best-match --torch-backend cu129 --python-platform x86_64-manylinux_2_28 --python-version 3.12
+ absl-py==2.1.0
+     # via rouge-score
+ accelerate==1.0.1
+@@ -25,11 +24,9 @@ aiohttp-cors==0.8.1
+ aiosignal==1.4.0
+     # via aiohttp
+ albucore==0.0.16
+-    # via terratorch
+ albumentations==1.4.6
+     # via
+     #   -r requirements/test.in
+-    #   terratorch
+ alembic==1.16.4
+     # via mlflow
+ annotated-types==0.7.0
+@@ -188,18 +185,12 @@ docopt==0.6.2
+     # via num2words
+ docstring-parser==0.17.0
+     # via jsonargparse
+-efficientnet-pytorch==0.7.1
+-    # via segmentation-models-pytorch
+ einops==0.8.1
+     # via
+     #   -r requirements/test.in
+     #   encodec
+-    #   terratorch
+-    #   torchgeo
+-    #   vector-quantize-pytorch
+     #   vocos
+ einx==0.3.0
+-    # via vector-quantize-pytorch
+ email-validator==2.2.0
+     # via pydantic
+ encodec==0.1.1
+@@ -222,11 +213,9 @@ filelock==3.16.1
+     #   datasets
+     #   huggingface-hub
+     #   ray
+-    #   torch
+     #   transformers
+     #   virtualenv
+ fiona==1.10.1
+-    # via torchgeo
+ flask==3.1.1
+     # via mlflow
+ fonttools==4.55.0
+@@ -246,16 +235,12 @@ fsspec==2024.9.0
+     #   fastparquet
+     #   huggingface-hub
+     #   lightning
+-    #   pytorch-lightning
+-    #   torch
+ ftfy==6.3.1
+-    # via open-clip-torch
+ genai-perf==0.0.8
+     # via -r requirements/test.in
+ genson==1.3.0
+     # via datamodel-code-generator
+ geopandas==1.0.1
+-    # via terratorch
+ gitdb==4.0.12
+     # via gitpython
+ gitpython==3.1.44
+@@ -308,7 +293,6 @@ h11==0.14.0
+ h2==4.3.0
+     # via httpx
+ h5py==3.13.0
+-    # via terratorch
+ harfile==0.3.0
+     # via schemathesis
+ hf-xet==1.1.7
+@@ -331,11 +315,8 @@ huggingface-hub==0.34.3
+     #   accelerate
+     #   datasets
+     #   evaluate
+-    #   open-clip-torch
+     #   peft
+-    #   segmentation-models-pytorch
+     #   sentence-transformers
+-    #   terratorch
+     #   timm
+     #   tokenizers
+     #   transformers
+@@ -388,7 +369,6 @@ jinja2==3.1.6
+     #   datamodel-code-generator
+     #   flask
+     #   mlflow
+-    #   torch
+ jiwer==3.0.5
+     # via -r requirements/test.in
+ jmespath==1.0.1
+@@ -403,7 +383,6 @@ joblib==1.4.2
+ jsonargparse==4.35.0
+     # via
+     #   lightning
+-    #   terratorch
+ jsonlines==4.0.0
+     # via lm-eval
+ jsonpointer==3.0.0
+@@ -423,7 +402,6 @@ kaleido==0.2.1
+ kiwisolver==1.4.7
+     # via matplotlib
+ kornia==0.8.1
+-    # via torchgeo
+ kornia-rs==0.1.9
+     # via kornia
+ lazy-loader==0.4
+@@ -436,19 +414,13 @@ librosa==0.10.2.post1
+     # via -r requirements/test.in
+ lightly==1.5.20
+     # via
+-    #   terratorch
+-    #   torchgeo
+ lightly-utils==0.0.2
+     # via lightly
+ lightning==2.5.1.post0
+     # via
+-    #   terratorch
+-    #   torchgeo
+ lightning-utilities==0.14.3
+     # via
+     #   lightning
+-    #   pytorch-lightning
+-    #   torchmetrics
+ llvmlite==0.44.0
+     # via numba
+ lm-eval==0.4.9.2
+@@ -476,7 +448,6 @@ matplotlib==3.9.2
+     #   lightning
+     #   mlflow
+     #   pycocotools
+-    #   torchgeo
+ mbstrdecoder==1.1.3
+     # via
+     #   dataproperty
+@@ -487,7 +458,6 @@ mdurl==0.1.2
+ mistral-common==1.8.8
+     # via -r requirements/test.in
+ mlflow==2.22.0
+-    # via terratorch
+ mlflow-skinny==2.22.0
+     # via mlflow
+ more-itertools==10.5.0
+@@ -515,7 +485,6 @@ mypy-extensions==1.0.0
+ networkx==3.2.1
+     # via
+     #   scikit-image
+-    #   torch
+ nltk==3.9.1
+     # via rouge-score
+ num2words==0.5.14
+@@ -570,16 +539,12 @@ numpy==1.26.4
+     #   scikit-image
+     #   scikit-learn
+     #   scipy
+-    #   segmentation-models-pytorch
+     #   shapely
+     #   soxr
+     #   statsmodels
+     #   tensorboardx
+     #   tensorizer
+     #   tifffile
+-    #   torchgeo
+-    #   torchmetrics
+-    #   torchvision
+     #   transformers
+     #   tritonclient
+     #   vocos
+@@ -588,46 +553,30 @@ nvidia-cublas-cu12==12.9.1.4
+     # via
+     #   nvidia-cudnn-cu12
+     #   nvidia-cusolver-cu12
+-    #   torch
+ nvidia-cuda-cupti-cu12==12.9.79
+-    # via torch
+ nvidia-cuda-nvrtc-cu12==12.9.86
+-    # via torch
+ nvidia-cuda-runtime-cu12==12.9.79
+-    # via torch
+ nvidia-cudnn-cu12==9.10.2.21
+-    # via torch
+ nvidia-cufft-cu12==11.4.1.4
+-    # via torch
+ nvidia-cufile-cu12==1.14.1.1
+-    # via torch
+ nvidia-curand-cu12==10.3.10.19
+-    # via torch
+ nvidia-cusolver-cu12==11.7.5.82
+-    # via torch
+ nvidia-cusparse-cu12==12.5.10.65
+     # via
+     #   nvidia-cusolver-cu12
+-    #   torch
+ nvidia-cusparselt-cu12==0.7.1
+-    # via torch
+ nvidia-nccl-cu12==2.27.5
+-    # via torch
+ nvidia-nvjitlink-cu12==12.9.86
+     # via
+     #   nvidia-cufft-cu12
+     #   nvidia-cusolver-cu12
+     #   nvidia-cusparse-cu12
+-    #   torch
+ nvidia-nvshmem-cu12==3.3.20
+-    # via torch
+ nvidia-nvtx-cu12==12.9.79
+-    # via torch
+ omegaconf==2.3.0
+     # via
+     #   hydra-core
+     #   lightning
+-open-clip-torch==2.32.0
+     # via -r requirements/test.in
+ openai-harmony==0.0.4
+     # via gpt-oss
+@@ -682,13 +631,11 @@ packaging==24.2
+     #   pyogrio
+     #   pytest
+     #   pytest-rerunfailures
+-    #   pytorch-lightning
+     #   ray
+     #   rioxarray
+     #   scikit-image
+     #   statsmodels
+     #   tensorboardx
+-    #   torchmetrics
+     #   transformers
+     #   typepy
+     #   xarray
+@@ -701,7 +648,6 @@ pandas==2.2.3
+     #   geopandas
+     #   mlflow
+     #   statsmodels
+-    #   torchgeo
+     #   xarray
+ pathspec==0.12.1
+     # via black
+@@ -724,9 +670,6 @@ pillow==10.4.0
+     #   mistral-common
+     #   perceptron
+     #   scikit-image
+-    #   segmentation-models-pytorch
+-    #   torchgeo
+-    #   torchvision
+ platformdirs==4.3.6
+     # via
+     #   black
+@@ -747,7 +690,6 @@ portalocker==2.10.1
+ pqdm==0.2.0
+     # via -r requirements/test.in
+ pretrainedmodels==0.7.4
+-    # via segmentation-models-pytorch
+ prometheus-client==0.22.0
+     # via
+     #   opentelemetry-exporter-prometheus
+@@ -791,7 +733,6 @@ pyasn1-modules==0.4.2
+ pybind11==2.13.6
+     # via lm-eval
+ pycocotools==2.0.8
+-    # via terratorch
+ pycountry==24.6.1
+     # via pydantic-extra-types
+ pycparser==2.22
+@@ -828,7 +769,6 @@ pyproj==3.7.1
+     # via
+     #   geopandas
+     #   rioxarray
+-    #   torchgeo
+ pyrate-limiter==3.7.0
+     # via schemathesis
+ pystemmer==3.0.0
+@@ -849,7 +789,6 @@ pytest==8.3.5
+     #   pytest-subtests
+     #   pytest-timeout
+     #   schemathesis
+-    #   terratorch
+ pytest-asyncio==0.24.0
+     # via -r requirements/test.in
+ pytest-cov==6.3.0
+@@ -867,7 +806,6 @@ pytest-subtests==0.14.1
+ pytest-timeout==2.3.1
+     # via -r requirements/test.in
+ python-box==7.3.2
+-    # via terratorch
+ python-dateutil==2.9.0.post0
+     # via
+     #   arrow
+@@ -879,7 +817,6 @@ python-dateutil==2.9.0.post0
+     #   typepy
+ python-rapidjson==1.20
+     # via tritonclient
+-pytorch-lightning==2.5.2
+     # via
+     #   lightly
+     #   lightning
+@@ -902,7 +839,6 @@ pyyaml==6.0.2
+     #   mlflow-skinny
+     #   omegaconf
+     #   peft
+-    #   pytorch-lightning
+     #   ray
+     #   responses
+     #   schemathesis
+@@ -914,8 +850,6 @@ rapidfuzz==3.12.1
+ rasterio==1.4.3
+     # via
+     #   rioxarray
+-    #   terratorch
+-    #   torchgeo
+ ray==2.48.0
+     # via -r requirements/test.in
+ redis==5.2.0
+@@ -927,7 +861,6 @@ referencing==0.35.1
+ regex==2024.9.11
+     # via
+     #   nltk
+-    #   open-clip-torch
+     #   sacrebleu
+     #   tiktoken
+     #   transformers
+@@ -968,7 +901,6 @@ rich==13.9.4
+     #   perceptron
+     #   typer
+ rioxarray==0.19.0
+-    # via terratorch
+ rouge-score==0.1.2
+     # via lm-eval
+ rpds-py==0.20.1
+@@ -978,7 +910,6 @@ rpds-py==0.20.1
+ rsa==4.9.1
+     # via google-auth
+ rtree==1.4.0
+-    # via torchgeo
+ runai-model-streamer==0.15.3
+     # via -r requirements/test.in
+ runai-model-streamer-gcs==0.15.3
+@@ -992,7 +923,6 @@ sacrebleu==2.4.3
+ safetensors==0.4.5
+     # via
+     #   accelerate
+-    #   open-clip-torch
+     #   peft
+     #   timm
+     #   transformers
+@@ -1020,10 +950,7 @@ scipy==1.13.1
+     #   sentence-transformers
+     #   statsmodels
+     #   vocos
+-segmentation-models-pytorch==0.4.0
+     # via
+-    #   terratorch
+-    #   torchgeo
+ sentence-transformers==5.2.0
+     # via
+     #   -r requirements/test.in
+@@ -1032,11 +959,9 @@ setuptools==77.0.3
+     # via
+     #   lightning-utilities
+     #   pytablewriter
+-    #   torch
+ shapely==2.1.1
+     # via
+     #   geopandas
+-    #   torchgeo
+ shellingham==1.5.4
+     # via
+     #   perceptron
+@@ -1049,7 +974,6 @@ six==1.16.0
+     #   python-dateutil
+     #   rfc3339-validator
+     #   rouge-score
+-    #   segmentation-models-pytorch
+ smart-open==7.1.0
+     # via ray
+ smmap==5.0.2
+@@ -1091,7 +1015,6 @@ structlog==25.4.0
+ sympy==1.13.3
+     # via
+     #   einx
+-    #   torch
+ tabledata==1.3.3
+     # via pytablewriter
+ tabulate==0.9.0
+@@ -1111,14 +1034,12 @@ tensorizer==2.10.1
+     # via -r requirements/test.in
+ termcolor==3.1.0
+     # via gpt-oss
+-terratorch @ git+https://github.com/IBM/terratorch.git@07184fcf91a1324f831ff521dd238d97fe350e3e
+     # via -r requirements/test.in
+ threadpoolctl==3.5.0
+     # via scikit-learn
+ tifffile==2025.3.30
+     # via
+     #   scikit-image
+-    #   terratorch
+ tiktoken==0.12.0
+     # via
+     #   gpt-oss
+@@ -1127,10 +1048,6 @@ tiktoken==0.12.0
+ timm==1.0.17
+     # via
+     #   -r requirements/test.in
+-    #   open-clip-torch
+-    #   segmentation-models-pytorch
+-    #   terratorch
+-    #   torchgeo
+ tokenizers==0.22.0
+     # via
+     #   -r requirements/test.in
+@@ -1139,12 +1056,10 @@ tomli==2.2.1
+     # via schemathesis
+ tomli-w==1.2.0
+     # via schemathesis
+-torch==2.9.1+cu129
+     # via
+     #   -r requirements/test.in
+     #   accelerate
+     #   bitsandbytes
+-    #   efficientnet-pytorch
+     #   encodec
+     #   fastsafetensors
+     #   kornia
+@@ -1152,45 +1067,24 @@ torch==2.9.1+cu129
+     #   lightning
+     #   lm-eval
+     #   mteb
+-    #   open-clip-torch
+     #   peft
+     #   pretrainedmodels
+-    #   pytorch-lightning
+     #   runai-model-streamer
+-    #   segmentation-models-pytorch
+     #   sentence-transformers
+     #   tensorizer
+-    #   terratorch
+     #   timm
+-    #   torchaudio
+-    #   torchgeo
+-    #   torchmetrics
+-    #   torchvision
+-    #   vector-quantize-pytorch
+     #   vocos
+-torchaudio==2.9.1+cu129
+     # via
+     #   -r requirements/test.in
+     #   encodec
+     #   vocos
+-torchgeo==0.7.0
+-    # via terratorch
+-torchmetrics==1.7.4
+     # via
+     #   lightning
+-    #   pytorch-lightning
+-    #   terratorch
+-    #   torchgeo
+-torchvision==0.24.1+cu129
+     # via
+     #   -r requirements/test.in
+     #   lightly
+-    #   open-clip-torch
+     #   pretrainedmodels
+-    #   segmentation-models-pytorch
+-    #   terratorch
+     #   timm
+-    #   torchgeo
+ tqdm==4.66.6
+     # via
+     #   datasets
+@@ -1201,12 +1095,9 @@ tqdm==4.66.6
+     #   lm-eval
+     #   mteb
+     #   nltk
+-    #   open-clip-torch
+     #   peft
+     #   pqdm
+     #   pretrainedmodels
+-    #   pytorch-lightning
+-    #   segmentation-models-pytorch
+     #   sentence-transformers
+     #   tqdm-multiprocess
+     #   transformers
+@@ -1223,7 +1114,6 @@ transformers==4.57.3
+ transformers-stream-generator==0.0.5
+     # via -r requirements/test.in
+ triton==3.5.1
+-    # via torch
+ tritonclient==2.51.0
+     # via
+     #   -r requirements/test.in
+@@ -1264,11 +1154,8 @@ typing-extensions==4.15.0
+     #   pydantic
+     #   pydantic-core
+     #   pydantic-extra-types
+-    #   pytorch-lightning
+     #   sentence-transformers
+     #   sqlalchemy
+-    #   torch
+-    #   torchgeo
+     #   typer
+     #   typeshed-client
+     #   typing-inspection
+@@ -1291,7 +1178,6 @@ uvicorn==0.35.0
+     # via
+     #   gpt-oss
+     #   mlflow-skinny
+-vector-quantize-pytorch==1.21.2
+     # via -r requirements/test.in
+ virtualenv==20.31.2
+     # via ray
+diff --git a/requirements/xpu.txt b/requirements/xpu.txt
+index c1dc4195b..ed0066870 100644
+--- a/requirements/xpu.txt
++++ b/requirements/xpu.txt
+@@ -10,9 +10,4 @@ wheel
+ jinja2>=3.1.6
+ datasets # for benchmark scripts
+ numba == 0.61.2 # Required for N-gram speculative decoding
+---extra-index-url=https://download.pytorch.org/whl/xpu
+-torch==2.9.0+xpu
+-torchaudio
+-torchvision
+ 
+-intel-extension-for-pytorch @ https://intel-extension-for-pytorch.s3.us-east-1.amazonaws.com/ipex_dev/xpu/intel_extension_for_pytorch-2.9.10.post0%2Bxpu-cp312-cp312-linux_x86_64.whl
+diff --git a/setup.py b/setup.py
+index 8c952e01a..e8a526b85 100644
+--- a/setup.py
++++ b/setup.py
+@@ -18,8 +18,6 @@ import torch
+ from packaging.version import Version, parse
+ from setuptools import Extension, setup
+ from setuptools.command.build_ext import build_ext
+-from setuptools.command.build_py import build_py
+-from setuptools.command.develop import develop
+ from setuptools_scm import get_version
+ from torch.utils.cpp_extension import CUDA_HOME, ROCM_HOME
+ 
+@@ -81,81 +79,6 @@ def is_freethreaded():
+     return bool(sysconfig.get_config_var("Py_GIL_DISABLED"))
+ 
+ 
+-def compile_grpc_protos():
+-    """Compile gRPC protobuf definitions during build.
+-
+-    This generates *_pb2.py, *_pb2_grpc.py, and *_pb2.pyi files from
+-    the vllm_engine.proto definition.
+-    """
+-    try:
+-        from grpc_tools import protoc
+-    except ImportError:
+-        logger.warning(
+-            "grpcio-tools not installed, skipping gRPC proto compilation. "
+-            "gRPC server functionality will not be available."
+-        )
+-        return False
+-
+-    proto_file = ROOT_DIR / "vllm" / "grpc" / "vllm_engine.proto"
+-    if not proto_file.exists():
+-        logger.warning("Proto file not found at %s, skipping compilation", proto_file)
+-        return False
+-
+-    logger.info("Compiling gRPC protobuf: %s", proto_file)
+-
+-    result = protoc.main(
+-        [
+-            "grpc_tools.protoc",
+-            f"--proto_path={ROOT_DIR}",
+-            f"--python_out={ROOT_DIR}",
+-            f"--grpc_python_out={ROOT_DIR}",
+-            f"--pyi_out={ROOT_DIR}",
+-            str(proto_file),
+-        ]
+-    )
+-
+-    if result != 0:
+-        logger.error("protoc failed with exit code %s", result)
+-        return False
+-
+-    # Add SPDX headers and mypy ignore to generated files
+-    spdx_header = (
+-        "# SPDX-License-Identifier: Apache-2.0\n"
+-        "# SPDX-FileCopyrightText: Copyright contributors to the vLLM project\n"
+-        "# mypy: ignore-errors\n"
+-    )
+-
+-    grpc_dir = ROOT_DIR / "vllm" / "grpc"
+-    for generated_file in [
+-        grpc_dir / "vllm_engine_pb2.py",
+-        grpc_dir / "vllm_engine_pb2_grpc.py",
+-        grpc_dir / "vllm_engine_pb2.pyi",
+-    ]:
+-        if generated_file.exists():
+-            content = generated_file.read_text()
+-            if not content.startswith("# SPDX-License-Identifier"):
+-                generated_file.write_text(spdx_header + content)
+-
+-    logger.info("gRPC protobuf compilation successful")
+-    return True
+-
+-
+-class BuildPyAndGenerateGrpc(build_py):
+-    """Build Python modules and generate gRPC stubs from proto files."""
+-
+-    def run(self):
+-        compile_grpc_protos()
+-        super().run()
+-
+-
+-class DevelopAndGenerateGrpc(develop):
+-    """Develop mode that also generates gRPC stubs from proto files."""
+-
+-    def run(self):
+-        compile_grpc_protos()
+-        super().run()
+-
+-
+ class CMakeExtension(Extension):
+     def __init__(self, name: str, cmake_lists_dir: str = ".", **kwa) -> None:
+         super().__init__(name, sources=[], py_limited_api=not is_freethreaded(), **kwa)
+@@ -959,17 +882,12 @@ if _no_device():
+     ext_modules = []
+ 
+ if not ext_modules:
+-    cmdclass = {
+-        "build_py": BuildPyAndGenerateGrpc,
+-        "develop": DevelopAndGenerateGrpc,
+-    }
++    cmdclass = {}
+ else:
+     cmdclass = {
+         "build_ext": precompiled_build_ext
+         if envs.VLLM_USE_PRECOMPILED
+         else cmake_build_ext,
+-        "build_py": BuildPyAndGenerateGrpc,
+-        "develop": DevelopAndGenerateGrpc,
+     }
+ 
+ setup(
+@@ -992,6 +910,8 @@ setup(
+         "flashinfer": [],  # Kept for backwards compatibility
+         # Optional deps for AMD FP4 quantization support
+         "petit-kernel": ["petit-kernel"],
++        # Optional deps for gRPC server (vllm serve --grpc)
++        "grpc": ["smg-grpc-servicer >= 0.4.2"],
+     },
+     cmdclass=cmdclass,
+     package_data=package_data,
+diff --git a/tests/v1/distributed/test_async_llm_dp.py b/tests/v1/distributed/test_async_llm_dp.py
+index 3b5f2e5e8..3784a7785 100644
+--- a/tests/v1/distributed/test_async_llm_dp.py
++++ b/tests/v1/distributed/test_async_llm_dp.py
+@@ -22,6 +22,26 @@ from vllm.v1.metrics.stats import IterationStats, MultiModalCacheStats, Schedule
+ DP_SIZE = int(os.getenv("DP_SIZE", 2))
+ 
+ 
++@pytest.mark.asyncio
++async def test_engine_index_sleeping():
++    engine_args = AsyncEngineArgs(
++        model="hmellor/tiny-random-LlamaForCausalLM",
++        enforce_eager=True,
++        data_parallel_size=2,
++        data_parallel_backend="mp",
++        disable_log_stats=True,
++    )
++
++    with ExitStack() as after:
++        engine = AsyncLLM.from_engine_args(engine_args)
++        after.callback(engine.shutdown)
++
++        await engine.sleep(engine_index=0)
++        states = await engine.is_sleeping(engine_index=[0, 1])
++
++    assert states == [True, False]
++
++
+ async def generate(
+     engine: AsyncLLM,
+     request_id: str,
+diff --git a/vllm/engine/protocol.py b/vllm/engine/protocol.py
+index bf656cf23..f491278b7 100644
+--- a/vllm/engine/protocol.py
++++ b/vllm/engine/protocol.py
+@@ -105,44 +105,59 @@ class EngineClient(ABC):
+         ...
+ 
+     @abstractmethod
+-    async def start_profile(self) -> None:
++    async def start_profile(
++        self, data_parallel_rank: int | None = None
++    ) -> None:
+         """Start profiling the engine"""
+         ...
+ 
+     @abstractmethod
+-    async def stop_profile(self) -> None:
++    async def stop_profile(
++        self, data_parallel_rank: int | None = None
++    ) -> None:
+         """Stop profiling the engine"""
+         ...
+ 
+     @abstractmethod
+-    async def reset_mm_cache(self) -> None:
++    async def reset_mm_cache(
++        self, data_parallel_rank: int | None = None
++    ) -> None:
+         """Reset the multi-modal cache"""
+         ...
+ 
+     @abstractmethod
+     async def reset_prefix_cache(
+-        self, reset_running_requests: bool = False, reset_connector: bool = False
++        self,
++        reset_running_requests: bool = False,
++        reset_connector: bool = False,
++        data_parallel_rank: int | None = None,
+     ) -> bool:
+         """Reset the prefix cache and optionally any configured connector cache"""
+         ...
+ 
+     @abstractmethod
+-    async def sleep(self, level: int = 1) -> None:
++    async def sleep(
++        self, level: int = 1, data_parallel_rank: int | None = None
++    ) -> None:
+         """Sleep the engine"""
+         ...
+ 
+     @abstractmethod
+-    async def wake_up(self, tags: list[str] | None = None) -> None:
++    async def wake_up(
++        self, tags: list[str] | None = None, data_parallel_rank: int | None = None
++    ) -> None:
+         """Wake up the engine"""
+         ...
+ 
+     @abstractmethod
+-    async def is_sleeping(self) -> bool:
++    async def is_sleeping(self, data_parallel_rank: int | None = None) -> bool:
+         """Check whether the engine is sleeping"""
+         ...
+ 
+     @abstractmethod
+-    async def add_lora(self, lora_request: LoRARequest) -> bool:
++    async def add_lora(
++        self, lora_request: LoRARequest, data_parallel_rank: int | None = None
++    ) -> bool:
+         """Load a new LoRA adapter into the engine for future requests."""
+         ...
+ 
+@@ -152,6 +167,7 @@ class EngineClient(ABC):
+         *,
+         wait_for_inflight_requests: bool = False,
+         clear_cache: bool = True,
++        data_parallel_rank: int | None = None,
+     ) -> None:
+         """Pause new generation/encoding requests.
+ 
+@@ -164,12 +180,14 @@ class EngineClient(ABC):
+         ...
+ 
+     @abstractmethod
+-    async def resume_generation(self) -> None:
++    async def resume_generation(
++        self, data_parallel_rank: int | None = None
++    ) -> None:
+         """Resume accepting generation/encoding requests."""
+         ...
+ 
+     @abstractmethod
+-    async def is_paused(self) -> bool:
++    async def is_paused(self, data_parallel_rank: int | None = None) -> bool:
+         """Return whether the engine is currently paused."""
+         ...
+ 
+@@ -185,6 +203,7 @@ class EngineClient(ABC):
+         timeout: float | None = None,
+         args: tuple = (),
+         kwargs: dict | None = None,
++        data_parallel_rank: int | None = None,
+     ):
+         """Perform a collective RPC call to the given path."""
+         raise NotImplementedError
+diff --git a/vllm/entrypoints/cli/serve.py b/vllm/entrypoints/cli/serve.py
+index 77c7253ae..432ae4952 100644
+--- a/vllm/entrypoints/cli/serve.py
++++ b/vllm/entrypoints/cli/serve.py
+@@ -50,6 +50,12 @@ class ServeSubcommand(CLISubcommand):
+         if hasattr(args, "model_tag") and args.model_tag is not None:
+             args.model = args.model_tag
+ 
++        if getattr(args, "grpc", False):
++            from vllm.entrypoints.grpc_server import serve_grpc
++
++            uvloop.run(serve_grpc(args))
++            return
++
+         if args.headless or args.api_server_count < 1:
+             run_headless(args)
+         else:
+@@ -72,6 +78,13 @@ class ServeSubcommand(CLISubcommand):
+             description=DESCRIPTION,
+             usage="vllm serve [model_tag] [options]",
+         )
++        serve_parser.add_argument(
++            "--grpc",
++            action="store_true",
++            default=False,
++            help="Launch a gRPC server instead of the HTTP OpenAI-compatible "
++            "server. Requires: pip install vllm[grpc].",
++        )
+ 
+         serve_parser = make_arg_parser(serve_parser)
+         serve_parser.epilog = VLLM_SUBCMD_PARSER_EPILOG.format(subcmd=self.name)
+diff --git a/vllm/entrypoints/grpc_server.py b/vllm/entrypoints/grpc_server.py
+index 2778385c9..8a99adc00 100755
+--- a/vllm/entrypoints/grpc_server.py
++++ b/vllm/entrypoints/grpc_server.py
+@@ -5,7 +5,8 @@
+ """
+ vLLM gRPC Server
+ 
+-Starts a gRPC server for vLLM using the VllmEngine protocol.
++Starts a gRPC server backed by AsyncLLM, using the VllmEngineServicer
++from the smg-grpc-servicer package.
+ 
+ Usage:
+     python -m vllm.entrypoints.grpc_server --model <model_path>
+@@ -22,18 +23,21 @@ import asyncio
+ import signal
+ import sys
+ import time
+-from collections.abc import AsyncGenerator
+ 
+-import grpc
++try:
++    import grpc
++    from grpc_reflection.v1alpha import reflection
++    from smg_grpc_proto import vllm_engine_pb2, vllm_engine_pb2_grpc
++    from smg_grpc_servicer.vllm.servicer import VllmEngineServicer
++except ImportError:
++    raise ImportError(
++        "smg-grpc-servicer is required for gRPC mode. "
++        "Install it with: pip install vllm[grpc]"
++    ) from None
+ import uvloop
+-from grpc_reflection.v1alpha import reflection
+ 
+-from vllm import SamplingParams, TextPrompt, TokensPrompt
+ from vllm.engine.arg_utils import AsyncEngineArgs
+-from vllm.grpc import vllm_engine_pb2, vllm_engine_pb2_grpc
+ from vllm.logger import init_logger
+-from vllm.outputs import RequestOutput
+-from vllm.sampling_params import RequestOutputKind, StructuredOutputsParams
+ from vllm.usage.usage_lib import UsageContext
+ from vllm.utils.argparse_utils import FlexibleArgumentParser
+ from vllm.v1.engine.async_llm import AsyncLLM
+@@ -42,368 +46,9 @@ from vllm.version import __version__ as VLLM_VERSION
+ logger = init_logger(__name__)
+ 
+ 
+-class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
+-    """
+-    gRPC servicer implementing the VllmEngine service.
+-
+-    Handles 6 RPCs:
+-    - Generate: Streaming text generation
+-    - Embed: Embeddings (TODO)
+-    - HealthCheck: Health probe
+-    - Abort: Cancel requests out-of-band
+-    - GetModelInfo: Model metadata
+-    - GetServerInfo: Server state
+-    """
+-
+-    def __init__(self, async_llm: AsyncLLM, start_time: float):
+-        """
+-        Initialize the servicer.
+-
+-        Args:
+-            async_llm: The AsyncLLM instance
+-            start_time: The server start time, in seconds since epoch
+-        """
+-        self.async_llm = async_llm
+-        self.start_time = start_time
+-        logger.info("VllmEngineServicer initialized")
+-
+-    async def Generate(
+-        self,
+-        request: vllm_engine_pb2.GenerateRequest,
+-        context: grpc.aio.ServicerContext,
+-    ) -> AsyncGenerator[vllm_engine_pb2.GenerateResponse, None]:
+-        """
+-        Handle streaming generation requests.
+-
+-        Args:
+-            request: The GenerateRequest protobuf
+-            context: gRPC context
+-
+-        Yields:
+-            GenerateResponse protobuf messages (streaming)
+-        """
+-        request_id = request.request_id
+-        logger.debug("Generate request %s received.", request_id)
+-
+-        try:
+-            # Extract tokenized input
+-            if request.WhichOneof("input") == "tokenized":
+-                prompt: TokensPrompt = {
+-                    "prompt_token_ids": list(request.tokenized.input_ids)
+-                }
+-                if request.tokenized.original_text:
+-                    prompt["prompt"] = request.tokenized.original_text
+-            else:
+-                prompt: TextPrompt = {"prompt": request.text}
+-
+-            # Build sampling params with detokenize=False
+-            sampling_params = self._sampling_params_from_proto(
+-                request.sampling_params, stream=request.stream
+-            )
+-
+-            async for output in self.async_llm.generate(
+-                prompt=prompt,
+-                sampling_params=sampling_params,
+-                request_id=request_id,
+-            ):
+-                # Convert vLLM output to protobuf
+-                # For streaming, always send chunks
+-                if request.stream:
+-                    yield self._chunk_response(output)
+-
+-                # Send complete response when finished
+-                if output.finished:
+-                    yield self._complete_response(output)
+-
+-        except ValueError as e:
+-            # Invalid request error (equiv to 400).
+-            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
+-        except Exception as e:
+-            logger.exception("Error in Generate for request %s", request_id)
+-            await context.abort(grpc.StatusCode.INTERNAL, str(e))
+-
+-    async def Embed(
+-        self,
+-        request: vllm_engine_pb2.EmbedRequest,
+-        context: grpc.aio.ServicerContext,
+-    ) -> vllm_engine_pb2.EmbedResponse:
+-        """
+-        Handle embedding requests.
+-
+-        TODO: Implement in Phase 4
+-
+-        Args:
+-            request: The EmbedRequest protobuf
+-            context: gRPC context
+-
+-        Returns:
+-            EmbedResponse protobuf
+-        """
+-        logger.warning("Embed RPC not yet implemented")
+-        await context.abort(
+-            grpc.StatusCode.UNIMPLEMENTED, "Embed RPC not yet implemented"
+-        )
+-
+-    async def HealthCheck(
+-        self,
+-        request: vllm_engine_pb2.HealthCheckRequest,
+-        context: grpc.aio.ServicerContext,
+-    ) -> vllm_engine_pb2.HealthCheckResponse:
+-        """
+-        Handle health check requests.
+-
+-        Args:
+-            request: The HealthCheckRequest protobuf
+-            context: gRPC context
+-
+-        Returns:
+-            HealthCheckResponse protobuf
+-        """
+-        is_healthy = not self.async_llm.errored
+-        message = "Health" if is_healthy else "Engine is not alive"
+-
+-        logger.debug("HealthCheck request: healthy=%s, message=%s", is_healthy, message)
+-
+-        return vllm_engine_pb2.HealthCheckResponse(healthy=is_healthy, message=message)
+-
+-    async def Abort(
+-        self,
+-        request: vllm_engine_pb2.AbortRequest,
+-        context: grpc.aio.ServicerContext,
+-    ) -> vllm_engine_pb2.AbortResponse:
+-        """
+-        Out-of-band abort requests.
+-
+-        Args:
+-            request: The AbortRequest protobuf
+-            context: gRPC context
+-
+-        Returns:
+-            AbortResponse protobuf
+-        """
+-        request_ids = request.request_ids
+-        logger.debug("Abort requests: %s", request_ids)
+-
+-        await self.async_llm.abort(request_ids)
+-        return vllm_engine_pb2.AbortResponse()
+-
+-    async def GetModelInfo(
+-        self,
+-        request: vllm_engine_pb2.GetModelInfoRequest,
+-        context: grpc.aio.ServicerContext,
+-    ) -> vllm_engine_pb2.GetModelInfoResponse:
+-        """
+-        Handle model info requests.
+-
+-        Args:
+-            request: The GetModelInfoRequest protobuf
+-            context: gRPC context
+-
+-        Returns:
+-            GetModelInfoResponse protobuf
+-        """
+-        model_config = self.async_llm.model_config
+-
+-        return vllm_engine_pb2.GetModelInfoResponse(
+-            model_path=model_config.model,
+-            is_generation=model_config.runner_type == "generate",
+-            max_context_length=model_config.max_model_len,
+-            vocab_size=model_config.get_vocab_size(),
+-            supports_vision=model_config.is_multimodal_model,
+-        )
+-
+-    async def GetServerInfo(
+-        self,
+-        request: vllm_engine_pb2.GetServerInfoRequest,
+-        context: grpc.aio.ServicerContext,
+-    ) -> vllm_engine_pb2.GetServerInfoResponse:
+-        """
+-        Handle server info requests.
+-
+-        Args:
+-            request: The GetServerInfoRequest protobuf
+-            context: gRPC context
+-
+-        Returns:
+-            GetServerInfoResponse protobuf
+-        """
+-        num_requests = self.async_llm.output_processor.get_num_unfinished_requests()
+-
+-        return vllm_engine_pb2.GetServerInfoResponse(
+-            active_requests=num_requests,
+-            is_paused=False,  # TODO
+-            last_receive_timestamp=time.time(),  # TODO looks wrong?
+-            uptime_seconds=time.time() - self.start_time,
+-            server_type="vllm-grpc",
+-        )
+-
+-    # ========== Helper methods ==========
+-
+-    @staticmethod
+-    def _sampling_params_from_proto(
+-        params: vllm_engine_pb2.SamplingParams, stream: bool = True
+-    ) -> SamplingParams:
+-        """
+-        Convert protobuf SamplingParams to vLLM SamplingParams.
+-
+-        Args:
+-            params: Protobuf SamplingParams message
+-            stream: Whether streaming is enabled
+-
+-        Returns:
+-            vLLM SamplingParams with detokenize=False and structured_outputs
+-        """
+-        # Build stop sequences
+-        stop = list(params.stop) if params.stop else None
+-        stop_token_ids = list(params.stop_token_ids) if params.stop_token_ids else None
+-
+-        # Handle structured outputs constraints
+-        structured_outputs = None
+-        constraint_field = params.WhichOneof("constraint")
+-        if constraint_field:
+-            if constraint_field == "json_schema":
+-                structured_outputs = StructuredOutputsParams(json=params.json_schema)
+-            elif constraint_field == "regex":
+-                structured_outputs = StructuredOutputsParams(regex=params.regex)
+-            elif constraint_field == "grammar":
+-                structured_outputs = StructuredOutputsParams(grammar=params.grammar)
+-            elif constraint_field == "structural_tag":
+-                structured_outputs = StructuredOutputsParams(
+-                    structural_tag=params.structural_tag
+-                )
+-            elif constraint_field == "json_object":
+-                structured_outputs = StructuredOutputsParams(
+-                    json_object=params.json_object
+-                )
+-            elif constraint_field == "choice":
+-                structured_outputs = StructuredOutputsParams(
+-                    choice=list(params.choice.choices)
+-                )
+-
+-        # Create SamplingParams
+-        # output_kind=DELTA: Return only new tokens in each chunk (for streaming)
+-        return SamplingParams(
+-            temperature=params.temperature if params.HasField("temperature") else 1.0,
+-            top_p=params.top_p if params.top_p != 0.0 else 1.0,
+-            top_k=params.top_k,
+-            min_p=params.min_p,
+-            frequency_penalty=params.frequency_penalty,
+-            presence_penalty=params.presence_penalty,
+-            repetition_penalty=params.repetition_penalty
+-            if params.repetition_penalty != 0.0
+-            else 1.0,
+-            max_tokens=params.max_tokens if params.HasField("max_tokens") else None,
+-            min_tokens=params.min_tokens,
+-            stop=stop,
+-            stop_token_ids=stop_token_ids,
+-            skip_special_tokens=params.skip_special_tokens,
+-            spaces_between_special_tokens=params.spaces_between_special_tokens,
+-            ignore_eos=params.ignore_eos,
+-            n=params.n if params.n > 0 else 1,
+-            logprobs=params.logprobs if params.HasField("logprobs") else None,
+-            prompt_logprobs=params.prompt_logprobs
+-            if params.HasField("prompt_logprobs")
+-            else None,
+-            seed=params.seed if params.HasField("seed") else None,
+-            include_stop_str_in_output=params.include_stop_str_in_output,
+-            logit_bias=dict(params.logit_bias) if params.logit_bias else None,
+-            truncate_prompt_tokens=params.truncate_prompt_tokens
+-            if params.HasField("truncate_prompt_tokens")
+-            else None,
+-            structured_outputs=structured_outputs,
+-            # detokenize must be True if stop strings are used
+-            detokenize=bool(stop),
+-            output_kind=RequestOutputKind.DELTA
+-            if stream
+-            else RequestOutputKind.FINAL_ONLY,
+-        )
+-
+-    @staticmethod
+-    def _chunk_response(output: RequestOutput) -> vllm_engine_pb2.GenerateResponse:
+-        """
+-        Build a streaming chunk response from vLLM output.
+-        When output_kind=DELTA, vLLM returns only new tokens automatically.
+-
+-        Args:
+-            output: vLLM RequestOutput (with delta tokens when output_kind=DELTA)
+-
+-        Returns:
+-            GenerateResponse with chunk field set
+-        """
+-        # Get the completion output (first one if n > 1)
+-        completion = output.outputs[0] if output.outputs else None
+-
+-        if completion is None:
+-            # Empty chunk
+-            return vllm_engine_pb2.GenerateResponse(
+-                chunk=vllm_engine_pb2.GenerateStreamChunk(
+-                    token_ids=[],
+-                    prompt_tokens=0,
+-                    completion_tokens=0,
+-                    cached_tokens=0,
+-                ),
+-            )
+-
+-        # When output_kind=DELTA, completion.token_ids contains only new tokens
+-        # vLLM handles the delta logic internally
+-        # completion_tokens = delta count (client will accumulate)
+-        return vllm_engine_pb2.GenerateResponse(
+-            chunk=vllm_engine_pb2.GenerateStreamChunk(
+-                token_ids=completion.token_ids,
+-                prompt_tokens=len(output.prompt_token_ids)
+-                if output.prompt_token_ids
+-                else 0,
+-                completion_tokens=len(completion.token_ids),  # Delta count
+-                cached_tokens=output.num_cached_tokens,
+-            ),
+-        )
+-
+-    @staticmethod
+-    def _complete_response(output: RequestOutput) -> vllm_engine_pb2.GenerateResponse:
+-        """
+-        Build a final completion response from vLLM output.
+-
+-        Args:
+-            output: vLLM RequestOutput (finished=True)
+-
+-        Returns:
+-            GenerateResponse with complete field set
+-        """
+-        # Get the completion output (first one if n > 1)
+-        completion = output.outputs[0] if output.outputs else None
+-
+-        if completion is None:
+-            # Empty completion
+-            return vllm_engine_pb2.GenerateResponse(
+-                complete=vllm_engine_pb2.GenerateComplete(
+-                    output_ids=[],
+-                    finish_reason="error",
+-                    prompt_tokens=0,
+-                    completion_tokens=0,
+-                    cached_tokens=0,
+-                ),
+-            )
+-
+-        # Build complete response
+-        # When streaming (DELTA mode): completion.token_ids will be empty/last delta
+-        # When non-streaming (FINAL_ONLY mode): completion.token_ids has all tokens
+-        # Client will accumulate token counts for streaming
+-        return vllm_engine_pb2.GenerateResponse(
+-            complete=vllm_engine_pb2.GenerateComplete(
+-                output_ids=completion.token_ids,
+-                finish_reason=completion.finish_reason or "stop",
+-                prompt_tokens=len(output.prompt_token_ids)
+-                if output.prompt_token_ids
+-                else 0,
+-                completion_tokens=len(completion.token_ids),
+-                cached_tokens=output.num_cached_tokens,
+-            ),
+-        )
+-
+-
+ async def serve_grpc(args: argparse.Namespace):
+     """
+-    Main serving function.
++    Main gRPC serving function.
+ 
+     Args:
+         args: Parsed command line arguments
+@@ -418,7 +63,7 @@ async def serve_grpc(args: argparse.Namespace):
+ 
+     # Build vLLM config
+     vllm_config = engine_args.create_engine_config(
+-        usage_context=UsageContext.OPENAI_API_SERVER
++        usage_context=UsageContext.OPENAI_API_SERVER,
+     )
+ 
+     # Create AsyncLLM
+@@ -426,7 +71,7 @@ async def serve_grpc(args: argparse.Namespace):
+         vllm_config=vllm_config,
+         usage_context=UsageContext.OPENAI_API_SERVER,
+         enable_log_requests=args.enable_log_requests,
+-        disable_log_stats=args.disable_log_stats_server,
++        disable_log_stats=args.disable_log_stats,
+     )
+ 
+     # Create servicer
+@@ -437,6 +82,11 @@ async def serve_grpc(args: argparse.Namespace):
+         options=[
+             ("grpc.max_send_message_length", -1),
+             ("grpc.max_receive_message_length", -1),
++            # Tolerate client keepalive pings every 10s (default 300s is too
++            # strict for non-streaming requests where no DATA frames flow
++            # during generation)
++            ("grpc.http2.min_recv_ping_interval_without_data_ms", 10000),
++            ("grpc.keepalive_permit_without_calls", True),
+         ],
+     )
+ 
+@@ -451,46 +101,42 @@ async def serve_grpc(args: argparse.Namespace):
+     reflection.enable_server_reflection(service_names, server)
+ 
+     # Bind to address
+-    address = f"{args.host}:{args.port}"
++    host = args.host or "0.0.0.0"
++    address = f"{host}:{args.port}"
+     server.add_insecure_port(address)
+ 
+-    # Start server
+-    await server.start()
+-    logger.info("vLLM gRPC server started on %s", address)
+-    logger.info("Server is ready to accept requests")
++    try:
++        # Start server
++        await server.start()
++        logger.info("vLLM gRPC server started on %s", address)
++        logger.info("Server is ready to accept requests")
+ 
+-    # Handle shutdown signals
+-    loop = asyncio.get_running_loop()
+-    stop_event = asyncio.Event()
++        # Handle shutdown signals
++        loop = asyncio.get_running_loop()
++        stop_event = asyncio.Event()
+ 
+-    def signal_handler():
+-        logger.info("Received shutdown signal")
+-        stop_event.set()
++        def signal_handler():
++            logger.info("Received shutdown signal")
++            stop_event.set()
+ 
+-    for sig in (signal.SIGTERM, signal.SIGINT):
+-        loop.add_signal_handler(sig, signal_handler)
++        for sig in (signal.SIGTERM, signal.SIGINT):
++            loop.add_signal_handler(sig, signal_handler)
+ 
+-    # Serve until shutdown signal
+-    try:
+-        await stop_event.wait()
+-    except KeyboardInterrupt:
+-        logger.info("Interrupted by user")
++        try:
++            await stop_event.wait()
++        except KeyboardInterrupt:
++            logger.info("Interrupted by user")
+     finally:
+         logger.info("Shutting down vLLM gRPC server...")
+-
+-        # Stop gRPC server
+         await server.stop(grace=5.0)
+         logger.info("gRPC server stopped")
+-
+-        # Shutdown AsyncLLM
+         async_llm.shutdown()
+         logger.info("AsyncLLM engine stopped")
+-
+         logger.info("Shutdown complete")
+ 
+ 
+ def main():
+-    """Main entry point."""
++    """Main entry point for python -m vllm.entrypoints.grpc_server."""
+     parser = FlexibleArgumentParser(
+         description="vLLM gRPC Server",
+     )
+@@ -508,11 +154,6 @@ def main():
+         default=50051,
+         help="Port to bind gRPC server to",
+     )
+-    parser.add_argument(
+-        "--disable-log-stats-server",
+-        action="store_true",
+-        help="Disable stats logging on server side",
+-    )
+ 
+     # Add vLLM engine args
+     parser = AsyncEngineArgs.add_cli_args(parser)
+diff --git a/vllm/entrypoints/openai/protocol.py b/vllm/entrypoints/openai/protocol.py
+index 845dae7c1..61541ecf2 100644
+--- a/vllm/entrypoints/openai/protocol.py
++++ b/vllm/entrypoints/openai/protocol.py
+@@ -702,6 +702,14 @@ class ChatCompletionRequest(OpenAIBaseModel):
+             "need to map generated text back to input tokens."
+         ),
+     )
++    return_routed_experts: bool = Field(
++        default=False,
++        description=(
++            "If true, include routed expert indices in the final (non-streaming) "
++            "response only as a vLLM extension field `routed_experts`, encoded "
++            "compactly using base64 bytes with shape metadata."
++        ),
++    )
+     cache_salt: str | None = Field(
+         default=None,
+         description=(
+@@ -864,6 +872,16 @@ class ChatCompletionRequest(OpenAIBaseModel):
+ 
+         return data
+ 
++    @model_validator(mode="before")
++    @classmethod
++    def validate_return_routed_experts(cls, data):
++        if data.get("return_routed_experts") and data.get("stream"):
++            raise VLLMValidationError(
++                "`return_routed_experts` is only available when `stream=False`.",
++                parameter="return_routed_experts",
++            )
++        return data
++
+     @model_validator(mode="before")
+     @classmethod
+     def check_logprobs(cls, data):
+@@ -1524,6 +1542,17 @@ class ChatCompletionLogProbs(OpenAIBaseModel):
+     content: list[ChatCompletionLogProbsContent] | None = None
+ 
+ 
++class RoutedExpertsPayload(OpenAIBaseModel):
++    """Compact routed experts payload.
++
++    This is a vLLM-specific extension and not part of the OpenAI API spec.
++    """
++
++    shape: list[int]
++    dtype: str
++    data_base64: str
++
++
+ class ChatCompletionResponseChoice(OpenAIBaseModel):
+     index: int
+     message: ChatMessage
+@@ -1535,6 +1564,9 @@ class ChatCompletionResponseChoice(OpenAIBaseModel):
+     # not part of the OpenAI spec but is useful for tracing the tokens
+     # in agent scenarios
+     token_ids: list[int] | None = None
++    # not part of the OpenAI spec; vLLM extension.
++    # Encoded as base64 bytes + shape metadata for compact transfer.
++    routed_experts: RoutedExpertsPayload | None = None
+ 
+ 
+ class ChatCompletionResponse(OpenAIBaseModel):
+diff --git a/vllm/entrypoints/openai/serving_chat.py b/vllm/entrypoints/openai/serving_chat.py
+index e65dba2b8..a08bf5882 100644
+--- a/vllm/entrypoints/openai/serving_chat.py
++++ b/vllm/entrypoints/openai/serving_chat.py
+@@ -59,6 +59,7 @@ from vllm.entrypoints.openai.serving_engine import (
+     GenerationError,
+     OpenAIServing,
+     clamp_prompt_logprobs,
++    encode_routed_experts_payload,
+ )
+ from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+ from vllm.entrypoints.openai.utils import maybe_filter_parallel_tool_calls
+@@ -1383,6 +1384,11 @@ class OpenAIServingChat(OpenAIServing):
+             token_ids = output.token_ids
+             out_logprobs = output.logprobs
+             tool_call_info = None
++            routed_experts = (
++                encode_routed_experts_payload(output.routed_experts)
++                if request.return_routed_experts and output.finish_reason is not None
++                else None
++            )
+ 
+             if request.logprobs and request.top_logprobs is not None:
+                 assert out_logprobs is not None, "Did not output logprobs"
+@@ -1443,6 +1449,7 @@ class OpenAIServingChat(OpenAIServing):
+                     token_ids=(
+                         as_list(output.token_ids) if request.return_token_ids else None
+                     ),
++                    routed_experts=routed_experts,
+                 )
+                 choices.append(choice_data)
+                 continue
+@@ -1606,6 +1613,7 @@ class OpenAIServingChat(OpenAIServing):
+                 token_ids=(
+                     as_list(output.token_ids) if request.return_token_ids else None
+                 ),
++                routed_experts=routed_experts,
+             )
+             choice_data = maybe_filter_parallel_tool_calls(choice_data, request)
+ 
+diff --git a/vllm/entrypoints/openai/serving_engine.py b/vllm/entrypoints/openai/serving_engine.py
+index e6b2ae403..49933a753 100644
+--- a/vllm/entrypoints/openai/serving_engine.py
++++ b/vllm/entrypoints/openai/serving_engine.py
+@@ -1,6 +1,7 @@
+ # SPDX-License-Identifier: Apache-2.0
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ import asyncio
++import base64
+ import json
+ import sys
+ import time
+@@ -51,6 +52,7 @@ from vllm.entrypoints.openai.protocol import (
+     FunctionDefinition,
+     ResponseInputOutputItem,
+     ResponsesRequest,
++    RoutedExpertsPayload,
+     TokenizeChatRequest,
+     TokenizeCompletionRequest,
+     TokenizeResponse,
+@@ -1610,3 +1612,22 @@ def clamp_prompt_logprobs(
+             if logprob_values.logprob == float("-inf"):
+                 logprob_values.logprob = -9999.0
+     return prompt_logprobs
++
++
++def encode_routed_experts_payload(
++    routed_experts: np.ndarray | None,
++) -> RoutedExpertsPayload | None:
++    """Encode routed experts in compact transport form.
++
++    Returns shape + dtype + base64 payload. The data is normalized to
++    contiguous `int32` for stable wire compatibility.
++    """
++    if routed_experts is None:
++        return None
++
++    array = np.ascontiguousarray(routed_experts, dtype=np.int32)
++    return RoutedExpertsPayload(
++        shape=list(array.shape),
++        dtype=str(array.dtype),
++        data_base64=base64.b64encode(array.tobytes(order="C")).decode("ascii"),
++    )
+diff --git a/vllm/entrypoints/serve/disagg/protocol.py b/vllm/entrypoints/serve/disagg/protocol.py
+index 251fcf12e..f687824ab 100644
+--- a/vllm/entrypoints/serve/disagg/protocol.py
++++ b/vllm/entrypoints/serve/disagg/protocol.py
+@@ -2,11 +2,12 @@
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ from typing import Any
+ 
+-from pydantic import BaseModel, Field
++from pydantic import BaseModel, Field, model_validator
+ 
+ from vllm.entrypoints.openai.protocol import (
+     ChatCompletionLogProbs,
+     Logprob,
++    RoutedExpertsPayload,
+     SamplingParams,
+     StreamOptions,
+ )
+@@ -61,6 +62,23 @@ class GenerateRequest(BaseModel):
+         default=None,
+         description="KVTransfer parameters used for disaggregated serving.",
+     )
++    return_routed_experts: bool = Field(
++        default=False,
++        description=(
++            "If true, include routed expert indices in the final response only "
++            "as `routed_experts`, encoded compactly using base64 bytes with "
++            "shape metadata."
++        ),
++    )
++
++    @model_validator(mode="before")
++    @classmethod
++    def validate_return_routed_experts(cls, data):
++        if data.get("return_routed_experts") and data.get("stream"):
++            raise ValueError(
++                "`return_routed_experts` is only available when `stream=False`."
++            )
++        return data
+ 
+ 
+ class GenerateResponseChoice(BaseModel):
+@@ -69,6 +87,7 @@ class GenerateResponseChoice(BaseModel):
+     # per OpenAI spec this is the default
+     finish_reason: str | None = "stop"
+     token_ids: list[int] | None = None
++    routed_experts: RoutedExpertsPayload | None = None
+ 
+ 
+ class GenerateResponse(BaseModel):
+diff --git a/vllm/entrypoints/serve/disagg/serving.py b/vllm/entrypoints/serve/disagg/serving.py
+index 1798b174b..cb04ed010 100644
+--- a/vllm/entrypoints/serve/disagg/serving.py
++++ b/vllm/entrypoints/serve/disagg/serving.py
+@@ -20,7 +20,11 @@ from vllm.entrypoints.openai.protocol import (
+     RequestResponseMetadata,
+     UsageInfo,
+ )
+-from vllm.entrypoints.openai.serving_engine import OpenAIServing, clamp_prompt_logprobs
++from vllm.entrypoints.openai.serving_engine import (
++    OpenAIServing,
++    clamp_prompt_logprobs,
++    encode_routed_experts_payload,
++)
+ from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+ from vllm.entrypoints.serve.disagg.protocol import (
+     GenerateRequest,
+@@ -97,6 +101,9 @@ class ServingTokens(OpenAIServing):
+         if raw_request:
+             raw_request.state.request_metadata = request_metadata
+ 
++        # Extract data_parallel_rank from header (router can inject it)
++        data_parallel_rank = self._get_data_parallel_rank(raw_request)
++
+         # TODO(NickLucche): Change to EngineCoreRequest once Renderer work is
+         # completed
+         engine_prompt = TokensPrompt(prompt_token_ids=request.token_ids)
+@@ -133,6 +140,7 @@ class ServingTokens(OpenAIServing):
+                 lora_request=lora_request,
+                 trace_headers=trace_headers,
+                 priority=request.priority,
++                data_parallel_rank=data_parallel_rank,
+             )
+ 
+         except ValueError as e:
+@@ -175,9 +183,14 @@ class ServingTokens(OpenAIServing):
+         for output in final_res.outputs:
+             token_ids = output.token_ids
+             out_logprobs = output.logprobs
++            routed_experts = (
++                encode_routed_experts_payload(output.routed_experts)
++                if request.return_routed_experts and output.finish_reason is not None
++                else None
++            )
+ 
+             # This is top_logprobs in completions API
+-            if sampling_params.logprobs:
++            if sampling_params.logprobs is not None:
+                 assert out_logprobs is not None, "Did not output logprobs"
+                 logprobs = self._create_tokens_logprobs(
+                     token_ids=token_ids,
+@@ -192,6 +205,7 @@ class ServingTokens(OpenAIServing):
+                 logprobs=logprobs,
+                 finish_reason=output.finish_reason if output.finish_reason else "stop",
+                 token_ids=as_list(output.token_ids),
++                routed_experts=routed_experts,
+             )
+ 
+             choices.append(choice_data)
+@@ -277,7 +291,7 @@ class ServingTokens(OpenAIServing):
+                                 logprob=max(p[1].logprob, -9999.0),
+                             )
+                             for i, p in enumerate(step_top_logprobs.items())
+-                            if num_output_top_logprobs and i < num_output_top_logprobs
++                            if num_output_top_logprobs is not None and i < max(num_output_top_logprobs, 1)
+                         ],
+                     )
+                 )
+diff --git a/vllm/grpc/__init__.py b/vllm/grpc/__init__.py
+deleted file mode 100644
+index b59ee96fb..000000000
+--- a/vllm/grpc/__init__.py
++++ /dev/null
+@@ -1,17 +0,0 @@
+-# SPDX-License-Identifier: Apache-2.0
+-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+-"""
+-vLLM gRPC protocol definitions.
+-
+-This module contains the protocol buffer definitions for vLLM's gRPC API.
+-The protobuf files are compiled into Python code using grpcio-tools.
+-"""
+-
+-# These imports will be available after protobuf compilation
+-# from vllm.grpc import vllm_engine_pb2
+-# from vllm.grpc import vllm_engine_pb2_grpc
+-
+-__all__ = [
+-    "vllm_engine_pb2",
+-    "vllm_engine_pb2_grpc",
+-]
+diff --git a/vllm/grpc/compile_protos.py b/vllm/grpc/compile_protos.py
+deleted file mode 100755
+index 92ad46e16..000000000
+--- a/vllm/grpc/compile_protos.py
++++ /dev/null
+@@ -1,94 +0,0 @@
+-#!/usr/bin/env python3
+-# SPDX-License-Identifier: Apache-2.0
+-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+-"""
+-Compile vLLM protobuf definitions into Python code.
+-
+-This script uses grpcio-tools to generate *_pb2.py, *_pb2_grpc.py, and
+-*_pb2.pyi (type stubs) files from the vllm_engine.proto definition.
+-
+-NOTE: Proto compilation happens automatically during package build (via setup.py).
+-This script is provided for developers who want to regenerate protos manually,
+-e.g., after modifying vllm_engine.proto.
+-
+-Usage:
+-    python vllm/grpc/compile_protos.py
+-
+-Requirements:
+-    pip install grpcio-tools
+-"""
+-
+-import sys
+-from pathlib import Path
+-
+-
+-def compile_protos():
+-    """Compile protobuf definitions."""
+-    # Get the vllm package root directory
+-    script_dir = Path(__file__).parent
+-    vllm_package_root = script_dir.parent.parent  # vllm/vllm/grpc -> vllm/
+-
+-    proto_file = script_dir / "vllm_engine.proto"
+-
+-    if not proto_file.exists():
+-        print(f"Error: Proto file not found at {proto_file}")
+-        return 1
+-
+-    print(f"Compiling protobuf: {proto_file}")
+-    print(f"Output directory: {script_dir}")
+-
+-    # Compile the proto file
+-    # We use vllm/vllm as the proto_path so that the package is vllm.grpc.engine
+-    try:
+-        from grpc_tools import protoc
+-
+-        result = protoc.main(
+-            [
+-                "grpc_tools.protoc",
+-                f"--proto_path={vllm_package_root}",
+-                f"--python_out={vllm_package_root}",
+-                f"--grpc_python_out={vllm_package_root}",
+-                f"--pyi_out={vllm_package_root}",  # Generate type stubs
+-                str(script_dir / "vllm_engine.proto"),
+-            ]
+-        )
+-
+-        if result == 0:
+-            # Add SPDX headers to generated files
+-            spdx_header = (
+-                "# SPDX-License-Identifier: Apache-2.0\n"
+-                "# SPDX-FileCopyrightText: Copyright contributors to the vLLM project\n"
+-            )
+-
+-            for generated_file in [
+-                script_dir / "vllm_engine_pb2.py",
+-                script_dir / "vllm_engine_pb2_grpc.py",
+-                script_dir / "vllm_engine_pb2.pyi",
+-            ]:
+-                if generated_file.exists():
+-                    content = generated_file.read_text()
+-                    if not content.startswith("# SPDX-License-Identifier"):
+-                        # Add mypy ignore-errors comment for all generated files
+-                        header = spdx_header + "# mypy: ignore-errors\n"
+-                        generated_file.write_text(header + content)
+-
+-            print("✓ Protobuf compilation successful!")
+-            print(f"  Generated: {script_dir / 'vllm_engine_pb2.py'}")
+-            print(f"  Generated: {script_dir / 'vllm_engine_pb2_grpc.py'}")
+-            print(f"  Generated: {script_dir / 'vllm_engine_pb2.pyi'} (type stubs)")
+-            return 0
+-        else:
+-            print(f"Error: protoc returned {result}")
+-            return result
+-
+-    except ImportError:
+-        print("Error: grpcio-tools not installed")
+-        print("Install with: pip install grpcio-tools")
+-        return 1
+-    except Exception as e:
+-        print(f"Error during compilation: {e}")
+-        return 1
+-
+-
+-if __name__ == "__main__":
+-    sys.exit(compile_protos())
+diff --git a/vllm/grpc/vllm_engine.proto b/vllm/grpc/vllm_engine.proto
+deleted file mode 100644
+index bbb1b9b00..000000000
+--- a/vllm/grpc/vllm_engine.proto
++++ /dev/null
+@@ -1,195 +0,0 @@
+-syntax = "proto3";
+-
+-package vllm.grpc.engine;
+-
+-// Service definition for vLLM engine communication
+-// This protocol is designed for efficient binary communication between
+-// the Rust router and vLLM Python engine (AsyncLLM).
+-service VllmEngine {
+-  // Submit a generation request (supports streaming)
+-  rpc Generate(GenerateRequest) returns (stream GenerateResponse);
+-
+-  // Submit an embedding request
+-  rpc Embed(EmbedRequest) returns (EmbedResponse);
+-
+-  // Health check
+-  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+-
+-  // Abort a running request
+-  rpc Abort(AbortRequest) returns (AbortResponse);
+-
+-  // Get model information
+-  rpc GetModelInfo(GetModelInfoRequest) returns (GetModelInfoResponse);
+-
+-  // Get server information
+-  rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse);
+-}
+-
+-// =====================
+-// Common Types
+-// =====================
+-
+-// Sampling parameters for text generation
+-message SamplingParams {
+-  optional float temperature = 1;
+-  float top_p = 2;
+-  uint32 top_k = 3;
+-  float min_p = 4;
+-  float frequency_penalty = 5;
+-  float presence_penalty = 6;
+-  float repetition_penalty = 7;
+-
+-  optional uint32 max_tokens = 8;
+-  uint32 min_tokens = 9;
+-
+-  repeated string stop = 10;
+-  repeated uint32 stop_token_ids = 11;
+-
+-  bool skip_special_tokens = 12;
+-  bool spaces_between_special_tokens = 13;
+-  bool ignore_eos = 14;
+-
+-  uint32 n = 15;  // Number of parallel samples
+-
+-  // Logprobs configuration
+-  optional int32 logprobs = 22;  // Number of log probabilities per output token (-1 for all)
+-  optional int32 prompt_logprobs = 23;  // Number of log probabilities per prompt token (-1 for all)
+-
+-  // Additional vLLM fields
+-  optional int32 seed = 24;  // Random seed for reproducibility
+-  bool include_stop_str_in_output = 25;  // Whether to include stop strings in output
+-  map<int32, float> logit_bias = 26;  // Token ID to bias mapping (-100 to 100)
+-  optional int32 truncate_prompt_tokens = 27;  // Prompt truncation (-1 for model max)
+-
+-  // Structured outputs (one of) - matches vLLM's StructuredOutputsParams
+-  oneof constraint {
+-    string json_schema = 16;  // JSON schema for structured output
+-    string regex = 17;  // Regex pattern
+-    string grammar = 18;  // Grammar/EBNF for structured output
+-    string structural_tag = 19;  // Structural tag (e.g., Harmony models)
+-    bool json_object = 20;  // Force JSON object output
+-    ChoiceConstraint choice = 21;  // List of allowed choices
+-  }
+-}
+-
+-// Choice constraint for structured outputs
+-message ChoiceConstraint {
+-  repeated string choices = 1;
+-}
+-
+-// Pre-tokenized input from Rust router
+-message TokenizedInput {
+-  string original_text = 1;  // For reference/debugging
+-  repeated uint32 input_ids = 2;  // Actual token IDs to process
+-}
+-
+-// =====================
+-// Generate Request
+-// =====================
+-
+-message GenerateRequest {
+-  string request_id = 1;
+-
+-  // Prompt input
+-  oneof input {
+-    TokenizedInput tokenized = 2;
+-    string text = 3;
+-  }
+-
+-  // Generation parameters (includes logprobs config)
+-  SamplingParams sampling_params = 4;
+-
+-  // Streaming
+-  bool stream = 5;
+-}
+-
+-// =====================
+-// Generate Response
+-// =====================
+-
+-message GenerateResponse {
+-  oneof response {
+-    GenerateStreamChunk chunk = 1;     // For streaming
+-    GenerateComplete complete = 2;     // For final/non-streaming
+-  }
+-}
+-
+-message GenerateStreamChunk {
+-  repeated uint32 token_ids = 1;       // Incremental tokens
+-  uint32 prompt_tokens = 2;
+-  uint32 completion_tokens = 3;
+-  uint32 cached_tokens = 4;
+-
+-  // Logprobs support (TODO: implement in Phase 4)
+-  // OutputLogProbs output_logprobs = 5;
+-  // InputLogProbs input_logprobs = 6;  // Only in first chunk
+-}
+-
+-message GenerateComplete {
+-  repeated uint32 output_ids = 1;      // All output tokens
+-  string finish_reason = 2;            // "stop", "length", "abort"
+-  uint32 prompt_tokens = 3;
+-  uint32 completion_tokens = 4;
+-  uint32 cached_tokens = 5;
+-
+-  // Logprobs support (TODO: implement in Phase 4)
+-  // OutputLogProbs output_logprobs = 6;
+-  // InputLogProbs input_logprobs = 7;
+-}
+-
+-// =====================
+-// Embedding Request
+-// =====================
+-
+-message EmbedRequest {
+-  string request_id = 1;
+-  TokenizedInput tokenized = 2;
+-}
+-
+-message EmbedResponse {
+-  repeated float embedding = 1;
+-  uint32 prompt_tokens = 2;
+-  uint32 embedding_dim = 3;
+-}
+-
+-// =====================
+-// Management Operations
+-// =====================
+-
+-message HealthCheckRequest {}
+-
+-message HealthCheckResponse {
+-  bool healthy = 1;
+-  string message = 2;
+-}
+-
+-message AbortRequest {
+-  repeated string request_ids = 1;
+-}
+-
+-message AbortResponse {
+-}
+-
+-// =====================
+-// Model and Server Info
+-// =====================
+-
+-message GetModelInfoRequest {}
+-
+-message GetModelInfoResponse {
+-  string model_path = 1;
+-  bool is_generation = 2;
+-  uint32 max_context_length = 3;
+-  uint32 vocab_size = 4;
+-  bool supports_vision = 5;
+-}
+-
+-message GetServerInfoRequest {}
+-
+-message GetServerInfoResponse {
+-  uint32 active_requests = 1;
+-  bool is_paused = 2;
+-  double last_receive_timestamp = 3;
+-  double uptime_seconds = 4;
+-  string server_type = 5;  // "vllm-grpc"
+-}
+diff --git a/vllm/model_executor/models/qwen2.py b/vllm/model_executor/models/qwen2.py
+index ab9eac1a9..2b1d9726b 100644
+--- a/vllm/model_executor/models/qwen2.py
++++ b/vllm/model_executor/models/qwen2.py
+@@ -183,6 +183,13 @@ class Qwen2Attention(nn.Module):
+             if attn_type == AttentionType.ENCODER_ONLY
+             else Attention
+         )
++
++        self.disable_attn = False
++        import os
++        if "VLLM_DISABLE_ATTN" in os.environ and os.environ["VLLM_DISABLE_ATTN"] == "1":
++            print("Hijacking the attention in Qwen2 to forbid the use of the attention.")
++            self.disable_attn = True
++        
+         self.attn = attn_cls(
+             self.num_heads,
+             self.head_dim,
+@@ -225,7 +232,11 @@ class Qwen2Attention(nn.Module):
+             k = k.view(total_tokens, self.kv_size)
+ 
+         q, k = self.rotary_emb(positions, q, k)
+-        attn_output = self.attn(q, k, v)
++        # For profiling, we hijack here to forbid the use of the attention.
++        if self.disable_attn:
++            attn_output = q
++        else:
++            attn_output = self.attn(q, k, v)
+         output, _ = self.o_proj(attn_output)
+         return output
+ 
+diff --git a/vllm/v1/engine/async_llm.py b/vllm/v1/engine/async_llm.py
+index 454e20ad1..5ba2198bc 100644
+--- a/vllm/v1/engine/async_llm.py
++++ b/vllm/v1/engine/async_llm.py
+@@ -5,7 +5,7 @@ import os
+ import socket
+ import time
+ import warnings
+-from collections.abc import AsyncGenerator, Iterable, Mapping
++from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
+ from copy import copy
+ from typing import Any, cast
+ 
+@@ -153,7 +153,8 @@ class AsyncLLM(EngineClient):
+ 
+         # Pause / resume state for async RL workflows.
+         self._pause_cond = asyncio.Condition()
+-        self._paused = False
++        self._all_paused = False
++        # self._paused_engines: set[int] = set()
+ 
+         self.output_handler: asyncio.Task | None = None
+         try:
+@@ -337,7 +338,18 @@ class AsyncLLM(EngineClient):
+ 
+         # Respect pause state before accepting new requests.
+         async with self._pause_cond:
+-            await self._pause_cond.wait_for(lambda: not self._paused)
++            """
++            await self._pause_cond.wait_for(
++                lambda: (
++                    data_parallel_rank is None
++                    and not self._all_paused
++                ) or (
++                    data_parallel_rank is not None
++                    and data_parallel_rank not in self._paused_engines
++                )
++            )
++            """
++            await self._pause_cond.wait_for(lambda: not self._all_paused)
+ 
+         # Create a new output collector for the request.
+         queue = RequestOutputCollector(params.output_kind, request.request_id)
+@@ -535,6 +547,7 @@ class AsyncLLM(EngineClient):
+                     # 4) Logging.
+                     # TODO(rob): make into a coroutine and launch it in
+                     # background thread once Prometheus overhead is non-trivial.
++                    # 给 logger 记录 stat，包含 data_parallel_rank 信息
+                     if logger_manager:
+                         logger_manager.record(
+                             engine_idx=outputs.engine_index,
+@@ -567,6 +580,7 @@ class AsyncLLM(EngineClient):
+         *,
+         wait_for_inflight_requests: bool = False,
+         clear_cache: bool = True,
++        data_parallel_rank: int | None = None,
+     ) -> None:
+         """
+         Pause generation to allow model weight updates.
+@@ -580,39 +594,83 @@ class AsyncLLM(EngineClient):
+             clear_cache: Whether to clear KV cache and prefix cache after
+                 draining. Set to ``False`` to preserve cache for faster resume.
+                 Default is ``True`` (clear caches).
++            data_parallel_rank: If specified, only pause the engine with
++                the given data parallel rank. Otherwise, pause all engines.
+         """
+ 
++        """
++        # Notify core_client for load balancer awareness
++        self.engine_core.pause_engine(data_parallel_rank)
++
+         async with self._pause_cond:
+-            if self._paused:
++            if data_parallel_rank is None and self._all_paused or data_parallel_rank in self._paused_engines:
+                 return
+-            self._paused = True
++            if data_parallel_rank is None:
++                self._all_paused = True
++                self._paused_engines = set(range(self.engine_core.num_engines))
++            else:
++                self._paused_engines.add(data_parallel_rank)
++                if len(self._paused_engines) == self.engine_core.num_engines:
++                    self._all_paused = True
+ 
++        if not wait_for_inflight_requests:
++            request_ids = list(self.output_processor.get_engine_request_ids(data_parallel_rank))
++            if request_ids:
++                await self.abort(request_ids, internal=True)
++        """
++        async with self._pause_cond:
++            if self._all_paused:
++                return
++            self._all_paused = True
++        
+         if not wait_for_inflight_requests:
+             request_ids = list(self.output_processor.request_states.keys())
+             if request_ids:
+                 await self.abort(request_ids, internal=True)
+ 
+         # Wait for running requests to drain before clearing cache.
+-        if self.output_processor.has_unfinished_requests():
+-            await self.output_processor.wait_for_requests_to_drain()
++        if self.output_processor.has_unfinished_requests(data_parallel_rank):
++            await self.output_processor.wait_for_requests_to_drain(data_parallel_rank)
+ 
+         # Clear cache
+         if clear_cache:
+-            await self.reset_prefix_cache()
+-            await self.reset_mm_cache()
++            await self.reset_prefix_cache(data_parallel_rank=data_parallel_rank)
++            await self.reset_mm_cache(data_parallel_rank=data_parallel_rank)
++        return None
+ 
+-    async def resume_generation(self) -> None:
++    async def resume_generation(
++        self, data_parallel_rank: int | None = None
++    ) -> None:
+         """Resume generation after :meth:`pause_generation`."""
++        """
++        # Notify core_client for load balancer awareness
++        self.engine_core.resume_engine(data_parallel_rank)
+ 
+         async with self._pause_cond:
+-            self._paused = False
++            if data_parallel_rank is None:
++                self._all_paused = False
++                self._paused_engines.clear()
++            else:
++                self._paused_engines.discard(data_parallel_rank)
++                if len(self._paused_engines) < self.engine_core.num_engines:
++                    self._all_paused = False
++            self._pause_cond.notify_all()  # Wake up all waiting requests
++        """
++        async with self._pause_cond:
++            self._all_paused = False
+             self._pause_cond.notify_all()  # Wake up all waiting requests
+ 
+-    async def is_paused(self) -> bool:
++    async def is_paused(
++        self, data_parallel_rank: int | None = None
++    ) -> bool:
+         """Return whether the engine is currently paused."""
+-
++        """
++        if data_parallel_rank is None:
++            return self._all_paused
++        return data_parallel_rank in self._paused_engines
++        """
+         async with self._pause_cond:
+-            return self._paused
++            return self._all_paused
+ 
+     async def encode(
+         self,
+@@ -729,60 +787,103 @@ class AsyncLLM(EngineClient):
+         if self.errored:
+             raise self.dead_error
+ 
+-    async def start_profile(self) -> None:
+-        coros = [self.engine_core.profile_async(True)]
++    async def start_profile(
++        self, data_parallel_rank: int | None = None
++    ) -> None:
++        coros = [self.engine_core.profile_async(True, data_parallel_rank=data_parallel_rank)]
+         if self.profiler is not None:
+             coros.append(asyncio.to_thread(self.profiler.start))
+         await asyncio.gather(*coros)
+ 
+-    async def stop_profile(self) -> None:
+-        coros = [self.engine_core.profile_async(False)]
++    async def stop_profile(
++        self, data_parallel_rank: int | None = None
++    ) -> None:
++        coros = [self.engine_core.profile_async(False, data_parallel_rank=data_parallel_rank)]
+         if self.profiler is not None:
+             coros.append(asyncio.to_thread(self.profiler.stop))
+         await asyncio.gather(*coros)
+ 
+-    async def reset_mm_cache(self) -> None:
++    async def reset_mm_cache(
++        self, data_parallel_rank: int | None = None
++    ) -> None:
+         self.input_processor.clear_mm_cache()
+-        await self.engine_core.reset_mm_cache_async()
++        await self.engine_core.reset_mm_cache_async(data_parallel_rank=data_parallel_rank)
+ 
+     async def reset_prefix_cache(
+-        self, reset_running_requests: bool = False, reset_connector: bool = False
++        self,
++        reset_running_requests: bool = False,
++        reset_connector: bool = False,
++        data_parallel_rank: int | None = None,
+     ) -> bool:
+         return await self.engine_core.reset_prefix_cache_async(
+-            reset_running_requests, reset_connector
++            reset_running_requests,
++            reset_connector,
++            data_parallel_rank=data_parallel_rank,
+         )
+ 
+-    async def sleep(self, level: int = 1) -> None:
+-        await self.reset_prefix_cache()
+-        await self.engine_core.sleep_async(level)
++    async def sleep(
++        self,
++        level: int = 1,
++        data_parallel_rank: int | None = None,
++    ) -> None:
++        await self.reset_prefix_cache(data_parallel_rank=data_parallel_rank)
++        await self.engine_core.sleep_async(level, data_parallel_rank=data_parallel_rank)
+ 
+         if self.logger_manager is not None:
+             self.logger_manager.record_sleep_state(1, level)
+ 
+-    async def wake_up(self, tags: list[str] | None = None) -> None:
+-        await self.engine_core.wake_up_async(tags)
++    async def wake_up(
++        self,
++        tags: list[str] | None = None,
++        data_parallel_rank: int | None = None,
++    ) -> None:
++        await self.engine_core.wake_up_async(tags, data_parallel_rank=data_parallel_rank)
+ 
+         if self.logger_manager is not None:
+             self.logger_manager.record_sleep_state(0, 0)
+ 
+-    async def is_sleeping(self) -> bool:
+-        return await self.engine_core.is_sleeping_async()
++    async def is_sleeping(
++        self, data_parallel_rank: int | None = None,
++    ) -> bool:
++        return await self.engine_core.is_sleeping_async(
++            data_parallel_rank=data_parallel_rank
++        )
+ 
+-    async def add_lora(self, lora_request: LoRARequest) -> bool:
++    async def add_lora(
++        self,
++        lora_request: LoRARequest,
++        data_parallel_rank: int | None = None,
++    ) -> bool:
+         """Load a new LoRA adapter into the engine for future requests."""
+-        return await self.engine_core.add_lora_async(lora_request)
++        return await self.engine_core.add_lora_async(
++            lora_request, data_parallel_rank=data_parallel_rank
++        )
+ 
+-    async def remove_lora(self, lora_id: int) -> bool:
++    async def remove_lora(
++        self,
++        lora_id: int,
++        data_parallel_rank: int | None = None,
++    ) -> bool:
+         """Remove an already loaded LoRA adapter."""
+-        return await self.engine_core.remove_lora_async(lora_id)
++        return await self.engine_core.remove_lora_async(
++            lora_id, data_parallel_rank=data_parallel_rank
++        )
+ 
+-    async def list_loras(self) -> set[int]:
++    async def list_loras(
++        self, data_parallel_rank: int | None = None
++    ) -> set[int]:
+         """List all registered adapters."""
+-        return await self.engine_core.list_loras_async()
++        return await self.engine_core.list_loras_async(data_parallel_rank=data_parallel_rank)
+ 
+-    async def pin_lora(self, lora_id: int) -> bool:
++    async def pin_lora(
++        self,
++        lora_id: int,
++        data_parallel_rank: int | None = None,
++    ) -> bool:
+         """Prevent an adapter from being evicted."""
+-        return await self.engine_core.pin_lora_async(lora_id)
++        return await self.engine_core.pin_lora_async(
++            lora_id, data_parallel_rank=data_parallel_rank
++        )
+ 
+     async def collective_rpc(
+         self,
+@@ -790,29 +891,39 @@ class AsyncLLM(EngineClient):
+         timeout: float | None = None,
+         args: tuple = (),
+         kwargs: dict | None = None,
+-    ):
++        data_parallel_rank: int | None = None,
++    ) -> Any:
+         """
+         Perform a collective RPC call to the given path.
+         """
+         return await self.engine_core.collective_rpc_async(
+-            method, timeout, args, kwargs
++            method, timeout, args, kwargs, data_parallel_rank=data_parallel_rank
+         )
+ 
+-    async def wait_for_requests_to_drain(self, drain_timeout: int = 300):
++    async def wait_for_requests_to_drain(
++        self,
++        drain_timeout: int = 300,
++        data_parallel_rank: int | None = None,
++    ):
+         """Wait for all requests to be drained."""
+-        start_time = time.time()
+-        while time.time() - start_time < drain_timeout:
+-            if not self.engine_core.dp_engines_running():
+-                logger.info("Engines are idle, requests have been drained")
+-                return
+-
+-            logger.info("Engines are still running, waiting for requests to drain...")
+-            await asyncio.sleep(1)  # Wait 1 second before checking again
+-
+-        raise TimeoutError(
+-            f"Timeout reached after {drain_timeout} seconds "
+-            "waiting for requests to drain."
+-        )
++        if data_parallel_rank is None:
++            start_time = time.time()
++            while time.time() - start_time < drain_timeout:
++                if not self.engine_core.dp_engines_running():
++                    logger.info("Engines are idle, requests have been drained")
++                    return
++
++                logger.info("Engines are still running, waiting for requests to drain...")
++                await asyncio.sleep(1)  # Wait 1 second before checking again
++
++            raise TimeoutError(
++                f"Timeout reached after {drain_timeout} seconds "
++                "waiting for requests to drain."
++            )
++        else:
++            # Wait for running requests to drain before clearing cache.
++            if self.output_processor.has_unfinished_requests(data_parallel_rank):
++                await self.output_processor.wait_for_requests_to_drain(data_parallel_rank)
+ 
+     async def scale_elastic_ep(
+         self, new_data_parallel_size: int, drain_timeout: int = 300
+diff --git a/vllm/v1/engine/core_client.py b/vllm/v1/engine/core_client.py
+index 905d8df4d..30b15d168 100644
+--- a/vllm/v1/engine/core_client.py
++++ b/vllm/v1/engine/core_client.py
+@@ -193,6 +193,12 @@ class EngineCoreClient(ABC):
+         running state."""
+         raise NotImplementedError
+ 
++    def pause_engine(self, data_parallel_rank: int | None = None) -> None:
++        raise NotImplementedError
++
++    def resume_engine(self, data_parallel_rank: int | None = None) -> None:
++        raise NotImplementedError
++
+     async def scale_elastic_ep(self, new_data_parallel_size: int) -> None:
+         raise NotImplementedError
+ 
+@@ -205,43 +211,70 @@ class EngineCoreClient(ABC):
+     async def add_request_async(self, request: EngineCoreRequest) -> None:
+         raise NotImplementedError
+ 
+-    async def profile_async(self, is_start: bool = True) -> None:
++    async def profile_async(
++        self, is_start: bool = True, data_parallel_rank: int | None = None
++    ) -> None:
+         raise NotImplementedError
+ 
+-    async def reset_mm_cache_async(self) -> None:
++    async def reset_mm_cache_async(
++        self, data_parallel_rank: int | None = None
++    ) -> None:
+         raise NotImplementedError
+ 
+     async def reset_prefix_cache_async(
+-        self, reset_running_requests: bool = False, reset_connector: bool = False
++        self,
++        reset_running_requests: bool = False,
++        reset_connector: bool = False,
++        data_parallel_rank: int | None = None,
+     ) -> bool:
+         raise NotImplementedError
+ 
+-    async def sleep_async(self, level: int = 1) -> None:
++    async def sleep_async(
++        self, level: int = 1, data_parallel_rank: int | None = None
++    ) -> None:
+         raise NotImplementedError
+ 
+-    async def wake_up_async(self, tags: list[str] | None = None) -> None:
++    async def wake_up_async(
++        self,
++        tags: list[str] | None = None,
++        data_parallel_rank: int | None = None,
++    ) -> None:
+         raise NotImplementedError
+ 
+-    async def is_sleeping_async(self) -> bool:
++    async def is_sleeping_async(
++        self, data_parallel_rank: int | None = None
++    ) -> bool:
+         raise NotImplementedError
+ 
+     async def abort_requests_async(self, request_ids: list[str]) -> None:
+         raise NotImplementedError
+ 
+-    async def add_lora_async(self, lora_request: LoRARequest) -> bool:
++    async def add_lora_async(
++        self, lora_request: LoRARequest, data_parallel_rank: int | None = None
++    ) -> bool:
+         raise NotImplementedError
+ 
+-    async def remove_lora_async(self, lora_id: int) -> bool:
++    async def remove_lora_async(
++        self, lora_id: int, data_parallel_rank: int | None = None
++    ) -> bool:
+         raise NotImplementedError
+ 
+-    async def list_loras_async(self) -> set[int]:
++    async def list_loras_async(
++        self, data_parallel_rank: int | None = None
++    ) -> set[int]:
+         raise NotImplementedError
+ 
+-    async def pin_lora_async(self, lora_id: int) -> bool:
++    async def pin_lora_async(
++        self, lora_id: int, data_parallel_rank: int | None = None
++    ) -> bool:
+         raise NotImplementedError
+ 
+     async def save_sharded_state_async(
+-        self, path: str, pattern: str | None = None, max_size: int | None = None
++        self,
++        path: str,
++        pattern: str | None = None,
++        max_size: int | None = None,
++        data_parallel_rank: int | None = None,
+     ) -> None:
+         raise NotImplementedError
+ 
+@@ -251,7 +284,8 @@ class EngineCoreClient(ABC):
+         timeout: float | None = None,
+         args: tuple = (),
+         kwargs: dict[str, Any] | None = None,
+-    ) -> list[_R]:
++        data_parallel_rank: int | None = None,
++    ) -> _R:
+         raise NotImplementedError
+ 
+ 
+@@ -467,6 +501,7 @@ class MPClient(EngineCoreClient):
+         try:
+             # State used for data parallel.
+             self.engines_running = False
++            self.paused_engines: set[int] = set()
+ 
+             self.stats_update_address: str | None = None
+             if client_addresses:
+@@ -555,6 +590,10 @@ class MPClient(EngineCoreClient):
+             if not success:
+                 self._finalizer()
+ 
++    @property
++    def num_engines(self) -> int:
++        return len(self.core_engines)
++
+     def shutdown(self):
+         # Terminate background resources.
+         self._finalizer()
+@@ -580,6 +619,18 @@ class MPClient(EngineCoreClient):
+     def dp_engines_running(self) -> bool:
+         return self.engines_running
+ 
++    def pause_engine(self, data_parallel_rank = None):
++        if data_parallel_rank is not None:
++            self.paused_engines.add(data_parallel_rank)
++        else:
++            self.paused_engines.update(self.engine_ranks_managed)
++
++    def resume_engine(self, data_parallel_rank = None):
++        if data_parallel_rank is not None:
++            self.paused_engines.discard(data_parallel_rank)
++        else:
++            self.paused_engines.clear()
++
+     def start_engine_core_monitor(self):
+         """Start a monitor thread for engine core processes."""
+         engine_manager = self.resources.engine_manager
+@@ -936,8 +987,23 @@ class AsyncMPClient(MPClient):
+         future.add_done_callback(add_pending)
+         return future
+ 
+-    async def call_utility_async(self, method: str, *args) -> Any:
+-        return await self._call_utility_async(method, *args, engine=self.core_engine)
++    def _convert_rank_to_engine(
++        self, data_parallel_rank: int | None = None
++    ) -> EngineIdentity | None:
++        if data_parallel_rank is None:
++            return self.core_engine
++        if data_parallel_rank < 0 or data_parallel_rank >= len(self.core_engines):
++            raise IndexError(
++                f"data_parallel_rank {data_parallel_rank} out of range for "
++                f"{len(self.core_engines)} engines"
++            )
++        return self.core_engines[data_parallel_rank]
++
++    async def call_utility_async(
++        self, method: str, *args, data_parallel_rank: int | None = None
++    ) -> Any:
++        engine = self._convert_rank_to_engine(data_parallel_rank)
++        return await self._call_utility_async(method, *args, engine=engine)
+ 
+     async def _call_utility_async(
+         self, method: str, *args, engine: EngineIdentity
+@@ -965,47 +1031,81 @@ class AsyncMPClient(MPClient):
+         if request_ids and not self.resources.engine_dead:
+             await self._send_input(EngineCoreRequestType.ABORT, request_ids)
+ 
+-    async def profile_async(self, is_start: bool = True) -> None:
+-        await self.call_utility_async("profile", is_start)
++    async def profile_async(
++        self, is_start: bool = True, data_parallel_rank: int | None = None
++    ) -> None:
++        await self.call_utility_async("profile", is_start, data_parallel_rank=data_parallel_rank)
+ 
+-    async def reset_mm_cache_async(self) -> None:
+-        await self.call_utility_async("reset_mm_cache")
++    async def reset_mm_cache_async(
++        self, data_parallel_rank: int | None = None
++    ) -> None:
++        await self.call_utility_async("reset_mm_cache", data_parallel_rank=data_parallel_rank)
+ 
+     async def reset_prefix_cache_async(
+-        self, reset_running_requests: bool = False, reset_connector: bool = False
++        self,
++        reset_running_requests: bool = False,
++        reset_connector: bool = False,
++        data_parallel_rank: int | None = None,
+     ) -> bool:
+         return await self.call_utility_async(
+-            "reset_prefix_cache", reset_running_requests, reset_connector
++            "reset_prefix_cache",
++            reset_running_requests,
++            reset_connector,
++            data_parallel_rank=data_parallel_rank,
+         )
+ 
+-    async def sleep_async(self, level: int = 1) -> None:
+-        await self.call_utility_async("sleep", level)
++    async def sleep_async(
++        self, level: int = 1, data_parallel_rank: int | None = None
++    ) -> None:
++        await self.call_utility_async("sleep", level, data_parallel_rank=data_parallel_rank)
+ 
+-    async def wake_up_async(self, tags: list[str] | None = None) -> None:
+-        await self.call_utility_async("wake_up", tags)
++    async def wake_up_async(
++        self, tags: list[str] | None = None, data_parallel_rank: int | None = None
++    ) -> None:
++        await self.call_utility_async("wake_up", tags, data_parallel_rank=data_parallel_rank)
+ 
+-    async def is_sleeping_async(self) -> bool:
+-        return await self.call_utility_async("is_sleeping")
++    async def is_sleeping_async(
++        self, data_parallel_rank: int | None = None
++    ) -> bool:
++        return await self.call_utility_async("is_sleeping", data_parallel_rank=data_parallel_rank)
+ 
+     async def execute_dummy_batch_async(self) -> None:
+         await self.call_utility_async("execute_dummy_batch")
+ 
+-    async def add_lora_async(self, lora_request: LoRARequest) -> bool:
+-        return await self.call_utility_async("add_lora", lora_request)
++    async def add_lora_async(
++        self, lora_request: LoRARequest, data_parallel_rank: int | None = None
++    ) -> bool:
++        return await self.call_utility_async(
++            "add_lora", lora_request, data_parallel_rank=data_parallel_rank
++        )
+ 
+-    async def remove_lora_async(self, lora_id: int) -> bool:
+-        return await self.call_utility_async("remove_lora", lora_id)
++    async def remove_lora_async(
++        self, lora_id: int, data_parallel_rank: int | None = None
++    ) -> bool:
++        return await self.call_utility_async(
++            "remove_lora", lora_id, data_parallel_rank=data_parallel_rank
++        )
+ 
+-    async def list_loras_async(self) -> set[int]:
+-        return await self.call_utility_async("list_loras")
++    async def list_loras_async(
++        self, data_parallel_rank: int | None = None
++    ) -> set[int]:
++        return await self.call_utility_async("list_loras", data_parallel_rank=data_parallel_rank)
+ 
+-    async def pin_lora_async(self, lora_id: int) -> bool:
+-        return await self.call_utility_async("pin_lora", lora_id)
++    async def pin_lora_async(
++        self, lora_id: int, data_parallel_rank: int | None = None
++    ) -> bool:
++        return await self.call_utility_async("pin_lora", lora_id, data_parallel_rank=data_parallel_rank)
+ 
+     async def save_sharded_state_async(
+-        self, path: str, pattern: str | None = None, max_size: int | None = None
++        self,
++        path: str,
++        pattern: str | None = None,
++        max_size: int | None = None,
++        data_parallel_rank: int | None = None,
+     ) -> None:
+-        await self.call_utility_async("save_sharded_state", path, pattern, max_size)
++        await self.call_utility_async(
++            "save_sharded_state", path, pattern, max_size, data_parallel_rank=data_parallel_rank
++        )
+ 
+     async def collective_rpc_async(
+         self,
+@@ -1013,9 +1113,10 @@ class AsyncMPClient(MPClient):
+         timeout: float | None = None,
+         args: tuple = (),
+         kwargs: dict[str, Any] | None = None,
+-    ) -> list[_R]:
++        data_parallel_rank: int | None = None,
++    ) -> _R:
+         return await self.call_utility_async(
+-            "collective_rpc", method, timeout, args, kwargs
++            "collective_rpc", method, timeout, args, kwargs, data_parallel_rank=data_parallel_rank
+         )
+ 
+ 
+@@ -1210,16 +1311,24 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
+ 
+     def get_core_engine_for_request(self, request: EngineCoreRequest) -> EngineIdentity:
+         # Engines are in rank order.
++        # DPLB 负载均衡逻辑，仅针对无 dp header 的请求
+         if (eng_index := request.data_parallel_rank) is None:
+             current_counts = self.lb_engines
+             # TODO use P2C alg for larger DP sizes
+             num_engines = len(current_counts)
++            # Skip paused engines during load balancing
++            available = num_engines - len(self.paused_engines)
++            if available <= 0:
++                raise RuntimeError("All engines are paused, cannot route request")
++
+             min_score = sys.maxsize
+             eng_index = 0
+             for i in range(num_engines):
+                 # Start from client_index to help with balancing when engines
+                 # are empty.
+                 idx = (self.eng_start_index + i) % num_engines
++                if idx in self.paused_engines:
++                    continue
+                 waiting, running = current_counts[idx]
+                 score = waiting * 4 + running
+                 if score < min_score:
+@@ -1234,16 +1343,19 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
+         self.reqs_in_flight[request.request_id] = chosen_engine
+         return chosen_engine
+ 
+-    async def call_utility_async(self, method: str, *args) -> Any:
+-        # Only the result from the first engine is returned.
+-        return (
+-            await asyncio.gather(
++    async def call_utility_async(
++        self, method: str, *args, data_parallel_rank: int | None = None
++    ) -> Any:
++        engine = self._convert_rank_to_engine(data_parallel_rank)
++        if engine is not None:
++            return await self._call_utility_async(method, *args, engine=engine)
++        else:
++            return await asyncio.gather(
+                 *[
+                     self._call_utility_async(method, *args, engine=engine)
+                     for engine in self.core_engines
+                 ]
+-            )
+-        )[0]
++            )[0]
+ 
+     @staticmethod
+     async def process_engine_outputs(
+diff --git a/vllm/v1/engine/output_processor.py b/vllm/v1/engine/output_processor.py
+index f461e56ff..4a87d9681 100644
+--- a/vllm/v1/engine/output_processor.py
++++ b/vllm/v1/engine/output_processor.py
+@@ -106,6 +106,7 @@ class RequestState:
+         prompt: str | None,
+         prompt_token_ids: list[int] | None,
+         prompt_embeds: torch.Tensor | None,
++        data_parallel_rank: int | None,
+         logprobs_processor: LogprobsProcessor | None,
+         detokenizer: IncrementalDetokenizer | None,
+         max_tokens_param: int | None,
+@@ -130,6 +131,7 @@ class RequestState:
+         self.prompt_len = length_from_prompt_token_ids_or_embeds(
+             self.prompt_token_ids, self.prompt_embeds
+         )
++        self.data_parallel_rank = data_parallel_rank
+         self.logprobs_processor = logprobs_processor
+         self.detokenizer = detokenizer
+         self.max_tokens_param = max_tokens_param
+@@ -195,6 +197,7 @@ class RequestState:
+             prompt=prompt,
+             prompt_token_ids=request.prompt_token_ids,
+             prompt_embeds=request.prompt_embeds,
++            data_parallel_rank=request.data_parallel_rank,
+             logprobs_processor=logprobs_processor,
+             detokenizer=detokenizer,
+             max_tokens_param=max_tokens_param,
+@@ -365,6 +368,8 @@ class OutputProcessor:
+         self.tokenizer = tokenizer
+         self.stream_interval = stream_interval
+         self.request_states: dict[str, RequestState] = {}
++        self.engine_request_ids: defaultdict[int, set[str]] = defaultdict(set)
++        self._engine_requests_drained: dict[int, asyncio.Event] = {}
+         self.parent_requests: dict[str, ParentRequest] = {}
+         self.external_req_ids: defaultdict[str, list[str]] = defaultdict(list)
+         self.lora_states = LoRARequestStates(log_stats)
+@@ -372,16 +377,26 @@ class OutputProcessor:
+         self._requests_drained = asyncio.Event()
+         self._requests_drained.set()
+ 
+-    def get_num_unfinished_requests(self):
+-        return len(self.request_states)
+-
+-    def has_unfinished_requests(self) -> bool:
+-        return len(self.request_states) > 0
+-
+-    async def wait_for_requests_to_drain(self) -> None:
++    def get_num_unfinished_requests(
++        self, engine_index: int | None = None
++    ) -> int:
++        if engine_index is None:
++            return len(self.request_states)
++        return len(self.engine_request_ids.get(engine_index, set()))
++
++    def has_unfinished_requests(
++        self, engine_index: int | None = None
++    ) -> bool:
++        if engine_index is None:
++            return len(self.request_states) > 0
++        return len(self.engine_request_ids.get(engine_index, set())) > 0
++
++    async def wait_for_requests_to_drain(
++        self, engine_index: int | None = None
++    ) -> None:
+         if not self.request_states:
+             return
+-        await self._requests_drained.wait()
++        await self._get_engine_drained_event(engine_index).wait()
+ 
+     def propagate_error(self, e: Exception):
+         """Propagate error to all generate() tasks."""
+@@ -427,6 +442,7 @@ class OutputProcessor:
+         for request_id in internal_req_ids:
+             req_state = self.request_states.pop(request_id, None)
+             if req_state is not None:
++                self._discard_engine_request_id(req_state)
+                 self.lora_states.request_finished(request_id, req_state.lora_name)
+                 request_ids_to_abort.append(request_id)
+                 # Produce final abort output.
+@@ -480,6 +496,9 @@ class OutputProcessor:
+         if self._requests_drained.is_set():
+             self._requests_drained.clear()
+         self.request_states[request_id] = req_state
++        if req_state.data_parallel_rank is not None:
++            self.engine_request_ids[req_state.data_parallel_rank].add(request_id)
++            self._get_engine_drained_event(req_state.data_parallel_rank).clear()
+         if parent_req:
+             self.parent_requests[parent_req.request_id] = parent_req
+ 
+@@ -571,6 +590,7 @@ class OutputProcessor:
+             # Free completed requests.
+             if finish_reason is not None:
+                 self.request_states.pop(req_id)
++                self._discard_engine_request_id(req_state)
+ 
+                 internal_ids = self.external_req_ids[req_state.external_req_id]
+                 internal_ids.remove(req_id)
+@@ -600,6 +620,30 @@ class OutputProcessor:
+             reqs_to_abort=reqs_to_abort,
+         )
+ 
++    def get_engine_request_ids(self, engine_index: int) -> set[str]:
++        return self.engine_request_ids.get(engine_index, set())
++
++    def _discard_engine_request_id(self, req_state: RequestState) -> None:
++        engine_index = req_state.data_parallel_rank
++        if engine_index is None:
++            return
++        request_ids = self.get_engine_request_ids(engine_index)
++        request_ids.discard(req_state.request_id)
++        if not request_ids:
++            self.engine_request_ids.pop(engine_index, None)
++            self._get_engine_drained_event(engine_index).set()
++
++    def _get_engine_drained_event(self, engine_index: int | None) -> asyncio.Event:
++        if engine_index is None:
++            return self._requests_drained
++
++        event = self._engine_requests_drained.get(engine_index)
++        if event is None:
++            event = asyncio.Event()
++            event.set()
++            self._engine_requests_drained[engine_index] = event
++        return event
++
+     def update_scheduler_stats(self, scheduler_stats: SchedulerStats | None):
+         self.lora_states.update_scheduler_stats(scheduler_stats)
+ 
+diff --git a/vllm/v1/metrics/loggers.py b/vllm/v1/metrics/loggers.py
+index 2213b952c..edd0e35a1 100644
+--- a/vllm/v1/metrics/loggers.py
++++ b/vllm/v1/metrics/loggers.py
+@@ -1279,11 +1279,14 @@ class StatLoggerManager:
+                     custom_prometheus_logger = True
+             else:
+                 # per engine logger
+-                global_stat_logger = PerEngineStatLoggerAdapter(
+-                    vllm_config=vllm_config,
+-                    engine_indexes=self.engine_indexes,
+-                    per_engine_stat_logger_factory=stat_logger_factory,  # type: ignore[arg-type]
+-                )
++                if not isinstance(stat_logger_factory, Callable):
++                    global_stat_logger = stat_logger_factory
++                else:
++                    global_stat_logger = PerEngineStatLoggerAdapter(
++                        vllm_config=vllm_config,
++                        engine_indexes=self.engine_indexes,
++                        per_engine_stat_logger_factory=stat_logger_factory,  # type: ignore[arg-type]
++                    )
+             self.stat_loggers.append(global_stat_logger)
+         if not custom_prometheus_logger:
+             self.stat_loggers.append(
+diff --git a/vllm/v1/metrics/stats.py b/vllm/v1/metrics/stats.py
+index cb1a860e3..c8a26bb1f 100644
+--- a/vllm/v1/metrics/stats.py
++++ b/vllm/v1/metrics/stats.py
+@@ -164,6 +164,10 @@ class KVCacheEvictionEvent:
+ @dataclass
+ class SchedulerStats:
+     """Stats associated with the scheduler."""
++    # NOTE(lhy): we need to add this field to the scheduler stats for PSRL.
++    need_to_abort_reqs: list[str] = field(default_factory=list)
++    req_id_to_prompt_token_num: dict[str, int] | None = None
++    req_id_to_response_token_num: dict[str, int] | None = None
+ 
+     num_running_reqs: int = 0
+     num_waiting_reqs: int = 0
+-- 
+2.43.0
+

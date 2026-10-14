@@ -1,13 +1,6 @@
 # PSRL configuration for simplified rollout testing
 psrl:
-  gen_mode: batch
   logging_path: ./rollout_test_logs
-  # Compatible with data_processor.py
-  redundant_rollout:
-    enable: true
-    redundant_global_batch_size: ${rollout_test.batch_size}
-    redundant_rollout_n: 1
-    alg_rollout_n: 1
   deployment:
     n_rollout_instances: 1
 
@@ -78,4 +71,3 @@ ray_kwargs:
   ray_init:
     num_cpus: null
   timeline_json_file: null
-

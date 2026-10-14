@@ -9,32 +9,27 @@ from torch.distributed.tensor import DTensor
 from verl.utils.fsdp_utils import fsdp_version
 
 from psrl.utils.converter.base_converter import BaseConverter
-from psrl.utils.converter.model_mappings import (
-    ParameterMapping,
-    get_fused_moe_expert_prefix,
-    reshape_visual_block_qkv,
-)
+from psrl.utils.converter.hf_converter import convert_hf_local_shard
+from psrl.utils.converter.model_mappings import ParameterMapping, get_fused_moe_expert_prefix
 from psrl.utils.nixl.nixl_spec import NIXLSharding
 
 
-def _clone_sharding(sharding: NIXLSharding) -> NIXLSharding:
-    return NIXLSharding(
-        shard_mesh=sharding.shard_mesh.copy(),
-        shard_indices=list(sharding.shard_indices),
-    )
-
-
-def _split_dim0_fused_fsdp_param(
+def split_dim0_fused_fsdp_param(
     local_param: torch.Tensor,
     sharding: NIXLSharding,
     component_names: list[str],
     component_sizes: list[int],
 ) -> tuple[dict[str, torch.Tensor], dict[str, NIXLSharding]]:
-    """Split a global dim-0 fused parameter while preserving local FSDP views."""
+    """
+    Split a fused dimension-zero parameter while preserving local FSDP views.
+
+    A local FSDP shard can overlap one or more canonical components. The
+    returned descriptors express each overlap using a component-local mesh.
+    """
     if len(component_names) != len(component_sizes):
         raise ValueError(
-            f"component_names and component_sizes must have the same length, got "
-            f"{len(component_names)} and {len(component_sizes)}."
+            "component_names and component_sizes must have the same length, "
+            f"got {len(component_names)} and {len(component_sizes)}."
         )
     if not component_sizes or any(size <= 0 for size in component_sizes):
         raise ValueError(f"component_sizes must be positive, got {component_sizes}.")
@@ -62,7 +57,10 @@ def _split_dim0_fused_fsdp_param(
         offset = 0
         for name, size in zip(component_names, component_sizes):
             converted_state_dict[name] = local_param.narrow(0, offset, size)
-            converted_sharding_dict[name] = _clone_sharding(sharding)
+            converted_sharding_dict[name] = NIXLSharding(
+                shard_mesh=sharding.shard_mesh.copy(),
+                shard_indices=list(sharding.shard_indices),
+            )
             offset += size
         return converted_state_dict, converted_sharding_dict
 
@@ -81,8 +79,6 @@ def _split_dim0_fused_fsdp_param(
         overlap_start = max(local_global_start, component_start)
         overlap_end = min(local_global_end, component_end)
         if overlap_start < overlap_end:
-            # The gcd gives an equal canonical shard unit aligned to both the
-            # FSDP shard boundaries and this component's global boundaries.
             shard_unit = math.gcd(local_size, component_start, component_size)
             component_shard_count = component_size // shard_unit
             first_shard = (overlap_start - component_start) // shard_unit
@@ -97,56 +93,24 @@ def _split_dim0_fused_fsdp_param(
             converted_state_dict[name] = local_param.narrow(0, local_offset, overlap_size)
             converted_sharding_dict[name] = NIXLSharding(
                 shard_mesh=OrderedDict([(0, component_shard_count)]),
-                shard_indices=[(idx,) for idx in range(first_shard, past_last_shard)],
+                shard_indices=[(index,) for index in range(first_shard, past_last_shard)],
             )
         component_start = component_end
 
     return converted_state_dict, converted_sharding_dict
 
 
-def split_qwen3_5_fused_fsdp_param(
+def split_fused_moe_fsdp_param(
     model_info: dict,
     param_name: str,
     local_param: torch.Tensor,
     sharding: NIXLSharding,
 ) -> tuple[dict[str, torch.Tensor], dict[str, NIXLSharding]] | None:
-    """Expose Qwen3.5 fused parameters using the same canonical keys as HF/vLLM."""
-    moe_split = _split_fused_moe_fsdp_param(
-        model_info=model_info,
-        param_name=param_name,
-        local_param=local_param,
-        sharding=sharding,
-    )
-    if moe_split is not None:
-        return moe_split
+    """
+    Split fused MoE expert weights while preserving FSDP ownership.
 
-    if param_name.endswith("linear_attn.conv1d.weight"):
-        key_size = model_info["linear_num_key_heads"] * model_info["linear_key_head_dim"]
-        value_size = model_info["linear_num_value_heads"] * model_info["linear_value_head_dim"]
-        component_sizes = [key_size, key_size, value_size]
-    elif param_name.endswith("linear_attn.in_proj_qkv.weight"):
-        key_size = model_info["linear_key_dim"]
-        value_size = model_info["linear_value_dim"]
-        component_sizes = [key_size, key_size, value_size]
-    else:
-        return None
-
-    component_names = [param_name + suffix for suffix in ("_q", "_k", "_v")]
-    return _split_dim0_fused_fsdp_param(
-        local_param=local_param,
-        sharding=sharding,
-        component_names=component_names,
-        component_sizes=component_sizes,
-    )
-
-
-def _split_fused_moe_fsdp_param(
-    model_info: dict,
-    param_name: str,
-    local_param: torch.Tensor,
-    sharding: NIXLSharding,
-) -> tuple[dict[str, torch.Tensor], dict[str, NIXLSharding]] | None:
-    """Split fused expert weights while preserving the original FSDP ownership."""
+    Supports FSDP sharding across either the expert or projection dimension.
+    """
     gate_up_prefix = get_fused_moe_expert_prefix(param_name, "gate_up_proj")
     down_prefix = get_fused_moe_expert_prefix(param_name, "down_proj")
     if gate_up_prefix is None and down_prefix is None:
@@ -170,9 +134,7 @@ def _split_fused_moe_fsdp_param(
 
     intermediate_size = model_info.get("moe_intermediate_size")
     if gate_up_prefix is not None and (
-        not isinstance(intermediate_size, int)
-        or isinstance(intermediate_size, bool)
-        or intermediate_size <= 0
+        not isinstance(intermediate_size, int) or isinstance(intermediate_size, bool) or intermediate_size <= 0
     ):
         raise ValueError(
             f"A positive moe_intermediate_size is required to split {param_name}, got {intermediate_size}."
@@ -212,8 +174,8 @@ def _split_fused_moe_fsdp_param(
                     )
                 names_and_params = ((f"{down_prefix}.{expert_id}.down_proj.weight", expert_param),)
 
-            for name, param in names_and_params:
-                converted_state_dict[name] = param
+            for name, tensor in names_and_params:
+                converted_state_dict[name] = tensor
                 converted_sharding_dict[name] = NIXLSharding.default()
         return converted_state_dict, converted_sharding_dict
 
@@ -230,7 +192,7 @@ def _split_fused_moe_fsdp_param(
         for expert_id in range(num_experts):
             expert_param = local_param[expert_id]
             if gate_up_prefix is not None:
-                split_state, split_sharding = _split_dim0_fused_fsdp_param(
+                split_state, split_sharding = split_dim0_fused_fsdp_param(
                     local_param=expert_param,
                     sharding=canonical_projection_sharding,
                     component_names=[
@@ -249,7 +211,10 @@ def _split_fused_moe_fsdp_param(
                     )
                 name = f"{down_prefix}.{expert_id}.down_proj.weight"
                 converted_state_dict[name] = expert_param
-                converted_sharding_dict[name] = _clone_sharding(canonical_projection_sharding)
+                converted_sharding_dict[name] = NIXLSharding(
+                    shard_mesh=canonical_projection_sharding.shard_mesh.copy(),
+                    shard_indices=list(canonical_projection_sharding.shard_indices),
+                )
         return converted_state_dict, converted_sharding_dict
 
     raise ValueError(
@@ -306,33 +271,29 @@ class FSDPConverter(BaseConverter):
             local_param = param.to_local()
             # Compute sharding from original 2D DTensor placements before any reshape.
             sharding = self.get_sharding_for_param(param_name, param)
-            qwen3_5_split = split_qwen3_5_fused_fsdp_param(
+            moe_split = split_fused_moe_fsdp_param(
                 self.model_info,
                 param_name,
                 local_param,
                 sharding,
             )
-            if qwen3_5_split is not None:
-                split_state_dict, split_sharding_dict = qwen3_5_split
+            if moe_split is not None:
+                split_state_dict, split_sharding_dict = moe_split
                 converted_state_dict.update(split_state_dict)
                 sharding_dict.update(split_sharding_dict)
                 continue
-            vision_head_size = self.model_info.get("vision_head_size")
-            if "visual.blocks" in param_name and "qkv" in param_name and vision_head_size is not None:
-                local_param = reshape_visual_block_qkv(
-                    local_param,
-                    vision_head_size=vision_head_size,
-                )
-                if next(iter(sharding.shard_mesh)) == 1:
-                    sharding = NIXLSharding(
-                        shard_mesh=OrderedDict([(local_param.ndim - 1, next(iter(sharding.shard_mesh.values())))]),
-                        shard_indices=list(sharding.shard_indices),
-                    )
             # NOTE(lhy): Reshape Q/K/V local shards to 3D to match slice_qkv_proj_megatron layout
             # and update sharding to reflect the new tensor shape.
             local_param, sharding = self.maybe_reshape_qkv_to_3d(param_name, local_param, sharding)
-            converted_state_dict[param_name] = local_param
-            sharding_dict[param_name] = sharding
+            converted_params = convert_hf_local_shard(
+                self.model_info,
+                param_name,
+                local_param,
+                sharding,
+            )
+            for converted_name, (converted_param, converted_sharding) in converted_params.items():
+                converted_state_dict[converted_name] = converted_param
+                sharding_dict[converted_name] = converted_sharding
         return converted_state_dict, sharding_dict
 
     def get_sharding_for_param(self, param_name: str, param: DTensor) -> NIXLSharding:
@@ -397,9 +358,13 @@ def convert_fsdp_inplace(
             (converted_state_dict, sharding_dict).
     """
     if fsdp_strategy == "fsdp":
-        assert fsdp_version(model) == 1, "FSDP version 1 is expected for 'fsdp' strategy."
+        assert fsdp_version(model) == 1, (
+            f"FSDP version 1 is expected for 'fsdp' strategy, but got {fsdp_version(model)}"
+        )
     elif fsdp_strategy == "fsdp2":
-        assert fsdp_version(model) == 2, "FSDP version 2 is expected for 'fsdp2' strategy."
+        assert fsdp_version(model) == 2, (
+            f"FSDP version 2 is expected for 'fsdp2' strategy, but got {fsdp_version(model)}"
+        )
     else:
         raise ValueError(f"Unsupported FSDP strategy: {fsdp_strategy}")
     converter = FSDPConverter(fsdp_strategy, parameter_mapping)

@@ -77,9 +77,7 @@ def main():
     skipped = 0
     for rid, entries in groups.items():
         if len(entries) != 2:
-            # not exactly two entries for this request_id
-            # try to be permissive: take any prompt_length/generate_length present
-            # but warn
+            # Salvage available lengths when a request has an unexpected entry count.
             print(
                 f"Warning: request_id {rid} has {len(entries)} entries (expected 2). Attempting to salvage.",
                 file=sys.stderr,
@@ -95,7 +93,7 @@ def main():
         if prompt == 0 and gen == 0:
             # nothing meaningful
             print(
-                f"Warning: request_id {rid} has no prompt_length and no generated_length; skipping.",
+                f"Warning: request_id {rid} has no prompt_length or generated_length. Skipping.",
                 file=sys.stderr,
             )
             skipped += 1
@@ -132,11 +130,7 @@ def main():
             f"fall outside defined bins and will be ignored in the plot.",
             file=sys.stderr,
         )
-        # adjust totals to reflect only in-bin tokens/sequences for percentages?
-        # The user requested percentages "占所有的百分比" — interpret as relative to all sequences and all tokens.
-        # Therefore percentages should be computed relative to
-        # original totals (including out-of-range) — we will use original totals.
-        # (We still won't draw a bar for out-of-range; you can change bins if desired.)
+        # Percentages include values outside the plotted bins.
 
     # Compute percentages (relative to overall totals)
     seq_pct = [(c / total_seqs) * 100.0 for c in counts]

@@ -101,13 +101,11 @@ def serve(token: str, *, idle_timeout_s: float = 30.0) -> None:
                         ever_registered = True
                     response_ancillary = []
                     if response_fd is not None:
-                        response_ancillary = [
-                            (socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", [response_fd]))
-                        ]
+                        response_ancillary = [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", [response_fd]))]
                     connection.sendmsg([_encode(response)], response_ancillary)
                 except Exception as exc:
                     connection.send(_encode({"ok": False, "error": str(exc)}))
-        
+
 
 def _handle_request(
     entries: dict[str, _Entry],

@@ -28,9 +28,7 @@ def gb_to_bytes(value: int | float | str, *, field_name: str, allow_zero: bool =
     minimum_invalid = gb < 0 if allow_zero else gb <= 0
     if not math.isfinite(gb) or minimum_invalid or not size_bytes.is_integer():
         qualifier = "non-negative" if allow_zero else "positive"
-        raise ValueError(
-            f"{field_name} must be a {qualifier} GB value resolving to whole bytes, got {value!r}."
-        )
+        raise ValueError(f"{field_name} must be a {qualifier} GB value resolving to whole bytes, got {value!r}.")
     return int(size_bytes)
 
 
@@ -367,9 +365,7 @@ def prepare_module_for_direct_fsdp2_weight_arena(
         module.to_empty(device="meta")
 
     non_meta = [
-        (name, str(tensor.device))
-        for name, tensor in module.state_dict().items()
-        if tensor.device.type != "meta"
+        (name, str(tensor.device)) for name, tensor in module.state_dict().items() if tensor.device.type != "meta"
     ]
     if non_meta:
         raise RuntimeError(
@@ -380,13 +376,16 @@ def prepare_module_for_direct_fsdp2_weight_arena(
     return dict(sorted(device_counts.items()))
 
 
-def _collect_fsdp2_bindings(module: nn.Module) -> list[tuple[str, torch.Tensor]]:
+def _collect_fsdp2_bindings_with_metadata(
+    module: nn.Module,
+) -> tuple[list[tuple[str, torch.Tensor]], dict[str, tuple[object, int]]]:
     try:
         from torch.distributed._composable.fsdp import FSDPModule
     except ImportError as exc:
         raise RuntimeError("FSDP2 weight arena requires torch.distributed._composable.fsdp.FSDPModule.") from exc
 
     bindings: list[tuple[str, torch.Tensor]] = []
+    fsdp_param_specs: dict[str, tuple[object, int]] = {}
     seen_tensor_ids: set[int] = set()
     seen_fsdp_param_ids: set[int] = set()
     fsdp_param_count = 0
@@ -401,7 +400,7 @@ def _collect_fsdp2_bindings(module: nn.Module) -> list[tuple[str, torch.Tensor]]
                     continue
                 seen_fsdp_param_ids.add(id(fsdp_param))
                 fsdp_param_count += 1
-                param_fqn = getattr(fsdp_param, "_param_fqn", f"fsdp_param_{fsdp_param_count}")
+                param_fqn = _fsdp_param_name(fsdp_param, fsdp_param_count)
                 if not hasattr(fsdp_param, "_sharded_param_data") or not hasattr(fsdp_param, "sharded_param"):
                     raise RuntimeError(f"Unsupported FSDP2 parameter {param_fqn}: missing sharded storage references.")
                 sharded_state = getattr(fsdp_param, "sharded_state", None)
@@ -409,12 +408,20 @@ def _collect_fsdp2_bindings(module: nn.Module) -> list[tuple[str, torch.Tensor]]
                     raise RuntimeError(
                         f"FSDP2 parameter {param_fqn} must be SHARDED before arena packing, got {sharded_state}."
                     )
+                padded_name = f"fsdp_padded:{param_fqn}"
+                binding_count_before = len(bindings)
                 _append_binding(
                     bindings,
                     seen_tensor_ids,
-                    f"fsdp_padded:{param_fqn}",
+                    padded_name,
                     fsdp_param._sharded_param_data,
                 )
+                if len(bindings) != binding_count_before:
+                    fsdp_param_specs[padded_name] = (
+                        fsdp_param,
+                        fsdp_param._sharded_param_data.storage_offset()
+                        * fsdp_param._sharded_param_data.element_size(),
+                    )
                 _append_binding(
                     bindings,
                     seen_tensor_ids,
@@ -427,6 +434,17 @@ def _collect_fsdp2_bindings(module: nn.Module) -> list[tuple[str, torch.Tensor]]
 
     for name, tensor in _collect_module_bindings(module):
         _append_binding(bindings, seen_tensor_ids, name, tensor)
+    return bindings, fsdp_param_specs
+
+
+def _fsdp_param_name(fsdp_param: object, ordinal: int) -> str:
+    """Return the FSDP2 FQN or an ordinal name before FSDP2 assigns one."""
+    param_fqn = getattr(fsdp_param, "_param_fqn", None)
+    return str(param_fqn) if param_fqn else f"fsdp_param_{ordinal}"
+
+
+def _collect_fsdp2_bindings(module: nn.Module) -> list[tuple[str, torch.Tensor]]:
+    bindings, _ = _collect_fsdp2_bindings_with_metadata(module)
     return bindings
 
 
@@ -881,6 +899,42 @@ def _storage_as_bytes(tensor: torch.Tensor, expected_key: tuple[str, int, int]) 
     )
 
 
+def _make_fsdp2_handle(
+    handle: WeightArenaHandle,
+    fsdp_param_specs: dict[str, tuple[object, int]],
+) -> FSDP2WeightArenaHandle:
+    placement_by_binding: dict[str, WeightArenaPlacement] = {}
+    for placement in handle.placements:
+        for binding_name in placement.binding_names:
+            if binding_name in fsdp_param_specs:
+                if binding_name in placement_by_binding:
+                    raise RuntimeError(f"FSDP2 binding {binding_name} appeared in multiple arena placements.")
+                placement_by_binding[binding_name] = placement
+
+    missing_bindings = sorted(set(fsdp_param_specs) - set(placement_by_binding))
+    if missing_bindings:
+        raise RuntimeError(
+            "FSDP2 arena packing lost padded shard placements: "
+            f"count={len(missing_bindings)} first_bindings={missing_bindings[:8]}."
+        )
+
+    fsdp_param_placements = tuple(
+        (
+            fsdp_param,
+            placement_by_binding[binding_name].arena_index,
+            placement_by_binding[binding_name].offset_bytes + storage_offset_bytes,
+        )
+        for binding_name, (fsdp_param, storage_offset_bytes) in fsdp_param_specs.items()
+    )
+    return FSDP2WeightArenaHandle(
+        arenas=handle.arenas,
+        placements=handle.placements,
+        stats=handle.stats,
+        base_addresses=handle.base_addresses,
+        fsdp_param_placements=fsdp_param_placements,
+    )
+
+
 @torch.no_grad()
 def _pack_named_tensors(
     named_tensors: list[tuple[str, torch.Tensor]],
@@ -888,6 +942,7 @@ def _pack_named_tensors(
     max_chunk_bytes: int,
     alignment_bytes: int,
     require_cuda: bool,
+    fsdp_param_specs: dict[str, tuple[object, int]] | None = None,
 ) -> WeightArenaHandle:
     _validate_config(max_chunk_bytes, alignment_bytes)
     groups = _group_bindings(named_tensors, alignment_bytes, require_cuda)
@@ -945,12 +1000,39 @@ def _pack_named_tensors(
         pack_seconds=time.perf_counter() - started_at,
     )
     arena_tuple = tuple(arenas)
-    return WeightArenaHandle(
+    handle = WeightArenaHandle(
         arenas=arena_tuple,
         placements=tuple(placements),
         stats=stats,
         base_addresses=tuple(arena.data_ptr() for arena in arena_tuple),
     )
+    if fsdp_param_specs is not None:
+        fsdp2_handle = _make_fsdp2_handle(handle, fsdp_param_specs)
+        fsdp2_handle.assert_fsdp_bindings_unchanged()
+        return fsdp2_handle
+    return handle
+
+
+def _weight_tms_pool_key(mem_pools: dict, tms_tag: str, enable_cpu_backup: bool) -> tuple:
+    """Return the TMS pool that owns model weights.
+
+    TMS keeps separate pools for the same tag depending on whether CPU backup
+    is enabled. The caller must select the setting used by the worker's model
+    allocation context; a same-tag pool with the opposite setting belongs to a
+    different allocation class and must remain untouched.
+    """
+    pool_key = (tms_tag, bool(enable_cpu_backup))
+    if pool_key not in mem_pools:
+        matching_keys = [key for key in mem_pools if isinstance(key, tuple) and len(key) == 2 and key[0] == tms_tag]
+        raise RuntimeError(
+            f"Weight arena expected model-weight TMS pool {pool_key!r}; available pools={matching_keys!r}."
+        )
+    return pool_key
+
+
+def _install_packed_tms_pool(mem_pools: dict, pool_key: tuple, packed_pool: object) -> None:
+    """Replace only the model-weight pool, leaving the optimizer pool intact."""
+    mem_pools[pool_key] = packed_pool
 
 
 def _pack_named_tensors_in_fresh_tms_pool(
@@ -960,6 +1042,8 @@ def _pack_named_tensors_in_fresh_tms_pool(
     alignment_bytes: int,
     require_cuda: bool,
     tms_tag: str,
+    enable_cpu_backup: bool,
+    fsdp_param_specs: dict[str, tuple[object, int]] | None = None,
 ) -> WeightArenaHandle:
     """Pack into a new TMS pool, then release the source pool's cached blocks."""
     started_at = time.perf_counter()
@@ -977,15 +1061,13 @@ def _pack_named_tensors_in_fresh_tms_pool(
             f"Unsupported torch_memory_saver internals for weight arena pool replacement: missing {missing_fields}."
         )
 
-    pool_key = (tms_tag, False)
-    if pool_key not in impl._mem_pools:
-        raise RuntimeError(f"Weight arena expected an existing TMS pool for tag={tms_tag!r}, but none was found.")
-    source_pool = impl._mem_pools[pool_key]
+    source_pool_key = _weight_tms_pool_key(impl._mem_pools, tms_tag, enable_cpu_backup)
+    source_pool = impl._mem_pools[source_pool_key]
     source_pool_use_count = source_pool.use_count()
     if source_pool_use_count != 1:
         raise RuntimeError(
-            "Weight arena must replace the TMS pool after its allocation region has exited; "
-            f"tag={tms_tag!r} pool_use_count={source_pool_use_count}."
+            "Weight arena must replace the TMS pool after its allocation region has exited. "
+            f"tag={tms_tag!r} pool_key={source_pool_key!r} pool_use_count={source_pool_use_count}."
         )
 
     # Complete all validation before releasing the source pool object. Every
@@ -1026,12 +1108,13 @@ def _pack_named_tensors_in_fresh_tms_pool(
 
     arena_pool = torch.cuda.MemPool(allocator=impl._hook_util.get_allocator())
     with torch.cuda.use_mem_pool(arena_pool):
-        with impl._with_region_config(tag=tms_tag, enable_cpu_backup=False):
+        with impl._with_region_config(tag=tms_tag, enable_cpu_backup=enable_cpu_backup):
             handle = _pack_named_tensors(
                 named_tensors,
                 max_chunk_bytes=max_chunk_bytes,
                 alignment_bytes=alignment_bytes,
                 require_cuda=require_cuda,
+                fsdp_param_specs=fsdp_param_specs,
             )
 
     torch.cuda.synchronize()
@@ -1039,7 +1122,7 @@ def _pack_named_tensors_in_fresh_tms_pool(
     # Swapping the pool after every binding has moved releases the old pool's
     # inactive cache. Live non-model allocations keep their TMS metadata and
     # remain pauseable after the MemPool object is destroyed.
-    impl._mem_pools[pool_key] = arena_pool
+    _install_packed_tms_pool(impl._mem_pools, source_pool_key, arena_pool)
     del source_pool
     gc.collect()
     torch.cuda.synchronize()
@@ -1074,13 +1157,15 @@ def pack_fsdp2_model_weights(
     *,
     max_chunk_bytes: int,
     alignment_bytes: int = 256,
-) -> WeightArenaHandle:
+) -> FSDP2WeightArenaHandle:
     """Pack FSDP2 padded shards, local DTensor views, parameters, and buffers."""
+    named_tensors, fsdp_param_specs = _collect_fsdp2_bindings_with_metadata(module)
     return _pack_named_tensors(
-        _collect_fsdp2_bindings(module),
+        named_tensors,
         max_chunk_bytes=max_chunk_bytes,
         alignment_bytes=alignment_bytes,
         require_cuda=True,
+        fsdp_param_specs=fsdp_param_specs,
     )
 
 
@@ -1090,6 +1175,7 @@ def pack_module_weights_in_fresh_tms_pool(
     max_chunk_bytes: int,
     alignment_bytes: int = 256,
     tms_tag: str = "weights",
+    enable_cpu_backup: bool = False,
 ) -> WeightArenaHandle:
     """Pack module weights and replace the completed source TMS pool."""
     return _pack_named_tensors_in_fresh_tms_pool(
@@ -1098,6 +1184,7 @@ def pack_module_weights_in_fresh_tms_pool(
         alignment_bytes=alignment_bytes,
         require_cuda=True,
         tms_tag=tms_tag,
+        enable_cpu_backup=enable_cpu_backup,
     )
 
 
@@ -1107,12 +1194,16 @@ def pack_fsdp2_model_weights_in_fresh_tms_pool(
     max_chunk_bytes: int,
     alignment_bytes: int = 256,
     tms_tag: str = "default",
-) -> WeightArenaHandle:
+    enable_cpu_backup: bool = False,
+) -> FSDP2WeightArenaHandle:
     """Pack FSDP2 shards and replace the completed source TMS pool."""
+    named_tensors, fsdp_param_specs = _collect_fsdp2_bindings_with_metadata(module)
     return _pack_named_tensors_in_fresh_tms_pool(
-        _collect_fsdp2_bindings(module),
+        named_tensors,
         max_chunk_bytes=max_chunk_bytes,
         alignment_bytes=alignment_bytes,
         require_cuda=True,
         tms_tag=tms_tag,
+        enable_cpu_backup=enable_cpu_backup,
+        fsdp_param_specs=fsdp_param_specs,
     )

@@ -1,1 +1,0 @@
-python test_get_handle.py

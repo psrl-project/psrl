@@ -14,9 +14,14 @@ HF_MODEL_PATH=${PSRL_WORKSPACE}/models/Qwen2.5-3B-Instruct
 TRAIN_FILE=${PSRL_WORKSPACE}/data/gsm8k/train.parquet
 TEST_FILE=${PSRL_WORKSPACE}/data/gsm8k/test.parquet
 
+CKPT_ROOT=${CKPT_ROOT:-$PWD}
+default_local_dir=$CKPT_ROOT/checkpoint/$experiment_name
+
+GEN_DP=1 # DP in the generation side
 GEN_TP=1 # TP in the generation side
 GEN_PP=1 # PP in the generation side
 
+VAL_DP=1 # DP in the training side for validation
 VAL_TP=1 # TP in the training side for validation
 VAL_PP=1 # PP in the training side for validation
 
@@ -52,7 +57,7 @@ train_prompt_bsz=64
 redundant_train_prompt_bsz=64
 n_resp_per_prompt=8
 redundant_n_resp_per_prompt=8
-train_prompt_mini_bsz=16
+train_prompt_mini_bsz=64
 
 # Algorithm
 temperature=1
@@ -61,12 +66,11 @@ top_k=-1 # 0 for HF rollout, -1 for vLLM rollout
 val_top_p=0.7
 filter_groups_metric=acc
 
-# NOTE(lhy): parameters of the actor cannot be offloaded when using nixl_cpu mode
-# May support this in the future
+# NOTE(lhy): Actor parameters cannot be offloaded in `nixl_cpu` mode.
 offload=True
 use_dynamic_bsz=True
 
-PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config --config-name='ppo_trainer' \
+PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path="${PSRL_PATH}/psrl/trainer/config" --config-name='ppo_trainer' \
     psrl.ps_manager_ip=${LOCAL_IP} \
     psrl.reward_service_ip=${LOCAL_IP} \
     psrl.rollout_n=${n_resp_per_prompt} \
@@ -86,18 +90,17 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config --conf
     psrl.deployment.train_nnodes=${TRAIN_NNODES} \
     psrl.deployment.train_ngpus_per_node=${TRAIN_NGPUS_PER_NODE} \
     psrl.deployment.total_nnodes=${NNODES} \
-    psrl.nixl.server_port=23456 \
     psrl.group_post_process.enable=False \
     psrl.group_post_process.name=dynamic_sampling_filter \
     \
-    psrl.redundant_rollout.enable=True \
-    psrl.redundant_rollout.redundant_global_batch_size=${redundant_train_prompt_bsz} \
-    psrl.redundant_rollout.redundant_rollout_n=${redundant_n_resp_per_prompt} \
+    psrl.rollout_coordination.redundant_rollout.enable=True \
+    psrl.rollout_coordination.redundant_rollout.redundant_global_batch_size=${redundant_train_prompt_bsz} \
+    psrl.rollout_coordination.redundant_rollout.redundant_rollout_n=${redundant_n_resp_per_prompt} \
     \
-    psrl.partial_rollout.enable=True \
+    psrl.rollout_coordination.partial_rollout.enable=True \
     \
-    gen_actor_rollout_ref.model.path="$HF_MODEL_PATH" \
     gen_actor_rollout_ref.rollout.gpu_memory_utilization=0.9 \
+    gen_actor_rollout_ref.rollout.data_parallel_size=${GEN_DP} \
     gen_actor_rollout_ref.rollout.tensor_model_parallel_size=${GEN_TP} \
     gen_actor_rollout_ref.rollout.pipeline_model_parallel_size=${GEN_PP} \
     gen_actor_rollout_ref.rollout.enable_chunked_prefill=True \
@@ -121,7 +124,9 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config --conf
     train_actor_rollout_ref.rollout.val_kwargs.top_k=${top_k} \
     train_actor_rollout_ref.rollout.val_kwargs.n=1 \
     train_actor_rollout_ref.rollout.tensor_model_parallel_size=${VAL_TP} \
+    train_actor_rollout_ref.rollout.pipeline_model_parallel_size=${VAL_PP} \
     train_actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
+    train_actor_rollout_ref.actor.strategy=fsdp2 \
     train_actor_rollout_ref.actor.use_kl_loss=${use_kl_loss} \
     train_actor_rollout_ref.actor.kl_loss_coef=${kl_loss_coef} \
     train_actor_rollout_ref.actor.clip_ratio_low=${clip_ratio_low} \
@@ -139,16 +144,18 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config --conf
     train_actor_rollout_ref.actor.grad_clip=1.0 \
     train_actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode} \
     \
-    reward_model.reward_manager=dapo \
-    +reward_model.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer} \
-    +reward_model.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len} \
-    +reward_model.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \
-    +reward_model.reward_kwargs.overlong_buffer_cfg.log=False \
-    +reward_model.reward_kwargs.max_resp_len=${max_response_length} \
+    reward.active_managers='[dapo]' \
+    reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer} \
+    reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len} \
+    reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \
+    reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.log=False \
+    reward.managers.dapo.reward_kwargs.max_resp_len=${max_response_length} \
     \
-    data.train_files="${TRAIN_FILE}" \
-    data.val_files="${TEST_FILE}" \
-    data.prompt_key=prompt \
+    +data.train_files="${TRAIN_FILE}" \
+    data.reward_model_dicts.0.reward_loop_type=dapo \
+    data.reward_model_dicts.0.reward_fn=compute_score \
+    +data.val_files="${TEST_FILE}" \
+    +data.prompt_key=prompt \
     data.truncation='left' \
     data.max_prompt_length=${max_prompt_length} \
     data.max_response_length=${max_response_length} \
@@ -160,6 +167,7 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config --conf
     trainer.logger='["console","wandb"]' \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${experiment_name}" \
+    trainer.default_local_dir="${default_local_dir}" \
     trainer.val_before_train=True \
     trainer.test_freq=5 \
     trainer.save_freq=200 \

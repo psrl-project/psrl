@@ -91,7 +91,6 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path="${PSRL_PATH}/p
     data.truncation='error' \
     data.shuffle=False \
     \
-    train_actor_rollout_ref.model.path="${STUDENT_MODEL_PATH}" \
     train_actor_rollout_ref.model.enable_gradient_checkpointing=True \
     train_actor_rollout_ref.model.use_remove_padding=True \
     train_actor_rollout_ref.model.use_fused_kernels=${USE_FUSED_KERNELS} \
@@ -105,7 +104,7 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path="${PSRL_PATH}/p
     train_actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     train_actor_rollout_ref.actor.ulysses_sequence_parallel_size=1 \
     \
-    gen_actor_rollout_ref.model.path="${STUDENT_MODEL_PATH}" \
+    train_actor_rollout_ref.model.path="${STUDENT_MODEL_PATH}" \
     gen_actor_rollout_ref.rollout.name=${ROLLOUT_NAME} \
     gen_actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     gen_actor_rollout_ref.rollout.gpu_memory_utilization=0.3 \

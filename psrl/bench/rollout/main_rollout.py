@@ -92,12 +92,12 @@ class SimpleRolloutTester:
 
         max_num_batched_tokens = rollout_config.max_num_batched_tokens
         max_model_len = rollout_config.get(
-                "max_model_len",
-                self.config.data.max_prompt_length + self.config.data.max_response_length,
-            )
+            "max_model_len",
+            self.config.data.max_prompt_length + self.config.data.max_response_length,
+        )
         if max_num_batched_tokens < max_model_len:
             max_num_batched_tokens = max_model_len
-        
+
         expert_parallel_size = int(rollout_config.get("expert_parallel_size", 1))
         # NOTE(claude): Match psrl.workers.gen.vllm_rollout: EP>1 enables vLLM expert parallel.
         enable_expert_parallel = expert_parallel_size > 1
@@ -122,9 +122,6 @@ class SimpleRolloutTester:
             "trust_remote_code": self.config.model.get("trust_remote_code", False),
             "seed": 0,
             "worker_extension_cls": "psrl.bench.rollout.vllm_extension.vLLMWorkerExtension",
-            "additional_config": {
-                "max_model_len_used_in_estimation": rollout_config.max_num_seqs * 32768 * 32,
-            },
         }
 
         # Create AsyncLLM with stats collector
@@ -291,20 +288,20 @@ class SimpleRolloutTester:
 
         return results
 
-    async def estimate_max_model_len(self):
-        """Estimate the max model length."""
-        max_model_len = await self.llm.collective_rpc(
-            "estimate_max_model_len",
+    async def get_total_kv_cache_tokens(self):
+        """Get the total KV-cache token capacity of the engine."""
+        total_kv_tokens = await self.llm.collective_rpc(
+            "get_total_kv_cache_tokens",
             args=(),
         )
-        return max_model_len
+        return total_kv_tokens
 
     async def run_performance_test(self):
         """Run performance tests using AsyncLLM directly."""
         test_mode = self.config.rollout_test.get("mode", "synthetic")  # "synthetic" or "real_data"
-        estimated_max_model_len = await self.estimate_max_model_len()
-        psrl_logger.info(f"Estimated max model length: {estimated_max_model_len}")
-        psrl_logger.info(f"Starting rollout performance test in {test_mode} mode...")
+        total_kv_tokens = await self.get_total_kv_cache_tokens()
+        psrl_logger.info(f"Total KV-cache token capacity: {total_kv_tokens}")
+        psrl_logger.info(f"Starting rollout performance test in mode={test_mode}...")
 
         # Run performance test
         num_iterations = self.config.rollout_test.num_iterations
@@ -327,7 +324,7 @@ class SimpleRolloutTester:
 
                 # Generate responses
                 results = await self._generate_batch_async(test_prompts, synthetic_list)
-                psrl_logger.debug(f"Warmup iteration {i + 1} generated {len(results)} sequences")
+                psrl_logger.debug(f"Warmup iteration={i + 1} generated_sequences={len(results)}.")
             except Exception as e:
                 psrl_logger.warning(f"Warmup failed: {e}")
                 raise e
@@ -355,14 +352,11 @@ class SimpleRolloutTester:
                     synthetic_list = [True] * batch_size
                 else:
                     test_prompts = self._get_real_data_batch()
-                    # long_prompt = {"prompt_token_ids": [self.tokenizer.pad_token_id] * 1024 * 10}
-                    # test_prompts = [long_prompt] * 32 + test_prompts
-                    # synthetic_list = [True] * 32 + [False] * batch_size
                     synthetic_list = [False] * batch_size
 
                 # Generate responses
                 results = await self._generate_batch_async(test_prompts, synthetic_list)
-                psrl_logger.debug(f"Test iteration {i + 1} generated {len(results)} sequences")
+                psrl_logger.debug(f"Test iteration={i + 1} generated_sequences={len(results)}.")
             except Exception as e:
                 psrl_logger.error(f"Generation failed: {e}")
                 raise e
@@ -381,13 +375,13 @@ class SimpleRolloutTester:
         psrl_logger.info("=" * 50)
         psrl_logger.info("ROLLOUT PERFORMANCE TEST RESULTS")
         psrl_logger.info("=" * 50)
-        psrl_logger.info(f"Test mode: {test_mode}")
-        psrl_logger.info(f"Batch size: {batch_size}")
-        psrl_logger.info(f"Test iterations: {num_iterations}")
-        psrl_logger.info(f"Average time per iteration: {avg_time:.2f} ± {std_time:.2f} seconds")
-        psrl_logger.info(f"Min time: {min_time:.2f} seconds")
-        psrl_logger.info(f"Max time: {max_time:.2f} seconds")
-        psrl_logger.info(f"Throughput: {batch_size / avg_time:.2f} samples/second")
+        psrl_logger.info(f"Test mode={test_mode}.")
+        psrl_logger.info(f"Batch size={batch_size}.")
+        psrl_logger.info(f"Test iterations={num_iterations}.")
+        psrl_logger.info(f"Average time per iteration={avg_time:.2f}s ± {std_time:.2f}s.")
+        psrl_logger.info(f"Minimum time={min_time:.2f}s.")
+        psrl_logger.info(f"Maximum time={max_time:.2f}s.")
+        psrl_logger.info(f"Throughput={batch_size / avg_time:.2f} samples/second.")
 
         # Print stats collector summary if available
         if self.stats_collector is not None:

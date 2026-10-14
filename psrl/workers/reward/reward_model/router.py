@@ -14,17 +14,17 @@ import ray
 from omegaconf import DictConfig
 from verl import DataProto
 
-from psrl.utils.cost_model_path import resolve_cost_model_json_path
-from psrl.utils.elastic_rm.candidate_routing import select_itl_candidate
-from psrl.utils.elastic_rm.diagnostics import log_elastic_rm_backlog_diag
-from psrl.utils.elastic_rm.itl_scaling_policy import (
+from psrl.utils.cost_model_path import require_cost_model_json_path
+from psrl.utils.elastic.cost_model import (
     ITLModelParams,
     compute_itl,
-    resolve_itl_model_params,
+    resolve_cost_model_params,
 )
-from psrl.utils.elastic_rm.overhead import RequestMigrationOverheadTracker
+from psrl.utils.elastic.diagnostics import log_elastic_rm_backlog_diag
+from psrl.utils.elastic.overhead import RequestMigrationOverheadTracker
 from psrl.utils.logger import DualOutputHandler
 from psrl.utils.rollout.request_id import canonical_psrl_request_id
+from psrl.workers.elastic.candidate_routing import select_itl_candidate
 from psrl.workers.gen.stats_collector import EngineStats
 
 psrl_logger = logging.getLogger("reward_model_router")
@@ -310,9 +310,7 @@ class CostModelBasedRewardModelRouteStrategy(RewardModelRouteStrategyBase):
 
         cost_model_path = self.strategy_kwargs["cost_model_path"]
         model_name = self.strategy_kwargs.get("model_name", "")
-        resolved_cost_model_path = resolve_cost_model_json_path(cost_model_path, model_name)
-        if resolved_cost_model_path is None:
-            raise ValueError(f"cost_model_path {cost_model_path!r} does not resolve for model {model_name!r}.")
+        resolved_cost_model_path = require_cost_model_json_path(cost_model_path, model_name)
         with open(resolved_cost_model_path, encoding="utf-8") as f:
             self.cost_model = json.load(f)
 
@@ -709,17 +707,14 @@ class PSRL_RewardModelRouter:
         )
         self.load_cache_ttl_s = self._positive_float_config("router_load_cache_ttl_s", 0.05)
 
-        elastic_rm_cfg = self._get_elastic_rm_config()
-        itl_cfg = elastic_rm_cfg.get("itl_policy", {}) if isinstance(elastic_rm_cfg, dict) else {}
-        # OmegaConf keeps nested sections as DictConfig after the shallow
-        # conversion in _get_elastic_rm_config(). Treat mapping-like sections
-        # as valid so RM-side ITL options, including the migration queue switch,
-        # are not silently discarded.
-        if not hasattr(itl_cfg, "get"):
-            itl_cfg = {}
-        variant = str(elastic_rm_cfg.get("scaling_policy_variant", "normal")).lower()
-        self._itl_router_enable = bool(itl_cfg.get("rm_router_enable", variant == "itl"))
-        raw_max_itl = itl_cfg.get("rm_router_max_itl", itl_cfg.get("rm_router_itl_threshold", None))
+        elastic_cfg = self._get_elastic_config()
+        cost_cfg = elastic_cfg.get("throughput_optimal", {}) if hasattr(elastic_cfg, "get") else {}
+        # OmegaConf may keep this nested section as DictConfig.
+        if not hasattr(cost_cfg, "get"):
+            cost_cfg = {}
+        variant = str(elastic_cfg.get("scaling_policy_variant", "throughput-optimal")).lower()
+        self._itl_router_enable = bool(cost_cfg.get("rm_router_enable", variant == "throughput-optimal"))
+        raw_max_itl = cost_cfg.get("rm_router_max_itl", None)
         self._itl_router_max_itl: float | None = None
         if raw_max_itl is not None:
             try:
@@ -728,11 +723,10 @@ class PSRL_RewardModelRouter:
                     self._itl_router_max_itl = max_itl
             except (TypeError, ValueError):
                 self._itl_router_max_itl = None
-        self._itl_router_params: ITLModelParams | None = resolve_itl_model_params(
+        self._itl_router_params: ITLModelParams | None = resolve_cost_model_params(
             role_name="RewardModel",
             model_name=self._reward_model_name(),
-            itl_config=itl_cfg,
-            fallback_config=elastic_rm_cfg,
+            cost_config=cost_cfg,
             config=self.config,
         )
 
@@ -806,9 +800,9 @@ class PSRL_RewardModelRouter:
             return float(default)
         return value if value > 0 else float(default)
 
-    def _get_elastic_rm_config(self) -> dict[str, Any]:
+    def _get_elastic_config(self) -> dict[str, Any]:
         try:
-            cfg = self.config.psrl.deployment.elastic_rm
+            cfg = self.config.psrl.deployment.elastic
         except AttributeError:
             return {}
         if hasattr(cfg, "items"):

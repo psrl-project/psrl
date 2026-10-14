@@ -18,9 +18,11 @@ python ${PSRL_PATH}/scripts/convert_hf_to_mcore.py --hf_model_path $HF_MODEL_PAT
 TRAIN_FILE=${PSRL_WORKSPACE}/data/dapo/dapo-math-17k.parquet
 TEST_FILE=${PSRL_WORKSPACE}/data/dapo/aime-2024.parquet
 
+GEN_DP=1 # DP in the generation side
 GEN_TP=1 # TP in the generation side
 GEN_PP=1 # PP in the generation side
 
+VAL_DP=1 # DP in the training side for validation
 VAL_TP=4 # TP in the training side for validation
 VAL_PP=1 # PP in the training side for validation
 
@@ -77,12 +79,11 @@ filter_groups_metric=acc
 rollout_is=token
 rollout_is_threshold=2.0
 
-# NOTE(lhy): parameters of the actor cannot be offloaded when using nixl_cpu mode
-# May support this in the future
+# NOTE(lhy): Actor parameters cannot be offloaded in `nixl_cpu` mode.
 offload=True
 use_dynamic_bsz=True
 
-PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config --config-name='ppo_megatron_trainer' \
+PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path="${PSRL_PATH}/psrl/trainer/config" --config-name='ppo_megatron_trainer' \
     psrl.ps_manager_ip=${LOCAL_IP} \
     psrl.reward_service_ip=${LOCAL_IP} \
     psrl.rollout_n=${n_resp_per_prompt} \
@@ -105,14 +106,14 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config --conf
     psrl.group_post_process.enable=False \
     psrl.group_post_process.name=dynamic_sampling_filter \
     \
-    psrl.redundant_rollout.enable=True \
-    psrl.redundant_rollout.redundant_global_batch_size=${redundant_train_prompt_bsz} \
-    psrl.redundant_rollout.redundant_rollout_n=${redundant_n_resp_per_prompt} \
+    psrl.rollout_coordination.redundant_rollout.enable=True \
+    psrl.rollout_coordination.redundant_rollout.redundant_global_batch_size=${redundant_train_prompt_bsz} \
+    psrl.rollout_coordination.redundant_rollout.redundant_rollout_n=${redundant_n_resp_per_prompt} \
     \
-    psrl.partial_rollout.enable=True \
+    psrl.rollout_coordination.partial_rollout.enable=True \
     \
-    gen_actor_rollout_ref.model.path="$HF_MODEL_PATH" \
     gen_actor_rollout_ref.rollout.gpu_memory_utilization=0.9 \
+    gen_actor_rollout_ref.rollout.data_parallel_size=${GEN_DP} \
     gen_actor_rollout_ref.rollout.tensor_model_parallel_size=${GEN_TP} \
     gen_actor_rollout_ref.rollout.pipeline_model_parallel_size=${GEN_PP} \
     gen_actor_rollout_ref.rollout.enable_chunked_prefill=True \
@@ -129,7 +130,9 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config --conf
     train_actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=${use_dynamic_bsz} \
     train_actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
     train_actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${packing_length} \
+    train_actor_rollout_ref.rollout.data_parallel_size=${VAL_DP} \
     train_actor_rollout_ref.rollout.tensor_model_parallel_size=${VAL_TP} \
+    train_actor_rollout_ref.rollout.pipeline_model_parallel_size=${VAL_PP} \
     train_actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     train_actor_rollout_ref.rollout.max_num_batched_tokens=$((max_prompt_length + max_response_length)) \
     train_actor_rollout_ref.rollout.val_kwargs.temperature=${temperature} \
@@ -158,6 +161,7 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config --conf
     train_actor_rollout_ref.actor.megatron.tensor_model_parallel_size=${TRAIN_TP} \
     train_actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${TRAIN_PP} \
     train_actor_rollout_ref.actor.megatron.context_parallel_size=${TRAIN_CP} \
+    train_actor_rollout_ref.actor.megatron.vanilla_mbridge=False \
     train_actor_rollout_ref.actor.megatron.expert_tensor_parallel_size=${TRAIN_ETP} \
     train_actor_rollout_ref.actor.megatron.expert_model_parallel_size=${TRAIN_EP} \
     train_actor_rollout_ref.actor.megatron.use_dist_checkpointing=True \
@@ -167,17 +171,23 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config --conf
     +train_actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1 \
     +train_actor_rollout_ref.actor.megatron.override_transformer_config.num_layers_in_first_pipeline_stage=${NUM_LAYERS_IN_FIRST_PIPELINE_STAGE} \
     +train_actor_rollout_ref.actor.megatron.override_transformer_config.num_layers_in_last_pipeline_stage=${NUM_LAYERS_IN_LAST_PIPELINE_STAGE} \
+    +train_actor_rollout_ref.actor.megatron.override_transformer_config.moe_router_dtype=fp32 \
+    +train_actor_rollout_ref.actor.megatron.override_transformer_config.moe_flex_dispatcher_backend=deepep \
+    +train_actor_rollout_ref.actor.megatron.override_transformer_config.moe_token_dispatcher_type=flex \
+    +train_actor_rollout_ref.actor.megatron.override_transformer_config.moe_permute_fusion=True \
     \
-    reward_model.reward_manager=dapo \
-    +reward_model.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer} \
-    +reward_model.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len} \
-    +reward_model.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \
-    +reward_model.reward_kwargs.overlong_buffer_cfg.log=False \
-    +reward_model.reward_kwargs.max_resp_len=${max_response_length} \
+    reward.active_managers='[dapo]' \
+    reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer} \
+    reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len} \
+    reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \
+    reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.log=False \
+    reward.managers.dapo.reward_kwargs.max_resp_len=${max_response_length} \
     \
-    data.train_files="${TRAIN_FILE}" \
-    data.val_files="${TEST_FILE}" \
-    data.prompt_key=prompt \
+    +data.train_files="${TRAIN_FILE}" \
+    data.reward_model_dicts.0.reward_loop_type=dapo \
+    data.reward_model_dicts.0.reward_fn=compute_score \
+    +data.val_files="${TEST_FILE}" \
+    +data.prompt_key=prompt \
     data.truncation='left' \
     data.max_prompt_length=${max_prompt_length} \
     data.max_response_length=${max_response_length} \

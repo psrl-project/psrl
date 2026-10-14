@@ -13,10 +13,7 @@
 # limitations under the License.
 
 
-from typing import Optional
-
 import torch
-
 from verl.models.mcore.util import (
     preprocess_bshd_engine,
     preprocess_thd_engine,
@@ -40,7 +37,9 @@ def vocab_parallel_log_softmax(
     # seq_len, batch_size, top_k = target_topk_logps.size()
     vp_logits, logits_max = calculate_logits_max(vp_logits)
 
-    torch.distributed.all_reduce(logits_max, op=torch.distributed.ReduceOp.MAX, group=get_tensor_model_parallel_group())
+    torch.distributed.all_reduce(
+        logits_max, op=torch.distributed.ReduceOp.MAX, group=get_tensor_model_parallel_group()
+    )
 
     vp_logits = vp_logits - logits_max.unsqueeze(dim=-1)
     exp_logits = vp_logits.exp()
@@ -67,7 +66,7 @@ class _VocabParallelKLDivergence(torch.autograd.Function):
         vp_logits: torch.Tensor,
         target_topk_logps: torch.Tensor,
         target_topk_indices: torch.Tensor,
-        log_prob_min_clamp: Optional[float],
+        log_prob_min_clamp: float | None,
     ):
         """
         NOTE:

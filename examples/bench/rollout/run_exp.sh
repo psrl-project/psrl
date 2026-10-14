@@ -5,10 +5,7 @@ set -xeuo pipefail
 # customized (for profiling)
 export VLLM_DISABLE_ATTN="1" # 0: use attention, 1: forbid the use of the attention
 
-# Experiment runner script
-# Runs rollout tests with different combinations of TP, max_prompt_length, and batch_size
-
-# Get the directory of this script
+# Sweep TP, prompt length, and batch size across rollout tests.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROLLOUT_SCRIPT="${SCRIPT_DIR}/run_rollout_test.sh"
 

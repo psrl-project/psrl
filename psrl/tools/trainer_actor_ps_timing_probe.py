@@ -215,8 +215,7 @@ def _assert_fingerprints_match(
 
 def _compact_fingerprints(fingerprints: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
-        {key: value for key, value in fingerprint.items() if key != "tensor_digests"}
-        for fingerprint in fingerprints
+        {key: value for key, value in fingerprint.items() if key != "tensor_digests"} for fingerprint in fingerprints
     ]
 
 

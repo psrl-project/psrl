@@ -2,7 +2,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Final
 
 import numpy as np
@@ -20,18 +20,18 @@ psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
 @dataclass
 class EngineStats:
     # initial properties
-    instance_id: Final[int]
+    replica_idx: Final[int]
+    data_parallel_rank: Final[int]
     model_version: Final[int]
     snapshot: Final[dict]
 
     @staticmethod
     def get_default_snapshot() -> dict:
         return {
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": None,
             "total_elapsed_time": 0.0,
             "elapsed_time_since_last_record": 0.0,
             "scheduler_stats": {
-                "need_to_abort_reqs": None,
                 "req_id_to_prompt_token_num": {},
                 "req_id_to_response_token_num": {},
                 "req_id_in_waiting": [],
@@ -69,7 +69,7 @@ class EngineStats:
         )
 
 
-class StatCollector(StatLoggerBase):
+class DPLBStatCollector(StatLoggerBase):
     """
     Collects and reports statistics from vLLM engine to the rollout coordinator.
 
@@ -80,42 +80,56 @@ class StatCollector(StatLoggerBase):
     """
 
     def __init__(
-        self, 
-        vllm_config: VllmConfig, 
-        psrl_config: DictConfig, 
-        instance_id: int = 0,
-        is_reward_model: bool = False,
-        reward_model_name: str | None = None,
+        self,
+        vllm_config: VllmConfig,
+        psrl_config: DictConfig,
+        replica_idx: int,
+        role: str,
     ):
         """
         Initialize the StatCollector.
 
         Args:
             vllm_config: vLLM configuration object
-            instance_id: Unique identifier for this engine instance
+            replica_idx: Unique identifier for this AsyncLLM replica
         """
         self.vllm_config = vllm_config
         self.psrl_config = psrl_config
-        self.instance_id = instance_id
-        self.is_reward_model = is_reward_model
-        self.reward_model_name = reward_model_name
-        
+        self.role = role
+
+        self.replica_idx = replica_idx
+
         self.model_version = 0
         self._begin_record = False
         self.start_time = None
         self.last_record_time = None
         self.last_dump_to_file_time = None
         self.last_push_to_queue_time = None
+        self.output_queue = None
+
+        # Cumulative prefill/decode time tracking.
+        self._cumulative_prefill_time: float = 0.0
+        self._cumulative_decode_time: float = 0.0
+        self._cumulative_prefill_tokens: int = 0  # total prompt tokens (including cache hit)
+        self._cumulative_prefill_computed_tokens: int = 0  # actual computed (cache miss)
+        self._cumulative_decode_tokens: int = 0
+        self._last_time_split_log_time: float | None = None
+        self._time_split_enable: bool = bool(self.psrl_config.profile.time_split.enable)
+        self._time_split_interval_s: float = float(self.psrl_config.profile.time_split.interval_in_s)
+        if self._time_split_enable:
+            self._time_split_logger = logging.getLogger(f"psrl.time_split.I{self.replica_idx}")
+            self._time_split_logger.propagate = False
+            self._time_split_logger.setLevel(logging.INFO)
+            self._time_split_logger.addHandler(
+                FileOnlyHandler(self.psrl_config.logging_path, f"TimeSplit_I{self.replica_idx}")
+            )
 
         # Build logger
         if self.psrl_config.status_collection.dump_logging_to_file_level != "none":
-            if self.is_reward_model:
-                self.log_prefix = f"StatCollector_RM_{self.reward_model_name}_I{self.instance_id}"
-            else:
-                self.log_prefix = f"StatCollector_I{self.instance_id}"
+            self.log_prefix = f"DPLBStatCollector_{self.role}_I{self.replica_idx}"
             psrl_logger.propagate = False
             psrl_logger.addHandler(FileOnlyHandler(self.psrl_config.logging_path, self.log_prefix))
-            psrl_logger.info(f"Initialized StatCollector for instance {self.instance_id}.")
+            psrl_logger.info(f"Initialized DPLBStatCollector: replica={self.replica_idx}, role={self.role!r}.")
 
     def begin_record(self):
         """
@@ -143,21 +157,13 @@ class StatCollector(StatLoggerBase):
         """
         self.output_queue = output_queue
 
-    def init_scheduler_abort_queue(self, scheduler_abort_queue):
-        """
-        Initialize the scheduler abort queue for receiving abort requests.
-
-        Args:
-            scheduler_abort_queue: Ray queue for receiving abort requests
-        """
-        self.scheduler_abort_queue = scheduler_abort_queue
-
-    def record_model_version_update(self, model_version: int):
+    def record_model_version_update(self, model_version: int, engine_index: int):
         """
         Set the model version for this engine instance.
 
         Args:
             model_version: Model version
+            engine_index: Engine instance identifier
         """
         curr_time = time.time()
         self.model_version = model_version
@@ -165,14 +171,18 @@ class StatCollector(StatLoggerBase):
         # We force a record to the output queue to ensure the coordinator knows the model version update immediately
         self.output_queue.put_nowait(
             EngineStats(
-                instance_id=self.instance_id,
+                replica_idx=self.replica_idx,
+                data_parallel_rank=engine_index,
                 model_version=self.model_version,
                 snapshot=snapshot,
             )
         )
         # Dump logging to file if enabled
         if self.psrl_config.status_collection.dump_logging_to_file_level != "none":
-            psrl_logger.info(f"Snapshot (model version {self.model_version}): {snapshot}")
+            psrl_logger.debug(
+                f"Snapshot (model version {self.model_version}, "
+                f"instance_id {(self.replica_idx, engine_index)}): {snapshot}"
+            )
         self.last_record_time = curr_time
         self.last_push_to_queue_time = curr_time
 
@@ -193,35 +203,40 @@ class StatCollector(StatLoggerBase):
             scheduler_stats: Statistics from vLLM scheduler (request counts, etc.)
             iteration_stats: Statistics from vLLM iteration
             mm_cache_stats: Multi-modal cache statistics (not currently used)
-            engine_idx: Engine index (not currently used)
+            engine_idx: Engine index
         """
         assert self.output_queue is not None, "Output queue is not initialized"
 
         curr_time = time.time()
 
-        snapshot = {
-            "timestamp": datetime.now().isoformat(),
-            "total_elapsed_time": curr_time - self.start_time,
-            "elapsed_time_since_last_record": curr_time - self.last_record_time,
-            "scheduler_stats": {
-                "need_to_abort_reqs": (
-                    scheduler_stats.need_to_abort_reqs if scheduler_stats.need_to_abort_reqs else None
-                ),
-                "req_id_to_prompt_token_num": (
-                    scheduler_stats.req_id_to_prompt_token_num if scheduler_stats.req_id_to_prompt_token_num else {}
-                ),
-                "req_id_to_response_token_num": (
-                    scheduler_stats.req_id_to_response_token_num
-                    if scheduler_stats.req_id_to_response_token_num
-                    else {}
-                ),
-                "req_id_in_waiting": (
-                    scheduler_stats.req_id_in_waiting if scheduler_stats.req_id_in_waiting else []
-                ),
+        if scheduler_stats is not None:
+            scheduler_stats = {
+                "req_id_to_prompt_token_num": scheduler_stats.req_id_to_prompt_token_num
+                if scheduler_stats.req_id_to_prompt_token_num
+                else {},
+                "req_id_to_response_token_num": scheduler_stats.req_id_to_response_token_num
+                if scheduler_stats.req_id_to_response_token_num
+                else {},
+                "req_id_in_waiting": list(scheduler_stats.req_id_in_waiting),
                 "num_running_reqs": scheduler_stats.num_running_reqs,
                 "num_waiting_reqs": scheduler_stats.num_waiting_reqs,
                 "kv_cache_usage": scheduler_stats.kv_cache_usage,
-            },
+            }
+        else:
+            scheduler_stats = {
+                "req_id_to_prompt_token_num": {},
+                "req_id_to_response_token_num": {},
+                "req_id_in_waiting": [],
+                "num_running_reqs": 0,
+                "num_waiting_reqs": 0,
+                "kv_cache_usage": 0.0,
+            }
+
+        snapshot = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "total_elapsed_time": curr_time - self.start_time,
+            "elapsed_time_since_last_record": curr_time - self.last_record_time,
+            "scheduler_stats": scheduler_stats,
             "generation_throughput": 0.0,
         }
 
@@ -243,13 +258,56 @@ class StatCollector(StatLoggerBase):
                 "num_finished_reqs": len(getattr(iteration_stats, "finished_requests", [])),
                 # "max_time_to_first_tokens": np.max(time_to_first_tokens_iter),
                 # "max_inter_token_latencies": np.max(inter_token_latencies_iter),
-                "avg_time_to_first_tokens": np.mean(time_to_first_tokens_iter),
-                "avg_inter_token_latencies": np.mean(inter_token_latencies_iter),
+                "avg_time_to_first_tokens": np.mean(time_to_first_tokens_iter).item(),
+                "avg_inter_token_latencies": np.mean(inter_token_latencies_iter).item(),
             }
-            snapshot["generation_throughput"] = (
-                num_generation_reqs / iteration_stats_entry["avg_inter_token_latencies"]
-            )
+            avg_itl = iteration_stats_entry["avg_inter_token_latencies"]
+            snapshot["generation_throughput"] = num_generation_reqs / avg_itl if avg_itl > 0 else 0.0
             snapshot["iteration_stats"] = iteration_stats_entry
+
+            # Ignore abnormally long intervals when accumulating prefill and decode
+            # wall time.
+            step_elapsed = snapshot["elapsed_time_since_last_record"]
+            num_pt = iteration_stats_entry["num_prompt_tokens"]
+            num_gt = iteration_stats_entry["num_generation_tokens"]
+            # Actual computed prefill tokens (excluding cache hit).
+            prompt_stats = getattr(iteration_stats, "prompt_token_stats", None)
+            num_pt_computed = getattr(prompt_stats, "computed", 0) if prompt_stats else 0
+
+            # Accumulate token counts unconditionally.
+            self._cumulative_prefill_tokens += num_pt
+            self._cumulative_prefill_computed_tokens += num_pt_computed
+            self._cumulative_decode_tokens += num_gt
+
+            # Accumulate time only for sane step durations.
+            if 0 < step_elapsed < 5.0:
+                if num_pt > 0 and num_gt == 0:
+                    self._cumulative_prefill_time += step_elapsed
+                elif num_pt == 0 and num_gt > 0:
+                    self._cumulative_decode_time += step_elapsed
+                elif num_pt > 0 and num_gt > 0:
+                    # Mixed step: attribute proportionally by token count.
+                    total_tokens = num_pt + num_gt
+                    self._cumulative_prefill_time += step_elapsed * (num_pt / total_tokens)
+                    self._cumulative_decode_time += step_elapsed * (num_gt / total_tokens)
+
+            # Log cumulative prefill/decode time at configured interval.
+            if self._time_split_enable:
+                if self._last_time_split_log_time is None:
+                    self._last_time_split_log_time = curr_time
+                if curr_time - self._last_time_split_log_time >= self._time_split_interval_s:
+                    total_tracked = self._cumulative_prefill_time + self._cumulative_decode_time
+                    self._time_split_logger.info(
+                        f"[I{self.replica_idx}] "
+                        f"cumulative_prefill_s={self._cumulative_prefill_time:.2f}, "
+                        f"cumulative_decode_s={self._cumulative_decode_time:.2f}, "
+                        f"prefill_frac={self._cumulative_prefill_time / max(total_tracked, 1e-9):.4f}, "
+                        f"prefill_tokens={self._cumulative_prefill_tokens}, "
+                        f"prefill_computed_tokens={self._cumulative_prefill_computed_tokens}, "
+                        f"decode_tokens={self._cumulative_decode_tokens}, "
+                        f"wall_time_s={curr_time - self.start_time:.1f}"
+                    )
+                    self._last_time_split_log_time = curr_time
 
         if self.psrl_config.status_collection.dump_logging_to_file_level != "none":
             if (
@@ -258,16 +316,16 @@ class StatCollector(StatLoggerBase):
             ):
                 if self.psrl_config.status_collection.dump_logging_to_file_level == "prompt":
                     if iteration_stats and snapshot["iteration_stats"]["num_prompt_reqs"] > 0:
-                        psrl_logger.info(f"Snapshot (model version {self.model_version}): {snapshot}")
+                        psrl_logger.debug(f"Snapshot (model version {self.model_version}): {snapshot}")
                 elif self.psrl_config.status_collection.dump_logging_to_file_level == "generation":
                     if (
                         iteration_stats
                         and snapshot["iteration_stats"]["num_prompt_reqs"] == 0
                         and snapshot["iteration_stats"]["num_generation_reqs"] > 0
                     ):
-                        psrl_logger.info(f"Snapshot (model version {self.model_version}): {snapshot}")
+                        psrl_logger.debug(f"Snapshot (model version {self.model_version}): {snapshot}")
                 elif self.psrl_config.status_collection.dump_logging_to_file_level == "all":
-                    psrl_logger.info(f"Snapshot (model version {self.model_version}): {snapshot}")
+                    psrl_logger.debug(f"Snapshot (model version {self.model_version}): {snapshot}")
                 else:
                     raise ValueError(
                         f"Invalid dump logging to file level: "
@@ -286,16 +344,13 @@ class StatCollector(StatLoggerBase):
         ):
             self.output_queue.put_nowait(
                 EngineStats(
-                    instance_id=self.instance_id,
+                    replica_idx=self.replica_idx,
+                    data_parallel_rank=engine_idx,
                     model_version=self.model_version,
                     snapshot=snapshot,
                 )
             )
             self.last_push_to_queue_time = curr_time
-
-        # Put abort requests to the abort queue if any
-        if self.scheduler_abort_queue is not None and snapshot["scheduler_stats"]["need_to_abort_reqs"] is not None:
-            self.scheduler_abort_queue.put_nowait(snapshot["scheduler_stats"]["need_to_abort_reqs"])
 
     def log_engine_initialized(self):
         """
@@ -306,6 +361,6 @@ class StatCollector(StatLoggerBase):
         """
         if self.vllm_config.cache_config.num_gpu_blocks:
             psrl_logger.info(
-                f"Engine {self.instance_id}: vllm cache_config_info with initialization "
+                f"Engine {self.replica_idx}: vllm cache_config_info with initialization "
                 f"after num_gpu_blocks is: {self.vllm_config.cache_config.num_gpu_blocks}"
             )

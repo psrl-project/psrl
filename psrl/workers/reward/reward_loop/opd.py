@@ -9,16 +9,16 @@ from verl import DataProto
 
 from psrl.utils.dataset.utils import _pre_process_inputs
 from psrl.utils.logger import DualOutputHandler
-from psrl.workers.reward.reward_model.manager import PSRL_RewardModelManager
-from psrl.workers.reward.reward_loop import register
-from psrl.workers.reward.reward_loop.base import RewardLoopManagerBase
+from psrl.workers.reward.reward_loop.base import RewardLoopBase
+from psrl.workers.reward.reward_loop.registry import register
+from psrl.workers.reward.reward_model.manager import RewardModelManager
 
 psrl_logger = logging.getLogger(__file__)
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
 
 
 @register("opd")
-class OPDRewardLoopManager(RewardLoopManagerBase):
+class OPDRewardLoop(RewardLoopBase):
     """
     Reward loop for online policy distillation.
 
@@ -32,16 +32,16 @@ class OPDRewardLoopManager(RewardLoopManagerBase):
         self,
         config,
         tokenizer,
-        reward_model_manager: PSRL_RewardModelManager = None,
+        reward_model_manager: RewardModelManager | None = None,
         **reward_kwargs,
     ):
         """
-        Initialize OPDRewardLoopManager.
+        Initialize OPDRewardLoop.
 
         Args:
             config: PSRL config.
             tokenizer: Policy tokenizer (for decoding agent responses).
-            reward_model_manager: RewardModelManager instance (provides router or replica handles).
+            reward_model_manager: RewardModelManager instance (provides gateway URL or replica handles).
             reward_kwargs: Additional keyword arguments for compute_score.
         """
         super().__init__(config, tokenizer)
@@ -49,13 +49,19 @@ class OPDRewardLoopManager(RewardLoopManagerBase):
 
         self.reward_model_manager = reward_model_manager
         self.reward_model_tokenizer = self.reward_model_manager.get_reward_model_tokenizer()
-        self.router_process = self.reward_model_manager.get_router_process()
-        self.replica_handles = self.reward_model_manager.get_replica_handles()
+        self.gateway_url = self.reward_model_manager.get_gateway_url()
+        # SMG replaced the old RM router process. Prefer replica servers when present.
+        self.router_process = None
+        self.replica_handles = [
+            replica.servers[0]
+            for replica in getattr(reward_model_manager, "replicas", [])
+            if getattr(replica, "servers", None)
+        ]
         self._replica_rr_index = 0
         self.teacher_key = reward_kwargs.get("teacher_key", "default")
         self.reward_kwargs = reward_kwargs
         psrl_logger.addHandler(DualOutputHandler(self.config.psrl.logging_path, "opd_reward_loop"))
-        psrl_logger.info("Initialized OPDRewardLoopManager.")
+        psrl_logger.info("Initialized OPDRewardLoop.")
 
     async def run_single(self, data: DataProto) -> dict:
         """

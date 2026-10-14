@@ -94,7 +94,7 @@ class NetworkTopology:
 
         # Determine connection type
         if node1 == node2:
-            # Same node, different CPUs/GPUs - NVLink or PCIe
+            # Different devices on one node use NVLink or PCIe.
             if gpu_id1 != gpu_id2:
                 if gpu_id1 == -1 or gpu_id2 == -1:
                     link_type = LinkType.PCIE

@@ -1,5 +1,5 @@
 import torch
-from verl import DataProto
+from tensordict import TensorDict
 
 from ..base import BaseGroupPostProcessor, GroupPostProcessorRegistry
 
@@ -12,15 +12,15 @@ class NoFilterProcessor(BaseGroupPostProcessor):
     This processor simply returns all data unchanged.
     """
 
-    def __call__(self, data: DataProto) -> DataProto | None:
+    def __call__(self, data: TensorDict) -> TensorDict | None:
         """
         Return data unchanged.
 
         Args:
-            data (DataProto): The grouped data to be processed.
+            data (TensorDict): The grouped data to be processed.
 
         Returns:
-            DataProto: The unchanged data.
+            TensorDict: The unchanged data.
         """
         return data
 
@@ -34,25 +34,23 @@ class DynamicSamplingFilterProcessor(BaseGroupPostProcessor):
     which indicates that all samples in the group have the same reward value.
     """
 
-    def __call__(self, data: DataProto) -> DataProto | None:
+    def __call__(self, data: TensorDict) -> TensorDict | None:
         """
         Filter data based on reward variance.
 
         Args:
-            data (DataProto): The grouped data to be processed.
+            data (TensorDict): The grouped data to be processed.
 
         Returns:
-            Optional[DataProto]: The data if variance > 0, None otherwise.
+            Optional[TensorDict]: The data if variance > 0, None otherwise.
         """
         metric_name = self.config.algorithm.filter_groups.metric
         if metric_name == "seq_final_reward":
-            # Turn to numpy for easier filtering
-            data.non_tensor_batch["seq_final_reward"] = data.batch["token_level_rewards"].sum(dim=-1).numpy()
+            data["seq_final_reward"] = data["token_level_rewards"].sum(dim=-1).numpy()
         elif metric_name == "seq_reward":
-            data.non_tensor_batch["seq_reward"] = data.batch["token_level_scores"].sum(dim=-1).numpy()
+            data["seq_reward"] = data["token_level_scores"].sum(dim=-1).numpy()
+        rewards = data[metric_name]
 
-        rewards = data.non_tensor_batch[metric_name]
         if torch.tensor(rewards, dtype=torch.float).std() > 0.0:
             return data
-        else:
-            return None
+        return None

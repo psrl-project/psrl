@@ -1,0 +1,13 @@
+# Qwen3.5-35B-A3B is a multimodal MoE with a trained window of 262144.
+# KV cache capacity determines the usable context, so re-measure before a run.
+checkpoint: /apdcephfs_zwfy10/share_303541817/lhy/models/Qwen3.5-35B-A3B
+served_model_name: qwen35-35b-a3b
+max_model_len: 98304
+gpu_memory_utilization: 0.9
+
+# Empty because `terminus-2` parses text that vLLM tool call extraction would strip.
+tool_call_parser: ""
+
+chat_template: ""
+
+extra: []

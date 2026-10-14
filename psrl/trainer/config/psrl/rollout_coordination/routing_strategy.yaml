@@ -1,0 +1,94 @@
+# Status-based routing methods require status collection.
+method: request_num_balance
+
+# SMG cache-aware routing hyperparameters (used when method is cache_aware or cache_aware_v1).
+cache_aware_policy:
+
+  # The approximate radix tree uses minimum-load routing below this cache hit ratio.
+  # Event-driven scoring ignores this fallback threshold.
+  cache_threshold: 0.0
+
+  # Favor GPU hits because LMCache hits must be loaded back to the GPU.
+  gpu_overlap_weight: 1.0
+  lmcache_overlap_weight: 0
+
+  # Use minimum-load routing when both spread thresholds are exceeded.
+  balance_abs_threshold: 16
+  balance_rel_threshold: 1.5
+
+  # KV utilization uses backend token snapshots. Request spread uses in-flight worker load.
+  balance_token_usage_threshold: 0.75
+  overload_token_usage_threshold: 1.0
+
+  # Approximate tree maintenance (fallback when KV events unavailable).
+  eviction_interval_secs: 60
+  max_tree_size: 67108864  # 2**26
+  block_size: 16           # KV block size for event-driven routing
+
+  # `cache_aware_v1` rejects requests above this effective KV capacity ratio.
+  kv_capacity_threshold: 2.0
+
+# Transfer accumulated KV when routing moves a request between rollout instances.
+# Requires `lmcache.enable` and `lmcache.enable_p2p`.
+kv_transfer:
+
+  # Master switch for KV cache transfer.
+  enable: False
+
+  # `async` does not wait, `sync` waits, and `pin_sync` pins through completion.
+  # Pinning prevents eviction but increases backend memory pressure.
+  transfer_mode: async
+
+  # Timeout in milliseconds for "sync" and "pin_sync" modes.
+  # On timeout the transfer is abandoned and B falls back to re-prefill.
+  transfer_timeout_ms: 5000
+
+  # Minimum interval between transfer statistics logs. Zero suppresses them.
+  stats_log_interval_s: 30
+
+# Check interval in millisecond for rollout routing
+check_interval_in_ms: 500
+
+# Whether to prioritize short requests
+# Available options: "short_length", "long_length", "small_id"
+request_sort_indicator: small_id
+
+# Whether to sort the candidates by indicator
+# Available options: "version", "reserve_capability"
+candidate_sort_indicator: version
+
+# Whether to enable multiple priority queues for routing requests
+enable_multi_priority_queue: False
+
+# Pin each `prompt_id` group to one rollout instance for KV prefix reuse.
+enable_group_sticky: False
+
+# Pin every turn in one trajectory to the first rollout instance.
+enable_trajectory_sticky: False
+
+# Logging interval in milliseconds
+logging_interval_in_ms: 2000
+
+# JSON file, or a directory of {model_stem}.json files. Stem is derived from the model name.
+cost_model_path: null
+
+# Delta throughput threshold to stop request routing to an instance
+delta_throughput_threshold: 0.5
+
+# Request budget in tokens for each request
+# It is used to estimate the length of the response tokens
+request_budget: 1024
+
+# Snapshot staleness threshold in milliseconds
+# Here snapshot_staleness_threshold_ms is the time difference between the last time record and the snapshot time of the engine status.
+snapshot_staleness_threshold_in_ms: 1000
+
+# This vLLM preemption notification threshold is not an admission signal.
+max_num_waiting_reqs_after_preemption: 1024
+
+# Maximum concurrent sequences and admission count per instance. Zero disables the cap.
+max_concurrent_seqs_per_instance: 1024
+
+# Whether to reject requests when the engine waiting queue is not empty
+admission_reject_on_waiting: True
+

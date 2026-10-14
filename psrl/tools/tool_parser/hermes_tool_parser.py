@@ -24,12 +24,19 @@ class HermesToolParser(ToolParser):
         self.tool_call_regex = regex.compile(r"<tool_call>(.*?)</tool_call>", regex.DOTALL)
 
     @rollout_trace_op
-    def extract_tool_calls(
+    def extract_tool_calls_from_token_ids(
         self,
         responses_ids: list[int],
         tools: list[dict] | None = None,
     ) -> tuple[str, list[ToolCall]]:
         response_str = self.tokenizer.decode(responses_ids)
+        return self.extract_tool_calls_from_str(response_str, tools=tools)
+
+    def extract_tool_calls_from_str(
+        self,
+        response_str: str,
+        tools: list[dict] | None = None,
+    ) -> tuple[str, list[ToolCall]]:
         if self.tool_call_start_token not in response_str or self.tool_call_end_token not in response_str:
             return response_str, []
 
@@ -41,7 +48,7 @@ class HermesToolParser(ToolParser):
                 name, arguments = tool_call["name"], tool_call["arguments"]
                 tool_calls.append(ToolCall(name=name, arguments=json.dumps(arguments, ensure_ascii=False)))
             except Exception as e:
-                psrl_logger.debug(f"Failed to decode tool call from response: {response_str}, the error is: {e}")
+                psrl_logger.warning(f"Failed to decode tool call from response: {response_str}, the error is: {e}")
 
         # remaing text exclude tool call tokens
         content = self.tool_call_regex.sub("", response_str)

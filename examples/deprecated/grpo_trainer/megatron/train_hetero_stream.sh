@@ -73,7 +73,6 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config --conf
     psrl.nixl.server_mode=meta_server \
     psrl.nixl.server_port=23456 \
     \
-    gen_actor_rollout_ref.model.path="$HF_MODEL_PATH" \
     gen_actor_rollout_ref.rollout.mode=psrl_async \
     gen_actor_rollout_ref.rollout.tensor_model_parallel_size=${GEN_TP} \
     gen_actor_rollout_ref.rollout.pipeline_model_parallel_size=${GEN_PP} \
@@ -113,7 +112,7 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config --conf
     critic.megatron.use_dist_checkpointing=True \
     critic.megatron.dist_checkpointing_path=$DIST_CKPT_PATH \
     \
-    reward_model.launch_reward_fn_async=True \
+    reward.launch_reward_fn_async=True \
     \
     algorithm.use_kl_in_reward=False \
     algorithm.adv_estimator=grpo \

@@ -93,7 +93,7 @@ def plot_metrics_from_files(
         # Use filename as default label
         labels = [os.path.basename(fp) for fp in file_paths]
 
-    # Bright and vibrant color palette - cheerful and modern
+    # bright color palette
     color_palette = [
         "#FF6B6B",  # Bright Coral Red
         "#4ECDC4",  # Bright Turquoise
@@ -167,7 +167,7 @@ def plot_metrics_from_files(
         ax.set_ylabel(ylabel, fontsize=20, fontweight="medium")
     ax.set_xlabel(xlabel, fontsize=20, fontweight="medium")
 
-    # Enhanced legend - horizontal layout
+    # horizontal legend
     ax.legend(
         bbox_to_anchor=(0.5, -0.2),
         loc="upper center",
@@ -179,7 +179,7 @@ def plot_metrics_from_files(
         ncol=len(all_data),
     )
 
-    # Enhanced grid - only horizontal lines from y-axis ticks
+    # horizontal grid at y ticks
     ax.grid(True, axis="y", alpha=0.4, linestyle="--", linewidth=0.8)
     ax.set_axisbelow(True)
 
@@ -187,7 +187,7 @@ def plot_metrics_from_files(
     ax.tick_params(axis="both", which="major", labelsize=18)
     ax.tick_params(axis="both", which="minor", labelsize=18)
 
-    # Improve spines - show all borders with thicker lines
+    # visible plot borders
     for spine in ax.spines.values():
         spine.set_visible(True)
         # spine.set_color('#000000')

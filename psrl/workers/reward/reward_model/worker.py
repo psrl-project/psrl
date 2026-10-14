@@ -76,11 +76,11 @@
 #         resources: dict[str, Any] = {}
 #         init_kwargs: dict[str, Any] = {}
 #         env_vars: dict[str, str] = {}
-        
+
 #         # Nothing to do for SPMD-style synchronous rollout engines
 #         if config is not None and hasattr(config, "rollout") and config.rollout.mode == "sync":
 #             return resources, env_vars, init_kwargs
-        
+
 #         resources["num_gpus"] = num_gpus
 #         psrl_logger.info(f"Configuring PSRL RewardModelWorker({num_gpus=}, {dp_idx=}, {bundle_indices=})...")
 
@@ -150,7 +150,7 @@
 #         self.rollout: PSRL_vLLMRollout | None = None
 #         self.rollout_config: RolloutConfig | None = None
 #         self.model_config: HFModelConfig | None = None
-        
+
 #         # Rollout loop management
 #         self._generate_loop = asyncio.get_running_loop()  # Background async loop for generation
 #         self.gen_task = None  # Generation task in stream mode
@@ -162,10 +162,10 @@
 #         self._is_init_model = asyncio.Event()
 #         self._async_interrupt_event = asyncio.Event()
 #         self._async_resume_event = asyncio.Event()
-        
+
 #         self.request_num_queue = queue.Queue()
 #         self.request_id_to_active_tasks: dict[int, set[asyncio.Task]] = defaultdict(lambda: set())
-        
+
 #         # Track start time for active tasks logging
 #         self.active_tasks_start_time = None
 
@@ -198,7 +198,7 @@
 #     @property
 #     def is_instance_representative_rank(self) -> bool:
 #         return getattr(self, "rank", 0) == 0
-    
+
 #     def get_instance_id(self) -> int:
 #         return self.gen_interface.rollout_instance_id
 
@@ -341,13 +341,13 @@
 #         if hasattr(rollout_sp, "model_dump"):
 #             return rollout_sp.model_dump()
 #         return dict(vars(rollout_sp))
-    
+
 #     def get_active_task_num(self) -> int:
 #         """
 #         Get the number of active tasks.
 #         """
 #         return len(self.active_tasks)
-    
+
 #     def log_active_tasks(self, task_added: bool = False, task_done: bool = False):
 #         """
 #         Log the active tasks.
@@ -426,9 +426,9 @@
 #             return result
 #         else:
 #             psrl_logger.info(f"Request {request.non_tensor_batch['uid'][0]} is completed (finished generation)")
-            
+
 #         return result
-    
+
 #     def _create_task_done_callback(self, request_id: int):
 #         # Remove from the active tasks tracker when the task is done
 #         def task_done_callback(task):
@@ -523,7 +523,7 @@
 #             psrl_logger.debug("Reward-model generation resumed")
 
 #         request_id = int(request.non_tensor_batch["uid"][0])
-        
+
 #         task = self._generate_loop.create_task(self._generate_async_task(request))
 #         task.add_done_callback(
 #             self._create_task_done_callback(request_id)

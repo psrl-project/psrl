@@ -1,0 +1,75 @@
+# Hydra example: `python -m psrl.bench.chunked_prefill.main_micro model.path=/path/to/model
+# rollout.tensor_parallel_size=4 micro.experiment=e1 rollout.max_num_batched_tokens=65536`.
+
+psrl:
+  logging_path: ./chunked_prefill_logs
+
+model:
+  path: ~/models/SWE-agent-LM-7B
+  trust_remote_code: false
+
+rollout:
+  tensor_parallel_size: 1
+  pipeline_parallel_size: 1
+  dtype: bfloat16
+  gpu_memory_utilization: 0.90
+  max_num_seqs: 1024
+  max_num_batched_tokens: 32768
+  enable_chunked_prefill: true
+  enable_prefix_caching: false
+  max_model_len: 65536
+  seed: 0
+
+micro:
+  # Experiment to run: "e1", "e2", "e3a", "e_chunked", or "all"
+  experiment: all
+
+  # E1: MFU versus total query tokens `M` across pure prefill batches.
+  e1:
+    # Override the `M` sweep with a subset for quick smoke tests.
+    m_values: [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
+    # Compare single and multiple request decompositions at each `M`.
+    test_decompositions: true
+    # The chunk may grow when `m / multi_chunk_size` would exceed `max_num_seqs`.
+    multi_chunk_size: 16
+
+  # E2: Mixed batch overhead across decode count, prefill chunk, and context length.
+  e2:
+    decode_counts: [0, 4, 8, 16, 32, 64]
+    prefill_chunks: [256, 512, 1024, 2048, 4096]
+    context_lens: [512, 2048, 8192]
+
+  # E3a: Per-step activation memory increment.
+  e3a:
+    # Measure activation above the KV baseline over the E1 `M` sweep.
+    m_values: [64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
+
+  # E_chunked: Time each step of a sequence longer than `max_num_batched_tokens`.
+  e_chunked:
+    # Total sequence lengths to probe.
+    total_lens: [4096, 8192, 16384, 32768]
+    # Chunk sizes to probe (tokens per step).
+    # Compare chunk sizes at a fixed `total_len`.
+    chunk_sizes: [512, 1024, 2048, 4096]
+    # Prefix cache hit lengths where zero means no hit.
+    prefix_lens: [0, 2048]
+    # Decode request context lengths to run in parallel alongside each chunk step.
+    # Each list entry is one scenario, such as `[]` or `[2048] * 16`.
+    decode_scenarios:
+      - []                  # pure chunked prefill, no concurrent decode
+      - [2048, 2048, 2048, 2048, 2048, 2048, 2048, 2048]   # 8 decode reqs @ ctx=2048
+      - [2048, 2048, 2048, 2048, 2048, 2048, 2048, 2048,
+         2048, 2048, 2048, 2048, 2048, 2048, 2048, 2048]  # 16 decode reqs @ ctx=2048
+    warmup: 2
+    iters: 5
+
+  # Common measurement parameters for E1, E2, and E3a.
+  warmup: 3
+  iters: 10
+
+  # Peak FLOPs of the target GPU (TFLOPS, bf16).
+  # Zero disables MFU calculation. H20 bf16 tensor cores peak at 148 TFLOPS.
+  peak_tflops: 148.0
+
+  output_dir: ./results
+  output_prefix: micro

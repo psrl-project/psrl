@@ -1,12 +1,9 @@
 # Copyright 2025 Bytedance Ltd. and/or its affiliates
 # Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
+# Licensed under the Apache License, Version 2.0 (the "License").
+# You may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-#
 #     http://www.apache.org/licenses/LICENSE-2.0
-#
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -49,7 +46,7 @@ from verl.utils.megatron_utils import get_model
 
 
 def _init_args():
-    """
+    r"""
     Examples:
 
     1. single rank conversion for any model:
@@ -143,7 +140,7 @@ def convert_checkpoint_from_transformers_to_megatron(
         numel += safe_copy(hf_model.model.embed_tokens.weight, model.embedding.word_embeddings.weight)
 
     assert len(model.decoder.layers) == (layer_end - layer_start), (
-        f"Expected {len(model.decoder.layers)} layers, but got {layer_end - layer_start}"
+        f"Layer count mismatch: expected={len(model.decoder.layers)}, actual={layer_end - layer_start}."
     )
     for layer_idx, (layer, hf_layer) in enumerate(
         zip(model.decoder.layers, hf_model.model.layers[layer_start:layer_end], strict=True)
@@ -207,6 +204,88 @@ def convert_checkpoint_from_transformers_to_megatron(
 
 
 @torch.inference_mode()
+def convert_checkpoint_from_transformers_to_megatron_dense(
+    hf_model, model, hf_config, layer_start_end: tuple[int, int] | None = None
+):
+    """Convert a dense HF causal-LM (Llama / Qwen2 / Qwen3 dense) to mcore.
+
+    All ops are simple ``safe_copy`` calls, so it works fully on CPU when the
+    mcore model is materialized via ``init_empty_weights`` + ``to_empty('cpu')``
+    (i.e. ``--use_cpu_initialization``). This avoids the GPU-resident path in
+    ``load_state_dict_to_megatron_gptmodel`` which OOMs for 70B models on a
+    single GPU.
+    """
+    if layer_start_end is None:
+        layer_start_end = (0, len(model.decoder.layers))
+    layer_start, layer_end = layer_start_end
+    pp_rank = mpu.get_pipeline_model_parallel_rank()
+    pp_size = mpu.get_pipeline_model_parallel_world_size()
+    numel = 0
+
+    num_attention_heads = hf_config.num_attention_heads
+    num_key_value_heads = hf_config.num_key_value_heads
+    hidden_dim = hf_config.hidden_size
+    head_dim = getattr(hf_config, "head_dim", hidden_dim // num_attention_heads)
+    if num_attention_heads != num_key_value_heads:
+        print("[WARNING] Converting GQA model")
+    has_qkv_bias = (
+        getattr(hf_config, "qkv_bias", False)
+        or getattr(hf_config, "attention_bias", False)
+        or "Qwen2" in hf_config.architectures[0]
+    )
+    tie_word_embeddings = getattr(hf_config, "tie_word_embeddings", False)
+
+    if pp_rank == 0:
+        numel += safe_copy(hf_model.model.embed_tokens.weight, model.embedding.word_embeddings.weight)
+
+    assert len(model.decoder.layers) == (layer_end - layer_start), (
+        f"Layer count mismatch: expected={len(model.decoder.layers)}, actual={layer_end - layer_start}."
+    )
+    for layer_idx, (layer, hf_layer) in enumerate(
+        zip(model.decoder.layers, hf_model.model.layers[layer_start:layer_end], strict=True)
+    ):
+        global_layer_idx = layer_idx + layer_start
+        numel_cur = numel
+
+        numel += safe_copy(hf_layer.input_layernorm.weight, layer.self_attention.linear_qkv.layer_norm_weight)
+
+        q = hf_layer.self_attn.q_proj.weight.view(
+            [num_key_value_heads, head_dim * num_attention_heads // num_key_value_heads, -1]
+        )
+        k = hf_layer.self_attn.k_proj.weight.view([num_key_value_heads, head_dim, -1])
+        v = hf_layer.self_attn.v_proj.weight.view([num_key_value_heads, head_dim, -1])
+        qkv = torch.cat([q, k, v], dim=1).view(-1, hidden_dim).contiguous()
+        numel += safe_copy(qkv, layer.self_attention.linear_qkv.weight)
+
+        if has_qkv_bias:
+            q_bias = hf_layer.self_attn.q_proj.bias.view([num_key_value_heads, -1])
+            k_bias = hf_layer.self_attn.k_proj.bias.view([num_key_value_heads, -1])
+            v_bias = hf_layer.self_attn.v_proj.bias.view([num_key_value_heads, -1])
+            qkv_bias = torch.cat([q_bias, k_bias, v_bias], dim=1).view(-1).contiguous()
+            numel += safe_copy(qkv_bias, layer.self_attention.linear_qkv.bias)
+
+        if hasattr(hf_layer.self_attn, "q_norm") and hasattr(layer.self_attention, "q_layernorm"):
+            numel += safe_copy(hf_layer.self_attn.q_norm.weight.data, layer.self_attention.q_layernorm.weight)
+            numel += safe_copy(hf_layer.self_attn.k_norm.weight.data, layer.self_attention.k_layernorm.weight)
+
+        numel += safe_copy(hf_layer.self_attn.o_proj.weight, layer.self_attention.linear_proj.weight)
+
+        # Dense MLP: post_attention_layernorm is fused into linear_fc1.layer_norm_weight in mcore.
+        numel += safe_copy(hf_layer.post_attention_layernorm.weight, layer.mlp.linear_fc1.layer_norm_weight)
+        fc1_weight = torch.cat([hf_layer.mlp.gate_proj.weight, hf_layer.mlp.up_proj.weight])
+        numel += safe_copy(fc1_weight, layer.mlp.linear_fc1.weight)
+        numel += safe_copy(hf_layer.mlp.down_proj.weight, layer.mlp.linear_fc2.weight)
+
+        print(f"{pp_rank=} {global_layer_idx=} {layer_idx=} {numel=} numel this layer={numel - numel_cur}")
+
+    if pp_rank == pp_size - 1:
+        numel += safe_copy(hf_model.model.norm.weight, model.decoder.final_layernorm.weight)
+        if not tie_word_embeddings:
+            numel += safe_copy(hf_model.lm_head.weight, model.output_layer.weight)
+    return numel
+
+
+@torch.inference_mode()
 def convert_checkpoint_from_transformers_to_megatron_mixtral(
     hf_model, model, hf_config, layer_start_end: tuple[int, int] | None = None
 ):
@@ -231,7 +310,7 @@ def convert_checkpoint_from_transformers_to_megatron_mixtral(
         numel += safe_copy(hf_model.model.embed_tokens.weight, model.embedding.word_embeddings.weight)
 
     assert len(model.decoder.layers) == (layer_end - layer_start), (
-        f"Expected {len(model.decoder.layers)} layers, but got {layer_end - layer_start}"
+        f"Layer count mismatch: expected={len(model.decoder.layers)}, actual={layer_end - layer_start}."
     )
     for layer_idx, (layer, hf_layer) in enumerate(
         zip(model.decoder.layers, hf_model.model.layers[layer_start:layer_end], strict=True)
@@ -437,7 +516,7 @@ def convert_checkpoint_from_transformers_to_megatron_dpskv3(
         numel += safe_copy(hf_model.model.embed_tokens.weight, model.embedding.word_embeddings.weight)
 
     assert len(model.decoder.layers) == (layer_end - layer_start), (
-        f"Expected {len(model.decoder.layers)} layers, but got {layer_end - layer_start}"
+        f"Layer count mismatch: expected={len(model.decoder.layers)}, actual={layer_end - layer_start}."
     )
     for layer_idx, (layer, hf_layer) in enumerate(
         zip(model.decoder.layers, hf_model.model.layers[layer_start:layer_end], strict=True)
@@ -674,8 +753,15 @@ def convert_hf_to_mcore(
         convert_checkpoint_from_transformers_to_megatron(hf_model, model[0].module, hf_config)
     elif "MixtralForCausalLM" in hf_config.architectures:
         convert_checkpoint_from_transformers_to_megatron_mixtral(hf_model, model[0].module, hf_config)
+    elif use_cpu_initialization and any(
+        arch in hf_config.architectures for arch in ("LlamaForCausalLM", "Qwen2ForCausalLM", "Qwen3ForCausalLM")
+    ):
+        # Use CPU because loading the entire dense bf16 model on one GPU can exhaust its memory.
+        convert_checkpoint_from_transformers_to_megatron_dense(hf_model, model[0].module, hf_config)
     else:
-        assert not use_cpu_initialization, "use_cpu_initialization is only supported for MoE model"
+        assert not use_cpu_initialization, (
+            f"use_cpu_initialization is not implemented for architecture {hf_config.architectures!r}."
+        )
         from verl.models.mcore.loader import load_state_dict_to_megatron_gptmodel
 
         load_state_dict_to_megatron_gptmodel(

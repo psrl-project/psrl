@@ -30,7 +30,7 @@ fi
 project_name='psrl_elastic_rm'
 experiment_name=debug_router_share_8_train_8_rm_qwen_8b_rollout_qwen_7b_staleness_${staleness}${experiment_suffix}
 
-source ${PSRL_WORKSPACE}/env/env_311.sh
+source ${PSRL_WORKSPACE}/env/psrl.sh
 
 HOME=${PSRL_WORKSPACE}
 PSRL_PATH=$(python -c "import psrl; import os; print(os.path.dirname(os.path.dirname(psrl.__file__)))")
@@ -38,7 +38,7 @@ MODEL_NAME='Qwen2.5-7B'
 HF_MODEL_PATH=${PSRL_WORKSPACE}/models/${MODEL_NAME}
 RM_MODEL_PATH=${PSRL_WORKSPACE}/models/Qwen3-8B
 
-# Data config (Hydra / OmegaConf), aligned with psrl/trainer/config/data/multi_datasets.yaml
+# Dataset specs follow `data.train_datas` / `data.val_datas`.
 GSM8K_TRAIN="${PSRL_WORKSPACE}/data/gsm8k_verl/train.parquet"
 GSM8K_TEST="${PSRL_WORKSPACE}/data/gsm8k_verl/test.parquet"
 DAPO_TRAIN="${PSRL_WORKSPACE}/data/dapo/dapo-math-17k.parquet"
@@ -110,59 +110,57 @@ filter_groups_metric=acc
 rollout_is="token"
 rollout_is_threshold=2.0
 
-enable_elastic_rm=True
+enable_elastic=True
 enable_trainer_pool=False
-scaling_policy_variant=itl_harmonic
+scaling_policy_variant=throughput-optimal
 
-offload=False
+offload=True
 
 REWARD_MODELS=(
-    reward_models_config.launch_reward_fn_async=False
-    reward_models_config.reward_normalization=batch
-    reward_models_config.reward_models.0.reward_loop_type=naive
-    reward_models_config.reward_models.0.reward_fn='["default"]'
-    reward_models_config.reward_models.1.reward_loop_type=dapo
-    reward_models_config.reward_models.1.reward_fn='["default"]'
-    reward_models_config.reward_models.1.reward_loop_kwargs.max_resp_len=5120
-    reward_models_config.reward_models.1.reward_loop_kwargs.overlong_buffer_cfg.enable=True
-    reward_models_config.reward_models.1.reward_loop_kwargs.overlong_buffer_cfg.len=3072
-    reward_models_config.reward_models.1.reward_loop_kwargs.overlong_buffer_cfg.penalty_factor=1.0
-    reward_models_config.reward_models.1.reward_loop_kwargs.overlong_buffer_cfg.log=False
-    reward_models_config.reward_models.2.reward_loop_type=gen
-    reward_models_config.reward_models.2.reward_fn='["default"]'
-    reward_models_config.reward_models.2.reward_model_name=Qwen3-8B
-    reward_models_config.reward_models.2.enable_resource_pool=True
-    reward_models_config.reward_models.2.rollout_ngpus_per_instance_per_node=1
-    reward_models_config.reward_models.2.rollout_nnodes_per_instance=1
-    reward_models_config.reward_models.2.max_concurrent_requests_per_instance=128
-    reward_models_config.reward_models.2.model.path=${RM_MODEL_PATH}
-    reward_models_config.reward_models.2.model.trust_remote_code=False
-    reward_models_config.reward_models.2.rollout._target_=psrl.workers.config.RolloutConfig
-    reward_models_config.reward_models.2.rollout.name=vllm
-    reward_models_config.reward_models.2.rollout.mode=psrl_async
-    reward_models_config.reward_models.2.rollout.disable_attn=${disable_attn}
-    reward_models_config.reward_models.2.rollout.dtype=bfloat16
-    reward_models_config.reward_models.2.rollout.gpu_memory_utilization=0.8
-    reward_models_config.reward_models.2.rollout.enforce_eager=true
-    reward_models_config.reward_models.2.rollout.free_cache_engine=true
-    reward_models_config.reward_models.2.rollout.data_parallel_size=1
-    reward_models_config.reward_models.2.rollout.expert_parallel_size=1
-    reward_models_config.reward_models.2.rollout.tensor_model_parallel_size=1
-    reward_models_config.reward_models.2.rollout.pipeline_model_parallel_size=1
-    reward_models_config.reward_models.2.rollout.max_num_batched_tokens=$((1024 * 11 + 1024 * 10))
-    reward_models_config.reward_models.2.rollout.max_num_seqs=1024
-    reward_models_config.reward_models.2.rollout.enable_chunked_prefill=false
-    reward_models_config.reward_models.2.rollout.enable_prefix_caching=false
-    reward_models_config.reward_models.2.rollout.disable_log_stats=false
-    reward_models_config.reward_models.2.rollout.skip_tokenizer_init=false
-    reward_models_config.reward_models.2.rollout.prompt_length=$((1024 * 11))
-    reward_models_config.reward_models.2.rollout.response_length=$((1024 * 10))
-    reward_models_config.reward_models.2.rollout.max_model_len=$((1024 * 11 + 1024 * 10))
-    reward_models_config.reward_models.2.rollout.runner=generate
-    reward_models_config.reward_models.2.rollout.task=generate
-    reward_models_config.reward_models.2.sampling_config.temperature=1.0
-    reward_models_config.reward_models.2.sampling_config.top_p=-1
-    reward_models_config.reward_models.2.sampling_config.top_k=1
+    reward.active_managers='[naive,dapo,gen_qwen3_8b]'
+    reward.launch_reward_fn_async=False
+    reward.reward_normalization=batch
+    reward.managers.naive.reward_loop_type=naive
+    reward.managers.dapo.reward_loop_type=dapo
+    reward.managers.dapo.reward_kwargs.max_resp_len=5120
+    reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.enable=True
+    reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.len=3072
+    reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.penalty_factor=1.0
+    reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.log=False
+    reward.managers.gen_qwen3_8b.reward_loop_type=gen
+    reward.managers.gen_qwen3_8b.reward_model_name=Qwen3-8B
+    reward.managers.gen_qwen3_8b.enable_resource_pool=True
+    reward.managers.gen_qwen3_8b.rollout_ngpus_per_instance_per_node=1
+    reward.managers.gen_qwen3_8b.rollout_nnodes_per_instance=1
+    reward.managers.gen_qwen3_8b.max_concurrent_requests_per_instance=128
+    reward.managers.gen_qwen3_8b.model.path=${RM_MODEL_PATH}
+    reward.managers.gen_qwen3_8b.model.trust_remote_code=False
+    reward.managers.gen_qwen3_8b.rollout._target_=psrl.workers.config.RolloutConfig
+    reward.managers.gen_qwen3_8b.rollout.name=vllm
+    reward.managers.gen_qwen3_8b.rollout.mode=psrl_async
+    reward.managers.gen_qwen3_8b.rollout.disable_attn=${disable_attn}
+    reward.managers.gen_qwen3_8b.rollout.dtype=bfloat16
+    reward.managers.gen_qwen3_8b.rollout.gpu_memory_utilization=0.8
+    reward.managers.gen_qwen3_8b.rollout.enforce_eager=true
+    reward.managers.gen_qwen3_8b.rollout.free_cache_engine=true
+    reward.managers.gen_qwen3_8b.rollout.data_parallel_size=1
+    reward.managers.gen_qwen3_8b.rollout.expert_parallel_size=1
+    reward.managers.gen_qwen3_8b.rollout.tensor_model_parallel_size=1
+    reward.managers.gen_qwen3_8b.rollout.pipeline_model_parallel_size=1
+    reward.managers.gen_qwen3_8b.rollout.max_num_batched_tokens=$((1024 * 11 + 1024 * 10))
+    reward.managers.gen_qwen3_8b.rollout.max_num_seqs=1024
+    reward.managers.gen_qwen3_8b.rollout.enable_chunked_prefill=false
+    reward.managers.gen_qwen3_8b.rollout.enable_prefix_caching=false
+    reward.managers.gen_qwen3_8b.rollout.disable_log_stats=false
+    reward.managers.gen_qwen3_8b.rollout.skip_tokenizer_init=false
+    reward.managers.gen_qwen3_8b.rollout.prompt_length=$((1024 * 11))
+    reward.managers.gen_qwen3_8b.rollout.response_length=$((1024 * 10))
+    reward.managers.gen_qwen3_8b.rollout.max_model_len=$((1024 * 11 + 1024 * 10))
+    reward.managers.gen_qwen3_8b.rollout.runner=generate
+    reward.managers.gen_qwen3_8b.rollout.task=generate
+    reward.managers.gen_qwen3_8b.sampling_config.temperature=1.0
+    reward.managers.gen_qwen3_8b.sampling_config.top_p=-1
+    reward.managers.gen_qwen3_8b.sampling_config.top_k=1
 )
 
 mkdir -p "${PSRL_WORKSPACE}/logs/${project_name}"
@@ -178,12 +176,12 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo \
     psrl.profile.fix_weight=${fix_weight} \
     psrl.logging_path=${PSRL_PATH}/logs/${project_name}/${experiment_name} \
     \
-    psrl.deployment.elastic_rm.enable=${enable_elastic_rm} \
-    psrl.deployment.elastic_rm.enable_trainer_pool=${enable_trainer_pool} \
-    psrl.deployment.elastic_rm.shared_nnodes=${SHARED_NNODES} \
-    psrl.deployment.elastic_rm.shared_ngpus_per_node=${SHARED_NGPUS_PER_NODE} \
-    psrl.deployment.elastic_rm.min_awake_per_role=${min_awake_per_role} \
-    psrl.deployment.elastic_rm.scaling_policy_variant=${scaling_policy_variant} \
+    psrl.deployment.elastic.enable=${enable_elastic} \
+    psrl.deployment.elastic.enable_trainer_pool=${enable_trainer_pool} \
+    psrl.deployment.elastic.shared_nnodes=${SHARED_NNODES} \
+    psrl.deployment.elastic.shared_ngpus_per_node=${SHARED_NGPUS_PER_NODE} \
+    psrl.deployment.elastic.min_awake_per_role=${min_awake_per_role} \
+    psrl.deployment.elastic.scaling_policy_variant=${scaling_policy_variant} \
     \
     psrl.log_prob.enable_rollout_engine_log_prob=True \
     psrl.deployment.rollout_nnodes_per_instance=1 \
@@ -195,28 +193,26 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo \
     psrl.deployment.train_ngpus_per_node=${TRAIN_NGPUS_PER_NODE} \
     psrl.deployment.total_nnodes=${NNODES} \
     \
-    psrl.colocate_validate_and_train=False \
-    psrl.fuse_rollout_with_validate=True \
+    psrl.colocate_validate_and_train=True \
+    psrl.fuse_rollout_with_validate=False \
     \
     psrl.nixl.server_port=23456 \
     psrl.group_post_process.enable=False \
     psrl.group_post_process.name=dynamic_sampling_filter \
     \
-    psrl.redundant_rollout.enable=False \
+    psrl.rollout_coordination.redundant_rollout.enable=False \
     \
-    psrl.partial_rollout.enable=True \
+    psrl.rollout_coordination.partial_rollout.enable=True \
     \
-    psrl.routing_strategy.method="throughput_optimal" \
-    psrl.routing_strategy.candidate_sort_indicator=reserve_capability \
-    psrl.routing_strategy.enable_multi_priority_queue=True \
-    psrl.routing_strategy.enable_group_sampling_on_multi_instances=True \
-    psrl.routing_strategy.cost_model_path=${PSRL_PATH}/psrl/trainer/config/cost_model/qwen_7b.json \
-    psrl.routing_strategy.delta_throughput_threshold=0.2 \
-    psrl.routing_strategy.request_budget=1024 \
-    psrl.routing_strategy.max_num_waiting_reqs_after_preemption=3 \
-    psrl.routing_strategy.max_concurrent_seqs_per_instance=512 \
+    psrl.rollout_coordination.routing_strategy.method="throughput_optimal" \
+    psrl.rollout_coordination.routing_strategy.candidate_sort_indicator=reserve_capability \
+    psrl.rollout_coordination.routing_strategy.enable_multi_priority_queue=True \
+    psrl.rollout_coordination.routing_strategy.cost_model_path=${PSRL_PATH}/psrl/trainer/config/cost_model/qwen_7b.json \
+    psrl.rollout_coordination.routing_strategy.delta_throughput_threshold=0.2 \
+    psrl.rollout_coordination.routing_strategy.request_budget=1024 \
+    psrl.rollout_coordination.routing_strategy.max_num_waiting_reqs_after_preemption=3 \
+    psrl.rollout_coordination.routing_strategy.max_concurrent_seqs_per_instance=512 \
     \
-    gen_actor_rollout_ref.model.path="$HF_MODEL_PATH" \
     gen_actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
     gen_actor_rollout_ref.rollout.tensor_model_parallel_size=${GEN_TP} \
     gen_actor_rollout_ref.rollout.pipeline_model_parallel_size=${GEN_PP} \
@@ -273,8 +269,8 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo \
     algorithm.kl_ctrl.kl_coef=${kl_coef} \
     algorithm.rollout_correction.rollout_is=${rollout_is} \
     algorithm.rollout_correction.rollout_is_threshold=${rollout_is_threshold} \
-    psrl.proactive_filter_strategy.method="retry" \
-    psrl.proactive_filter_strategy.threshold=4 \
+    psrl.rollout_coordination.proactive_filter_strategy.method="retry" \
+    psrl.rollout_coordination.proactive_filter_strategy.threshold=4 \
     \
     trainer.logger='["console", "wandb"]' \
     +trainer.wandb_proxy=http://star-proxy.oa.com:3128 \

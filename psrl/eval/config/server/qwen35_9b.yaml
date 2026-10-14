@@ -1,0 +1,14 @@
+# Qwen3.5-9B is multimodal with a trained window of 262144.
+# The 32768 limit preserves fleet concurrency within measured KV cache capacity.
+checkpoint: /apdcephfs_zwfy10/share_303541817/lhy/models/Qwen3.5-9B
+served_model_name: qwen35-9b
+max_model_len: 32768
+gpu_memory_utilization: 0.9
+
+# Empty because agent text protocols require the unmodified assistant message.
+tool_call_parser: ""
+
+# Empty uses the tokenizer's own template.
+chat_template: ""
+
+extra: []

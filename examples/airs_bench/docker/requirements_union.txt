@@ -1,0 +1,35 @@
+accelerate
+anytree
+apted
+babel
+catboost
+datasets==4.0.0
+evaluate
+gymnasium
+huggingface-hub
+lightgbm
+matplotlib
+nltk
+numpy
+omegaconf
+opencv-python
+pandas
+peft
+# pyext is excluded: the PyPI package uses inspect.getargspec which was removed
+# in Python 3.9+. CodeGenerationAPPSPassAt5 ships a local pyext.py stub that
+# provides the RuntimeModule class used by testing_util.py.
+records
+rouge-score
+sacrebleu
+scikit-learn
+scipy
+sentence-transformers
+sentencepiece
+sktime
+tokenizers
+torch
+torcheval
+torchmetrics
+tqdm
+transformers[torch]
+xgboost

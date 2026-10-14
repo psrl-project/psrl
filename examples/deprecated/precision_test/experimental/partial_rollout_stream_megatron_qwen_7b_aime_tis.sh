@@ -106,31 +106,29 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config --conf
     psrl.group_post_process.enable=False \
     psrl.group_post_process.name=dynamic_sampling_filter \
     \
-    psrl.redundant_rollout.enable=False \
-    psrl.redundant_rollout.redundant_global_batch_size=${redundant_train_prompt_bsz} \
-    psrl.redundant_rollout.redundant_rollout_n=${redundant_n_resp_per_prompt} \
+    psrl.rollout_coordination.redundant_rollout.enable=False \
+    psrl.rollout_coordination.redundant_rollout.redundant_global_batch_size=${redundant_train_prompt_bsz} \
+    psrl.rollout_coordination.redundant_rollout.redundant_rollout_n=${redundant_n_resp_per_prompt} \
     \
-    psrl.partial_rollout.enable=True \
+    psrl.rollout_coordination.partial_rollout.enable=True \
     \
-    psrl.routing_strategy.method="throughput_optimal" \
-    psrl.routing_strategy.enable_multi_priority_queue=True \
-    psrl.routing_strategy.enable_group_sampling_on_multi_instances=True \
-    psrl.routing_strategy.cost_model_path=${PSRL_PATH}/psrl/trainer/config/cost_model/qwen_7b.json \
-    psrl.routing_strategy.delta_throughput_threshold=0.2 \
-    psrl.routing_strategy.request_budget=1024 \
-    psrl.routing_strategy.max_num_waiting_reqs_after_preemption=3 \
-    psrl.routing_strategy.max_concurrent_seqs_per_instance=128 \
+    psrl.rollout_coordination.routing_strategy.method="throughput_optimal" \
+    psrl.rollout_coordination.routing_strategy.enable_multi_priority_queue=True \
+    psrl.rollout_coordination.routing_strategy.enable_group_sticky=False \
+    psrl.rollout_coordination.routing_strategy.cost_model_path=${PSRL_PATH}/psrl/trainer/config/cost_model/qwen_7b.json \
+    psrl.rollout_coordination.routing_strategy.delta_throughput_threshold=0.2 \
+    psrl.rollout_coordination.routing_strategy.request_budget=1024 \
+    psrl.rollout_coordination.routing_strategy.max_num_waiting_reqs_after_preemption=3 \
+    psrl.rollout_coordination.routing_strategy.max_concurrent_seqs_per_instance=128 \
     \
-    psrl.sync_and_mig_strategy.method="status_based" \
-    psrl.sync_and_mig_strategy.sync.indicator="kv_cache" \
-    psrl.sync_and_mig_strategy.sync.threshold=0.99 \
-    psrl.sync_and_mig_strategy.mig.enable=True \
-    psrl.sync_and_mig_strategy.mig.indicator="throughput" \
-    psrl.sync_and_mig_strategy.mig.threshold=2 \
+    psrl.rollout_coordination.sync_and_mig_strategy.method="status_based" \
+    psrl.rollout_coordination.sync_and_mig_strategy.sync.indicator="kv_cache" \
+    psrl.rollout_coordination.sync_and_mig_strategy.sync.threshold=0.99 \
+    psrl.rollout_coordination.sync_and_mig_strategy.mig.enable=True \
+    psrl.rollout_coordination.sync_and_mig_strategy.mig.indicator="throughput" \
+    psrl.rollout_coordination.sync_and_mig_strategy.mig.threshold=2 \
     \
-    gen_actor_rollout_ref.model.path="$HF_MODEL_PATH" \
     gen_actor_rollout_ref.rollout.mode=psrl_async \
-    +gen_actor_rollout_ref.model.override_config.max_position_embeddings=32768 \
     gen_actor_rollout_ref.rollout.gpu_memory_utilization=0.25 \
     gen_actor_rollout_ref.rollout.tensor_model_parallel_size=${GEN_TP} \
     gen_actor_rollout_ref.rollout.pipeline_model_parallel_size=${GEN_PP} \
@@ -190,12 +188,12 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config --conf
     +train_actor_rollout_ref.actor.megatron.override_transformer_config.num_layers_in_first_pipeline_stage=${NUM_LAYERS_IN_FIRST_PIPELINE_STAGE} \
     +train_actor_rollout_ref.actor.megatron.override_transformer_config.num_layers_in_last_pipeline_stage=${NUM_LAYERS_IN_LAST_PIPELINE_STAGE} \
     \
-    reward_model.reward_manager=dapo \
-    +reward_model.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer} \
-    +reward_model.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len} \
-    +reward_model.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \
-    +reward_model.reward_kwargs.overlong_buffer_cfg.log=False \
-    +reward_model.reward_kwargs.max_resp_len=${max_response_length} \
+    reward.reward_manager.name=dapo \
+    +reward.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer} \
+    +reward.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len} \
+    +reward.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \
+    +reward.reward_kwargs.overlong_buffer_cfg.log=False \
+    +reward.reward_kwargs.max_resp_len=${max_response_length} \
     \
     algorithm.rollout_correction.rollout_is=${rollout_is} \
     algorithm.rollout_correction.rollout_is_threshold=${rollout_is_threshold} \

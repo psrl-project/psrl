@@ -1,4 +1,4 @@
-legacy: True
+legacy: False
 
 # Tokenizer class or path. If null, it will be inferred from the model.
 tokenizer: null
@@ -6,24 +6,40 @@ tokenizer: null
 # Whether to use shared memory for data loading.
 use_shm: False
 
-# Training set parquet. Can be a list or a single file.
-# The program will read all files into memory, so it can't be too large (< 100GB).
-# The path can be either a local path or an HDFS path.
-# For HDFS path, we provide utils to download it to DRAM and convert it to a local path.
-train_files: ~/data/rlhf/gsm8k/train.parquet
+# Default reward specs. A split spec can override `reward_model_dicts`.
+reward_model_dicts:
+  - reward_fn_key: data_source
+    reward_loop_type: naive
+    reward_fn: default
+    reward_model_name: null
+    reward_coef: 1.0
 
-# Validation parquet. Can be a list or a single file.
-val_files: ~/data/rlhf/gsm8k/test.parquet
+train_datas:
+  - file: /jizhicfs/pkuhetu/yfzhao/psrl/data/gsm8k_verl/train.parquet
+    data_source_name: openai/gsm8k
+    prompt_key: prompt
+    max_samples: -1
+    reward_model_dicts:
+      - reward_fn_key: data_source
+        reward_loop_type: naive
+        reward_fn: default
+        reward_model_name: null
+        reward_coef: 1.0
 
-# The field in the dataset where the prompt is located. Default is 'prompt'.
-prompt_key: prompt
+# Sampling ratios must align with `train_datas` and sum to approximately one.
+train_datasets_ratios: [1.0]
 
-# The field used to select the reward function (if using different ones per example).
-reward_fn_key: data_source
-
-reward_loop_type: naive
-reward_fn: default
-reward_model_name: null
+# Validation entries share the training schema, but route rewards only during evaluation.
+val_datas:
+  - file: /jizhicfs/pkuhetu/yfzhao/psrl/data/gsm8k_verl/test.parquet
+    prompt_key: prompt
+    max_samples: -1
+    reward_model_dicts:
+      - reward_fn_key: data_source
+        reward_loop_type: naive
+        reward_fn: default
+        reward_model_name: null
+        reward_coef: 1.0
 
 # Maximum prompt length. All prompts will be left-padded to this length.
 # An error will be reported if the length is too long.
@@ -63,10 +79,8 @@ validation_shuffle: False
 # Whether to filter overlong prompts.
 filter_overlong_prompts: False
 
-# Number of workers for filtering overlong prompts.
-# For large-scale datasets, filtering can be time-consuming.
-# Use multiprocessing to speed up. Default is 1.
-filter_overlong_prompts_workers: 1
+# Multiprocessing reduces filtering time for large datasets.
+filter_overlong_prompts_workers: 32
 
 # Truncate the input_ids or prompt if they exceed max_prompt_length.
 # Options: 'error', 'left', 'right', 'middle'. Default is 'error'.

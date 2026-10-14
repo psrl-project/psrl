@@ -1,0 +1,7 @@
+# Post processor for group requests in streaming mode
+
+# Whether to enable group post-processing
+enable: False
+
+# `dynamic_sampling_filter` requires `algorithm.filter_groups.metric`.
+name: null

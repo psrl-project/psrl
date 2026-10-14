@@ -1,3 +1,4 @@
+import copy
 import logging
 import os
 import pickle
@@ -10,6 +11,7 @@ from omegaconf import DictConfig
 from psrl.utils.nixl.comm_plan import CommunicationPlanner, NIXLCommPlan
 from psrl.utils.nixl.nixl_spec import (
     NIXLClientInfo,
+    NIXLClientType,
     NIXLSharding,
 )
 
@@ -18,13 +20,18 @@ psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "INFO"))
 
 
 class NIXLMetaServer:
-    def __init__(self, server_name: str, nixl_config: DictConfig):
+    def __init__(self, server_name: str, nixl_config: DictConfig, broadcast_init_enabled: bool = False):
         self.server_name = server_name
         self.server_ip = nixl_config.server_ip
         self.server_port = nixl_config.server_port
         self.metadata_broadcast_max_workers = int(nixl_config.get("metadata_broadcast_max_workers", 8))
         if self.metadata_broadcast_max_workers < 1:
             raise ValueError("nixl.metadata_broadcast_max_workers must be at least 1")
+        psrl_logger.info(
+            f"[nixl-handshake] Initializing server agent={self.server_name!r} "
+            f"UCX_TLS={os.environ.get('UCX_TLS')!r} "
+            f"UCX_NET_DEVICES={os.environ.get('UCX_NET_DEVICES')!r}."
+        )
         self.agent = nixl_agent(
             self.server_name,
             nixl_agent_config(
@@ -48,6 +55,10 @@ class NIXLMetaServer:
         self._is_all_client_shardings_recved = False
         self._is_all_client_infos_recved = False
         self._is_all_temp_mappings_recved = False
+
+        # NOTE(claude): Broadcast initialization makes PS workers direct peers, so
+        # each receives every PS GPU descriptor.
+        self._broadcast_init_enabled = broadcast_init_enabled
 
     def _add_client(self, agent_name: str, client_name: str):
         if agent_name not in self.connected_clients:
@@ -87,7 +98,7 @@ class NIXLMetaServer:
         """
         psrl_logger.info(f"Waiting for {expected_agents} agents to connect and send sharding...")
         if self._is_all_client_shardings_recved:
-            # TODO(lhy): support elastic adding new clients after all clients are connected
+            # TODO(lhy): Support elastic clients after initial registration.
             return True
         start = time.time()
         already_recved_agents = set()
@@ -133,7 +144,7 @@ class NIXLMetaServer:
         """
         psrl_logger.info(f"Waiting for {expected_agents} agents to send client infos...")
         if self._is_all_client_infos_recved:
-            # TODO(lhy): support elastic adding new clients after all clients are connected
+            # TODO(lhy): Support elastic clients after initial registration.
             return True
         start = time.time()
         already_recved_agents = set()
@@ -205,32 +216,22 @@ class NIXLMetaServer:
         for client_name, sharding_dict in self.client_sharding_dicts.items():
             all_keys.update(sharding_dict.keys())
         _t_keys = time.time()
-        # Then we can make the unified sharding for each client
-        # That is, for each key, we need to find the new representation
-        # of (shard_dim, shard_mesh, shard_indices) for the mutual slice of all clients
+        # Build each key's finest common sharding representation.
         for key in all_keys:
             shard_mesh_list = []
             for client_name, sharding_dict in self.client_sharding_dicts.items():
                 if key not in sharding_dict:
-                    # raise RuntimeError(f"Key {key} not found in sharding of client {client_name}.")
-                    # This handle the case that some clients do not have the key (pipeline parallelism),
-                    # but we can still make the unified sharding
+                    # Pipeline stages may omit keys but still need an empty shard descriptor.
                     sharding_dict[key] = NIXLSharding.empty()
                 shard_mesh_list.append(sharding_dict[key].shard_mesh)
             finest_shard_mesh = NIXLSharding.find_finest_shard_mesh(shard_mesh_list)
             for client_name, sharding_dict in self.client_sharding_dicts.items():
                 if client_name not in self.client_unified_sharding_dicts:
                     self.client_unified_sharding_dicts[client_name] = {}
-                # Split converters may reuse one sharding object for multiple output
-                # keys. Refine an independent copy so processing one key cannot mutate
-                # another key's mesh through that shared reference.
-                source_sharding = sharding_dict[key]
-                unified_sharding = NIXLSharding(
-                    shard_mesh=source_sharding.shard_mesh.copy(),
-                    shard_indices=list(source_sharding.shard_indices),
-                )
-                unified_sharding.refactor_based_on_finer_shard_mesh(finest_shard_mesh)
-                self.client_unified_sharding_dicts[client_name][key] = unified_sharding
+                # Split parameters may share their input descriptor, so each key needs its own refinement.
+                sharding = copy.deepcopy(sharding_dict[key])
+                sharding.refactor_based_on_finer_shard_mesh(finest_shard_mesh)
+                self.client_unified_sharding_dicts[client_name][key] = sharding
         psrl_logger.info(
             f"[timing] make_unified_sharding done: total={time.time() - _t_start:.3f}s, "
             f"collect_keys={_t_keys - _t_start:.3f}s, "
@@ -316,12 +317,49 @@ class NIXLMetaServer:
         """
         Return this agent's clients plus the exact remote clients referenced by its plan.
 
+        Only the initiating side needs the remote descriptors, so the rules are:
+          - PUSH_SIDE needs: all PS_FOR_PUSH (train pushes to PS)
+          - PULL_SIDE needs: all PS_FOR_PULL (gen pulls from PS)
+          - PS clients do not initiate transfers and need no remote infos beyond their own,
+            unless broadcast_init is enabled. In that case PS workers write to each other
+            and therefore need every other PS worker's descriptors.
+
         PS clients are passive transfer targets, so they only retain their own infos.
         PUSH_SIDE and PULL_SIDE clients receive descriptors only for PS clients that
         occur in their per-key communication plans.
         """
+
+        # TODO(zyf): check the correctness
+        # my_clients: set[str] = set(self.connected_clients[agent_name])
+        # return my_clients | self.comm_plan.target_clients_for(my_clients)
+
         my_clients: set[str] = set(self.connected_clients[agent_name])
-        return my_clients | self.comm_plan.target_clients_for(my_clients)
+        relevant: set[str] = set(my_clients)  # always include own clients
+
+        # Determine which types this agent's clients have.
+        my_types: set[NIXLClientType] = {self.client_infos[c].type for c in my_clients if c in self.client_infos}
+
+        # Initiating side → counterpart type mapping.
+        type_needs: dict[NIXLClientType, NIXLClientType] = {
+            NIXLClientType.PUSH_SIDE: NIXLClientType.PS_FOR_PUSH,
+            NIXLClientType.PULL_SIDE: NIXLClientType.PS_FOR_PULL,
+        }
+        needed_types: set[NIXLClientType] = {dst for src, dst in type_needs.items() if src in my_types}
+
+        for client_name, client_info in self.client_infos.items():
+            if client_info.type in needed_types:
+                relevant.add(client_name)
+
+        # Broadcast initialization uses direct PS writes, so include every PS
+        # descriptor in the existing info exchange.
+        if self._broadcast_init_enabled:
+            ps_types = {NIXLClientType.PS_FOR_PUSH, NIXLClientType.PS_FOR_PULL}
+            if my_types & ps_types:
+                for client_name, client_info in self.client_infos.items():
+                    if client_info.type in ps_types:
+                        relevant.add(client_name)
+
+        return relevant
 
     def notify_all_client_infos_and_comm_plan(self):
         """
@@ -509,7 +547,7 @@ class NIXLMetaServer:
                         raise
             if time.time() - start > timeout:
                 raise TimeoutError("Timeout waiting for agents.")
-            time.sleep(0.1)
+            time.sleep(0.01)
 
         psrl_logger.info(
             f"{self.server_name}: Successfully received all {len(already_recved_agents)}/{expected_agents} "

@@ -16,7 +16,9 @@ def apply_tms_patch():
         try:
             yield
         finally:
-            assert self._binary_wrapper.cdll.tms_get_interesting_region()
+            assert self._binary_wrapper.cdll.tms_get_interesting_region(), (
+                "TMS region must remain active while restoring its configuration."
+            )
             self._binary_wrapper.set_config(
                 tag=_TAG_DEFAULT,
                 interesting_region=original_interesting_region,

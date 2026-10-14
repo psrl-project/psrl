@@ -87,6 +87,14 @@ def register_patches():
     logger.info("Initializing vLLM Custom Patches Plugin")
     logger.info("=" * 60)
 
+    from vllm_patches.weight_layouts import (
+        install_weight_layout_registry_hook,
+        register_weight_layouts,
+    )
+
+    install_weight_layout_registry_hook()
+    register_weight_layouts()
+
     # Import and register all available patches
     from vllm_patches.patches.cuda_graph import TMSCUDAGraphWrapperPatch
     from vllm_patches.patches.cudagraph_utils import TMSCudaGraphManagerPatch
@@ -106,8 +114,7 @@ def register_patches():
     # Apply patches based on environment configuration
     manager.apply_from_env()
     weight_arena_requested = any(
-        os.environ.get(name, "0") == "1"
-        for name in ("PSRL_VLLM_WEIGHT_ARENA", "VLLM_PSRL_WEIGHT_ARENA")
+        os.environ.get(name, "0") == "1" for name in ("PSRL_VLLM_WEIGHT_ARENA", "VLLM_PSRL_WEIGHT_ARENA")
     )
     if weight_arena_requested:
         register_direct_weight_arena_loader()
@@ -115,5 +122,16 @@ def register_patches():
         target_patches = getattr(WeightArenaModelRunnerPatch._patch_target, "_applied_patches", {})
         if not applied or target_patches.get("load_model") != "WeightArenaModelRunnerPatch":
             raise RuntimeError("Failed to apply the required WeightArenaModelRunnerPatch.")
+
+    # Always apply profiling patches: they are idempotent and gated at
+    # runtime by `log_stats`, so there is no cost when profiling is off.
+    from vllm_patches.patches.profiling import apply_profiling_patches
+
+    apply_profiling_patches()
+
+    # Expose scheduler observations and memory restoration through engine utilities.
+    from vllm_patches.patches.engine_core import apply_engine_core_patches
+
+    apply_engine_core_patches()
 
     logger.info("=" * 60)
