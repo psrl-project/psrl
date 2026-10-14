@@ -755,6 +755,19 @@ class vLLMWorkerExtension:
         except Exception as e:
             raise ValueError(f"Error in vLLMWorkerExtension.patch_vllm_moe_model_weight_loader: {e}") from e
         return None
+    def finalize_weight_loading(self) -> None:
+        """
+        Convert freshly loaded weights to runtime format and wait for completion.
+        """
+        model = self.model_runner.model
+        if isinstance(model, CUDAGraphWrapper):
+            model = model.unwrap()
+        process_weights_after_loading(
+            model,
+            self.model_runner.vllm_config.model_config,
+            self.model_runner.device,
+        )
+        torch.cuda.synchronize()
 
     # ----------------------------- NIXL Related -----------------------------
     # Because the model is on another process since vllm V1, we must call the nixl methods via rpc

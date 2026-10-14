@@ -1576,6 +1576,14 @@ class PSRL_vLLMHttpServer(vLLMHttpServer):
             await self.nixl_pull_model()
         else:
             raise NotImplementedError(f"PSRL does not support PS mode '{self.psrl_config.ps_mode}' yet.")
+        # Post-load transforms are non-idempotent, so only process freshly written weights.
+        if not self.psrl_config.profile.fix_weight:
+            await self.collective_rpc(method="finalize_weight_loading")
+        if self.psrl_config.ps_mode in ("nixl_cpu", "nixl_gpu"):
+            pulled_instance_ids = [
+                (self.base_worker_id, data_parallel_rank) for data_parallel_rank in range(self.get_instance_num())
+            ]
+            await self.gen_interface.ps_manager_handle.pull_model_state_dict_nixl.remote(pulled_instance_ids)
         # Important: the prefix cache needs to be cleared after pulling the model
         await self.clear_kv_cache()
         if self.kv_cache_manager is not None and self.kv_cache_manager.should_clear_on_weight_update:
@@ -1602,11 +1610,6 @@ class PSRL_vLLMHttpServer(vLLMHttpServer):
                     self._cached_ps_nixl_gen_storage_client_names,
                 ),
             )
-        data_parallel_ranks = range(self.get_instance_num())
-        pulled_instance_ids = [(self.base_worker_id, data_parallel_rank) for data_parallel_rank in data_parallel_ranks]
-        await ps_manager_handle.pull_model_state_dict_nixl.remote(
-            pulled_instance_ids
-        )  # This only updates the model version
         psrl_logger.info("NIXL pull model done.")
 
     async def ray_pull_model(self) -> None:
