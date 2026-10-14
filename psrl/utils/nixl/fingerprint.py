@@ -21,7 +21,7 @@ def resolve_weight_fingerprint_options(
     if not weight_fingerprint_flow_enabled(psrl_config, flow=flow):
         return None
     config = OmegaConf.select(psrl_config, "nixl.weight_verification", default=None)
-    assert config is not None
+    assert config is not None, "Enabled weight fingerprinting requires a weight_verification configuration."
 
     full_every = int(config.get("full_every_n_versions", 0))
     sample_every = int(config.get("sample_every_n_versions", 1))

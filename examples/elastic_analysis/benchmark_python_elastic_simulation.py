@@ -48,9 +48,7 @@ class TaskBatch:
 def plan_from_mapping(raw: Mapping[str, Any]) -> RoleCandidatePlan:
     return RoleCandidatePlan(
         wake_instance_ids=frozenset(int(value) for value in raw.get("wake_instance_ids", ())),
-        sleep_instance_ids=frozenset(
-            int(value) for value in raw.get("sleep_instance_ids", ())
-        ),
+        sleep_instance_ids=frozenset(int(value) for value in raw.get("sleep_instance_ids", ())),
         primary_scale_up=bool(raw.get("primary_scale_up", False)),
     )
 
@@ -88,10 +86,7 @@ def execute_batch(
     executor: ThreadPoolExecutor,
     batch: TaskBatch,
 ) -> tuple[RoleEvaluationResult, ...]:
-    futures = [
-        executor.submit(evaluate_role_candidate, task.context, task.plan)
-        for task in batch.tasks
-    ]
+    futures = [executor.submit(evaluate_role_candidate, task.context, task.plan) for task in batch.tasks]
     return tuple(future.result() for future in futures)
 
 
@@ -178,7 +173,7 @@ def main() -> int:
     parser.add_argument("--progress-every", type=int, default=10)
     args = parser.parse_args()
     if args.threads <= 0 or args.repeat <= 0 or args.warmup_first_cycle < 0:
-        parser.error("threads and repeat must be positive; warmup must be non-negative")
+        parser.error("threads and repeat must be positive. warmup must be non-negative")
 
     cpp_rows = load_cpp_rows(args.cpp_output)
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -202,9 +197,7 @@ def main() -> int:
 
             preparation_started = time.perf_counter_ns()
             contexts = {
-                role: prepare_role_evaluation_context(
-                    RoleSnapshot.from_mapping(payload["roles"][role])
-                )
+                role: prepare_role_evaluation_context(RoleSnapshot.from_mapping(payload["roles"][role]))
                 for role in ROLE_ORDER
                 if role in payload["roles"]
             }
@@ -218,8 +211,7 @@ def main() -> int:
             }
             if expected_counts != cpp["counts"]:
                 raise AssertionError(
-                    f"cycle {cycle_id} task counts differ: "
-                    f"python={expected_counts}, cpp={cpp['counts']}"
+                    f"cycle {cycle_id} task counts differ: python={expected_counts}, cpp={cpp['counts']}"
                 )
 
             if first_cycle:
@@ -245,28 +237,22 @@ def main() -> int:
                     raise AssertionError(f"cycle {cycle_id} produced nondeterministic results")
                 result_checksum = checksum
 
-                rebalance_ns = sum(
-                    int(result.rebalance_simulation_s * 1e9) for result in results
-                )
+                rebalance_ns = sum(int(result.rebalance_simulation_s * 1e9) for result in results)
                 router_ns = sum(int(result.router_simulation_s * 1e9) for result in results)
                 other_ns = sum(int(result.other_simulation_s * 1e9) for result in results)
                 rebalance_intervals = [
                     (result.rebalance_started_s, result.rebalance_finished_s)
                     for result in results
-                    if result.rebalance_started_s is not None
-                    and result.rebalance_finished_s is not None
+                    if result.rebalance_started_s is not None and result.rebalance_finished_s is not None
                 ]
                 router_intervals = [
                     (result.router_started_s, result.router_finished_s)
                     for result in results
-                    if result.router_started_s is not None
-                    and result.router_finished_s is not None
+                    if result.router_started_s is not None and result.router_finished_s is not None
                 ]
                 rebalance_wall_ns = interval_union_ns(rebalance_intervals)
                 router_wall_ns = interval_union_ns(router_intervals)
-                simulation_wall_ns = interval_union_ns(
-                    rebalance_intervals + router_intervals
-                )
+                simulation_wall_ns = interval_union_ns(rebalance_intervals + router_intervals)
                 evaluation_values.append(evaluation_ns)
                 rebalance_worker_values.append(rebalance_ns)
                 router_worker_values.append(router_ns)
@@ -274,16 +260,13 @@ def main() -> int:
                 rebalance_wall_values.append(rebalance_wall_ns)
                 router_wall_values.append(router_wall_ns)
                 simulation_wall_values.append(simulation_wall_ns)
-                overlap_wall_values.append(
-                    max(0, rebalance_wall_ns + router_wall_ns - simulation_wall_ns)
-                )
+                overlap_wall_values.append(max(0, rebalance_wall_ns + router_wall_ns - simulation_wall_ns))
 
             cpp_checksum = str(cpp["functional_checksum"])
             functional_match = result_checksum == cpp_checksum
             if not functional_match:
                 raise AssertionError(
-                    f"cycle {cycle_id} checksum differs: "
-                    f"python={result_checksum}, cpp={cpp_checksum}"
+                    f"cycle {cycle_id} checksum differs: python={result_checksum}, cpp={cpp_checksum}"
                 )
             output = {
                 "schema_version": 1,
@@ -320,8 +303,7 @@ def main() -> int:
             if args.progress_every > 0 and emitted % args.progress_every == 0:
                 elapsed = time.perf_counter() - started
                 print(
-                    f"processed {emitted} cycles in {elapsed:.1f}s "
-                    f"(input line {line_number})",
+                    f"processed {emitted} cycles in {elapsed:.1f}s (input line {line_number})",
                     file=sys.stderr,
                     flush=True,
                 )

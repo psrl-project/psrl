@@ -2,14 +2,14 @@
 """
 Parse StatCollector logs (Rollout + RewardModel) and plot per-instance metrics over time.
 
-Each (metric, role) pair produces one figure; all instances of that role are
+Each (metric, role) pair produces one figure. all instances of that role are
 overlaid on a single axes (one line per instance).
 
 Metrics:
-  - total_request_num  (num_running_reqs + num_waiting_reqs)
+  - total_request_num (num_running_reqs + num_waiting_reqs)
   - num_running_reqs
   - num_waiting_reqs
-  - total_token_num    (sum of prompt + response tokens in scheduler_stats)
+  - total_token_num (sum of prompt + response tokens in scheduler_stats)
   - kv_cache_usage
 """
 
@@ -23,10 +23,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # --- Config (edit here) ---
-LOG_DIR = (
-    REPO_ROOT
-    / "logs/verl_deployment_modes/mode5_bs_256_share_24_elastic_rl_rollout7b_rm8b"
-)
+LOG_DIR = REPO_ROOT / "logs/verl_deployment_modes/mode5_bs_256_share_24_elastic_rl_rollout7b_rm8b"
 OUT_DIR = LOG_DIR / "stat_collector_plots"
 # Inclusive plot range in minutes. None = no bound.
 TIME_START_MIN: float | None = None
@@ -53,12 +50,8 @@ RE_ELAPSED = re.compile(r"'total_elapsed_time':\s*([\d.eE+-]+)")
 RE_NUM_RUNNING = re.compile(r"'num_running_reqs':\s*(\d+)")
 RE_NUM_WAITING = re.compile(r"'num_waiting_reqs':\s*(\d+)")
 RE_KV_CACHE = re.compile(r"'kv_cache_usage':\s*([\d.eE+-]+)")
-RE_PROMPT_SECTION = re.compile(
-    r"'req_id_to_prompt_token_num':\s*\{(.*?)\},\s*'req_id_to_response_token_num'"
-)
-RE_RESP_SECTION = re.compile(
-    r"'req_id_to_response_token_num':\s*\{(.*?)\},\s*'req_id_in_waiting'"
-)
+RE_PROMPT_SECTION = re.compile(r"'req_id_to_prompt_token_num':\s*\{(.*?)\},\s*'req_id_to_response_token_num'")
+RE_RESP_SECTION = re.compile(r"'req_id_to_response_token_num':\s*\{(.*?)\},\s*'req_id_in_waiting'")
 RE_DICT_INT_VALS = re.compile(r":\s*(\d+)")
 RE_ROLLOUT = re.compile(r"^StatCollector_I(\d+)\.log$")
 RE_RM = re.compile(r"^StatCollector_RM_.+_I(\d+)\.log$")
@@ -245,10 +238,7 @@ def main() -> None:
 
     rollout_n = len(series_by_role["Rollout"])
     rm_n = len(series_by_role["RewardModel"])
-    print(
-        f"Done: {rollout_n} Rollout + {rm_n} RewardModel instances, "
-        f"{len(METRICS) * 2} figures -> {out_dir}"
-    )
+    print(f"Done: {rollout_n} Rollout + {rm_n} RewardModel instances, {len(METRICS) * 2} figures -> {out_dir}")
 
 
 if __name__ == "__main__":

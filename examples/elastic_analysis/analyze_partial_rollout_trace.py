@@ -11,7 +11,6 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
-
 TRACE_MARKER = "[PARTIAL_ROLLOUT_TRACE]"
 FIELD_RE = re.compile(r"(?P<key>[A-Za-z_]+)=(?P<value>[^\s]+)")
 TIMESTAMP_RE = re.compile(r"^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3})")
@@ -69,9 +68,7 @@ def analyze_events(
         results = [event for event in uid_events if event["stage"] == "generate_result"]
         continuation_starts = [event for event in starts if event.get("partial") == 1]
         cross_version = [
-            event
-            for event in continuation_starts
-            if event.get("request_version") != event.get("loaded_version")
+            event for event in continuation_starts if event.get("request_version") != event.get("loaded_version")
         ]
         counters["partial_uids"] += int(bool(continuation_starts))
         counters["cross_version_uids"] += int(bool(cross_version))
@@ -151,11 +148,7 @@ def analyze_events(
                 )
 
         versions = sorted(
-            {
-                int(event["loaded_version"])
-                for event in starts
-                if event.get("loaded_version") is not None
-            }
+            {int(event["loaded_version"]) for event in starts if event.get("loaded_version") is not None}
         )
         request_rows.append(
             {
@@ -177,9 +170,7 @@ def analyze_events(
     counters["violations"] = len(violations)
     counters["router_partial_routes"] = sum(event["stage"] == "route" for event in events)
     routed_events = [
-        event
-        for event in events
-        if event["stage"] == "route" and event.get("selected_instance") is not None
+        event for event in events if event["stage"] == "route" and event.get("selected_instance") is not None
     ]
     counters["router_failed_partial_routes"] = counters["router_partial_routes"] - len(routed_events)
     counters["router_cross_instance_chunks"] = sum(
@@ -192,9 +183,7 @@ def analyze_events(
             if event.get("previous_instance") != event.get("selected_instance")
         }
     )
-    counters["router_same_instance_chunks"] = (
-        len(routed_events) - counters["router_cross_instance_chunks"]
-    )
+    counters["router_same_instance_chunks"] = len(routed_events) - counters["router_cross_instance_chunks"]
     counters["router_higher_version_routes"] = sum(
         event.get("selected_version") is not None
         and event.get("selected_version") > event.get("requested_version", event.get("selected_version"))

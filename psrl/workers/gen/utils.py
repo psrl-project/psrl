@@ -1,8 +1,6 @@
 from dataclasses import dataclass, field
 from typing import Any
 
-import torch
-
 # (worker_id, data_parallel_rank)
 RolloutInstanceId = tuple[str, int]
 INVALID_ROLLOUT_INSTANCE_ID: RolloutInstanceId = ("", -1)
@@ -81,6 +79,8 @@ class TokenOutput:
 
     def as_dict(self) -> dict[str, Any]:
         """Convert the TokenOutput dataclass to a dictionary."""
+        import torch
+
         output = {
             "prompt_ids": self.prompt_ids,
             "response_ids": self.response_ids,

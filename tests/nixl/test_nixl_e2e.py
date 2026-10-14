@@ -26,12 +26,11 @@ from psrl.utils.nixl import (
     NIXLStorageClient,
 )
 from psrl.utils.nixl.port_scanner import create_port_scanners
-from psrl.workers.ps import (
+from psrl.workers.ps.ps_storage_worker import PSStoragePlan, PSStorageWorker
+from psrl.workers.ps.ps_worker_group import (
     PSClassWithInitArgs,
     PSResourcePool,
     PSResourceSpec,
-    PSStoragePlan,
-    PSStorageWorker,
     PSWorkerGroup,
 )
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy

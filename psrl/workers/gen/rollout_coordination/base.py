@@ -35,12 +35,10 @@ class CoordinatorBase:
         Select awake role replicas before considering their model versions.
         """
         replica_ids = sorted({instance_id[0] for instance_id in instance_ids} - self.sleeping_replica_ids)
-        sleeping = await asyncio.gather(*(
-            self.server_handles[replica_id].is_sleeping.remote() for replica_id in replica_ids
-        ))
-        awake_replicas = {
-            replica_id for replica_id, asleep in zip(replica_ids, sleeping, strict=True) if not asleep
-        }
+        sleeping = await asyncio.gather(
+            *(self.server_handles[replica_id].is_sleeping.remote() for replica_id in replica_ids)
+        )
+        awake_replicas = {replica_id for replica_id, asleep in zip(replica_ids, sleeping, strict=True) if not asleep}
         return sorted({instance_id for instance_id in instance_ids if instance_id[0] in awake_replicas})
 
     async def _acquire_replica_operations(self, replica_ids: list[str]) -> AsyncExitStack:

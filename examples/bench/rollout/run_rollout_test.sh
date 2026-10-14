@@ -66,7 +66,7 @@ PY
 max_prompt_length=${2:-128}
 batch_size=${3:-1}
 disable_attn=${4:-true}
-# Optional 5th arg / GEN_EP env override; otherwise auto-detect MoE EP=TP.
+# Optional 5th arg / GEN_EP env override. otherwise auto-detect MoE EP=TP.
 GEN_EP=${5:-${GEN_EP:-$(_psrl_vllm_ep_size_for_model "${HF_MODEL_PATH}" "${GEN_TP}")}}
 max_response_length=8192
 

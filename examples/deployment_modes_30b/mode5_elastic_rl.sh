@@ -1,8 +1,5 @@
 #!/usr/bin/env bash
-# Mode 5 — elastic RL (current elastic auto-scaling between rollout and rm).
-# rollout + RM share shared_rollout_pool with a ScalingPolicy that auto-scales the
-# awake instance counts; trainer on a separate train_pool. This is the existing
-# elastic path (elastic.enable=True + enable_policy=True).
+# Mode 5 dynamically shares rollout and RM GPUs through the scaling policy, with training in a separate pool.
 #
 # Two nodes: shared_rollout_pool (8 GPUs, rollout+rm elastic) + train_pool (8 GPUs).
 #
@@ -35,11 +32,7 @@ export PSRL_DEPLOY_OPTIMIZER_OFFLOAD=${PSRL_DEPLOY_OPTIMIZER_OFFLOAD:-True}
 export PSRL_DEPLOY_SMOKE=${1:-0}
 shift || true
 
-# ---- Elastic auto-scaling config ----
-# enable_policy=True keeps the ElasticExecutor monitor loop running; the
-# scaling_policy_variant selects the ScalingPolicy implementation. Below is a
-# complete, tunable elastic block (modeled on examples/elastic_rm/*_fsdp.sh):
-# cooldown plus throughput-optimal policy tuning.
+# `enable_policy` starts the monitor loop. `scaling_policy_variant` selects the scaling implementation.
 export PSRL_DEPLOY_EXTRA="\
 psrl.deployment.elastic.enable_policy=True \
 psrl.deployment.elastic.scaling_policy_variant=throughput-optimal \

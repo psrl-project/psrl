@@ -95,7 +95,7 @@ def plot_model_attn_setting(
     output_path: Path,
     max_itl: float,
 ) -> int:
-    """Plot one figure; return total point count."""
+    """Plot one figure. return total point count."""
     attn_label = "disable attn" if disable_attn else "w/ attn"
     fig, ax = plt.subplots(figsize=(10, 6))
 

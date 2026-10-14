@@ -240,12 +240,18 @@ def main():
         env.update({"PSRL_VLLM_PATCHES": "", "TMS_INIT_ENABLE": "0", "TMS_INIT_ENABLE_CPU_BACKUP": "0"})
     actor = None
     try:
-        actor = ray.remote(ProbeActor).options(
-            num_gpus=4,
-            num_cpus=4,
-            runtime_env={"env_vars": env},
-            scheduling_strategy=NodeAffinitySchedulingStrategy(ray.get_runtime_context().get_node_id(), soft=False),
-        ).remote()
+        actor = (
+            ray.remote(ProbeActor)
+            .options(
+                num_gpus=4,
+                num_cpus=4,
+                runtime_env={"env_vars": env},
+                scheduling_strategy=NodeAffinitySchedulingStrategy(
+                    ray.get_runtime_context().get_node_id(), soft=False
+                ),
+            )
+            .remote()
+        )
         report = ray.get(
             actor.run.remote(
                 str(Path(args.config).resolve()), str(output_dir), args.mode, args.max_tokens, args.cycles

@@ -99,18 +99,14 @@ def _resolve_rope_scaling(model_hf_config, engine_kwargs: dict) -> dict | None:
     return None
 
 
-def effective_max_position_embeddings(
-    model_hf_config, engine_kwargs: dict, native_max_position: int
-) -> int:
+def effective_max_position_embeddings(model_hf_config, engine_kwargs: dict, native_max_position: int) -> int:
     """Return the context ceiling after launch-time YaRN, else the native length."""
     rope = _resolve_rope_scaling(model_hf_config, engine_kwargs)
     if rope is None:
         return native_max_position
     original = rope.get("original_max_position_embeddings", native_max_position)
     if original is None:
-        raise ValueError(
-            "original_max_position_embeddings is required when rope_scaling is set."
-        )
+        raise ValueError("original_max_position_embeddings is required when rope_scaling is set.")
     factor = float(rope.get("factor", 1.0) or 1.0)
     return int(float(original) * factor)
 

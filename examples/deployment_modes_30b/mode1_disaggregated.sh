@@ -1,8 +1,5 @@
 #!/usr/bin/env bash
-# Mode 1 — fully disaggregated.
-# rollout / reward-model / trainer each in INDEPENDENT pools, concurrent async
-# pipeline. Eight nodes: rollout pool (16 GPUs, 4 TP4 instances) + reward-model
-# pool (16 GPUs, 4 TP4 RM replicas) + train pool (32 GPUs, actor).
+# Mode 1 uses independent rollout and RM pools of 16 GPUs each, plus 32 trainer GPUs.
 #
 # Usage: bash mode1_disaggregated.sh [smoke_test=0] [extra hydra overrides...]
 #   smoke_test=1 -> 2 steps, small batch (quick launch check).

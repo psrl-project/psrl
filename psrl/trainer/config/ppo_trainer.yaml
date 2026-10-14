@@ -31,15 +31,6 @@ defaults:
   - critic@critic: ${model_engine}_critic
   - model@critic.model: hf_model
 
-  # # # Reward model config.
-  # # - reward_model@reward_model: dp_reward_model
-
-  # # # (Rule-based) Reward manager config.
-  # # - reward_manager@reward_manager
-
-  #  # Multi-reward model config.
-  # - reward_model@reward_models_config: multi_rewards
-
   # Gen reward models share the HuggingFace and rollout schemas with train.
   - model@reward.managers.gen_qwen3_8b.model: hf_model
   - model@reward.managers.gen_skywork.model: hf_model

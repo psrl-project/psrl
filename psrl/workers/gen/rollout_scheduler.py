@@ -139,13 +139,8 @@ class RolloutScheduler(AsyncScheduler):
         req_id_to_prompt_token_num = {req_id: req.num_prompt_tokens for req_id, req in self.requests.items()}
         req_id_to_response_token_num = {req_id: req.num_output_tokens for req_id, req in self.requests.items()}
         req_id_in_waiting = [req.request_id for req in self.waiting]
-        # NOTE(lhy): we need to patch the original vllm SchedulerStats to add:
-        # 1. `need_to_abort_reqs` field. This is a set of request IDs that need to be aborted.
-        # 2. `req_id_to_prompt_token_num` field. This is a dictionary of request ID to the number of prompt tokens.
-        # 3. `req_id_to_response_token_num` field. This is a dictionary of request ID to the number of response tokens.
-        # 4. `req_id_in_waiting` field. This is a list of request IDs in the waiting queue.
-        # NOTE(lhy): PSRL adds per-request prompt and response token counts to `SchedulerStats`.
-        # Preserve and clear `preemption_req_ids` after each statistics snapshot.
+        # NOTE(lhy): Add abort IDs, per-request token counts, and waiting IDs to `SchedulerStats`. Clear preemption IDs
+        # per snapshot.
         preemption_req_ids = self.preemption_req_ids
         self.preemption_req_ids = []
         return SchedulerStats(

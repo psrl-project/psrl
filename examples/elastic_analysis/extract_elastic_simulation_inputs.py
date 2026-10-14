@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Extract JSONL inputs for offline elastic request-level simulation.
+r"""Extract JSONL inputs for offline elastic request-level simulation.
 
 The extractor joins three existing log families at the candidate-evaluation timestamp:
 
@@ -12,26 +12,26 @@ The extractor joins three existing log families at the candidate-evaluation time
   the policy log contains the cycle's current-state aggregates.
 * ``ElasticMonitor.log`` supplies awake/asleep status and pool metadata.
 
-The output is deliberately plain JSONL.  It contains no Python reprs or enum
-values and is intended to be consumed by a future C++ simulator.  Router-only
+The output is deliberately plain JSONL. It contains no Python reprs or enum
+values and is intended to be consumed by a future C++ simulator. Router-only
 request metadata that is not present in the old logs is marked as synthetic:
 all active instances are eligible, request order is deterministic, and token
 totals are distributed as evenly as possible across the logged request count.
 
 Examples:
 
-    python scripts/extract_elastic_simulation_inputs.py \
+    python examples/elastic_analysis/extract_elastic_simulation_inputs.py \
         logs/verl_deployment_modes/<run> --max-cycles 20 \
         -o analysis/<run>/simulation_inputs.jsonl
 
-    python scripts/extract_elastic_simulation_inputs.py \
+    python examples/elastic_analysis/extract_elastic_simulation_inputs.py \
         logs/verl_deployment_modes/<run> --start-cycle 100 --end-cycle 200
 
-    python scripts/extract_elastic_simulation_inputs.py \
+    python examples/elastic_analysis/extract_elastic_simulation_inputs.py \
         logs/verl_deployment_modes/<run> --cycles 101,205,309
 
-The file format is schema version 1.  Numeric fields use JSON integers or
-finite JSON numbers; missing timestamps are represented by ``null``.
+The file format is schema version 1. Numeric fields use JSON integers or
+finite JSON numbers. missing timestamps are represented by ``null``.
 """
 
 from __future__ import annotations
@@ -672,7 +672,7 @@ def make_request_row(
         "is_waiting": bool(is_waiting),
         "route_order": int(route_order),
         "routing_priority": [int(route_order)],
-        # null means all instances in the evaluator; this is intentional for
+        # null means all instances in the evaluator. this is intentional for
         # the timing benchmark and avoids Python-specific placeholder values.
         "eligible_instance_ids": None,
         "fallback_instance_ids": None,
@@ -717,16 +717,10 @@ def build_role_snapshot(
 ) -> dict[str, object]:
     simulation_timestamp = cycle.simulation_timestamp
     monitor.advance_to(simulation_timestamp)
-    policy_awake_ids = (
-        frozenset(cycle.role_instance_ids[role]) if role in cycle.role_instance_ids else None
-    )
-    policy_loads = {
-        load.instance_id: load for load in cycle.role_instance_loads.get(role, ())
-    }
+    policy_awake_ids = frozenset(cycle.role_instance_ids[role]) if role in cycle.role_instance_ids else None
+    policy_loads = {load.instance_id: load for load in cycle.role_instance_loads.get(role, ())}
     role_cursors = sorted(role_cursors, key=lambda cursor: cursor.instance_id)
-    # ElasticExecutor deliberately excludes validation-only rollout workers.
-    # When ElasticMonitor is present, its instance set is the authoritative
-    # policy pool; StatCollector also contains files for validation workers.
+    # ElasticMonitor defines the policy pool. StatCollector also contains validation workers excluded from scaling.
     monitored_ids = {
         instance_id
         for (point_role, point_model, instance_id) in monitor.latest
@@ -739,9 +733,7 @@ def build_role_snapshot(
     for cursor in role_cursors:
         raw_point = cursor.advance_to(simulation_timestamp)
         monitor_point = monitor.latest.get((role, cursor.model, cursor.instance_id))
-        # Once an instance is asleep/training, its scheduler state is not part
-        # of the request-level policy snapshot.  Do not reuse an old
-        # StatCollector point from before the transition.
+        # Sleeping and training instances must not reuse scheduler snapshots from before their state transition.
         point = raw_point
         if policy_awake_ids is not None:
             if cursor.instance_id not in policy_awake_ids:
@@ -762,9 +754,7 @@ def build_role_snapshot(
         args.default_pending_seq_len,
     )
     pending_length_source = (
-        "scaling_policy_router_aggregate"
-        if pending_count and pending_tokens
-        else "default_pending_seq_len"
+        "scaling_policy_router_aggregate" if pending_count and pending_tokens else "default_pending_seq_len"
     )
 
     pending_requests = [
@@ -793,10 +783,7 @@ def build_role_snapshot(
             for index, seq_len in enumerate(policy_lengths):
                 request_rows.append(
                     make_request_row(
-                        request_id=(
-                            f"synthetic-{role.lower()}-c{cycle.cycle_id}-"
-                            f"i{cursor.instance_id}-r{index}"
-                        ),
+                        request_id=(f"synthetic-{role.lower()}-c{cycle.cycle_id}-i{cursor.instance_id}-r{index}"),
                         seq_len=seq_len,
                         source_instance_id=cursor.instance_id,
                         is_waiting=False,
@@ -828,9 +815,7 @@ def build_role_snapshot(
             is_awake = status in {"AWAKEN", "AWAKE", "RUNNING"}
             status_source = "elastic_monitor"
         else:
-            # StatCollector files exist for sleeping instances too.  Unknown
-            # status is kept explicit, while true is a conservative benchmark
-            # default that avoids silently removing an instance from the pool.
+            # Keep unknown instance status explicit. Assume awake only when the benchmark has no status evidence.
             is_awake = True
             status_source = "unknown_assume_awake"
         route_request_count = len(request_rows)
@@ -842,9 +827,7 @@ def build_role_snapshot(
             snapshot_timestamp = point.timestamp if point is not None else None
             generation_throughput = policy_load.throughput
             kv_cache_usage = (
-                point.kv_cache_usage
-                if point is not None
-                else (monitor_point.kv_cache_usage if monitor_point else 0.0)
+                point.kv_cache_usage if point is not None else (monitor_point.kv_cache_usage if monitor_point else 0.0)
             )
         elif point is not None:
             running_count = point.running_count
@@ -920,9 +903,7 @@ def build_role_snapshot(
         },
         "synthetic_pending_length_source": pending_length_source,
         "inflight_request_source": (
-            "scaling_policy_instance_aggregate"
-            if policy_loads
-            else "stat_collector_fallback"
+            "scaling_policy_instance_aggregate" if policy_loads else "stat_collector_fallback"
         ),
     }
 
@@ -981,9 +962,7 @@ def cycle_to_json(
             "monitor_log": "ElasticMonitor.log",
             "stat_logs": "StatCollector*.log",
             "cycle_log_timestamp": format_timestamp(cycle.timestamp),
-            "candidate_evaluation_completed_timestamp": format_timestamp(
-                cycle.evaluation_timing_timestamp
-            ),
+            "candidate_evaluation_completed_timestamp": format_timestamp(cycle.evaluation_timing_timestamp),
         },
         "cycle_id": cycle.cycle_id,
         "accepted_action_role": cycle.accepted_action_role,
@@ -1150,10 +1129,7 @@ def main() -> int:
                 break
             if args.cycles is not None and cycle.cycle_id not in args.cycles:
                 continue
-            if (
-                args.accepted_action_role is not None
-                and cycle.accepted_action_role != args.accepted_action_role
-            ):
+            if args.accepted_action_role is not None and cycle.accepted_action_role != args.accepted_action_role:
                 continue
             if not cycle.candidates and not args.include_empty_cycles:
                 continue

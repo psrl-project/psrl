@@ -27,7 +27,7 @@ def expand_ngpus_per_node(ngpus_per_node, nnodes, field_name: str = "ngpus_per_n
     """Normalize scalar or per-node GPU specs to one integer per node.
 
     `ngpus_per_node` may be a scalar, a Python sequence, or an OmegaConf
-    ListConfig. Scalars are repeated `nnodes` times; sequences must already
+    ListConfig. Scalars are repeated `nnodes` times. sequences must already
     match `nnodes`.
     """
     nnodes = int(nnodes)
@@ -63,7 +63,7 @@ def resolve_deployment_mode(config) -> str:
         if deployment.elastic.get("enable", False):
             mode = "elastic_rl"
         elif config.psrl.get("colocate", False):
-            # Legacy sync colocate path; keep disaggregated semantics for pool
+            # Legacy sync colocate path. keep disaggregated semantics for pool
             # layout (the sync path does not use elastic pools).
             mode = "disaggregated"
         else:
@@ -82,18 +82,13 @@ def resolve_deployment_mode(config) -> str:
             elastic.enable = True
             # enable_trainer_pool and enable_policy stay as user-configured.
         elif mode == "trainer_pool_only":
-            # Disaggregated baseline (rollout/rm on independent pools, always
-            # awake) + a fixed number of extra rollout/rm replicas on train_pool
-            # that are woken while the trainer is idle. No elastic auto-scaling,
-            # no shared_rollout_pool. NIXL is required for actor sleep/wake.
+            # Keep independent main pools awake and reuse idle trainer GPUs for fixed extra replicas. Requires NIXL.
             elastic.enable = False
             elastic.enable_trainer_pool = False
             elastic.enable_policy = False
         elif mode == "colocated":
-            # All three roles share train_pool (colocated), time-multiplexed per
-            # training step. Reuse elastic SubRayResourcePool / bundle-mapping /
-            # coordinator sleep/wake + trainer-pool actor NIXL sleep/wake infra,
-            # but disable auto-scaling. SleepWakeOrchestrator drives phases.
+            # Colocate all roles on trainer GPUs with elastic bundle placement. Phase orchestration controls sleep and
+            # wake.
             elastic.enable = True
             elastic.enable_trainer_pool = True
             elastic.enable_policy = False

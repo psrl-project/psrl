@@ -127,7 +127,7 @@ def validate_fine_grain_elastic(config) -> None:
     )
 
 
-# TODO(zyf): after refactoring, elastic rl's configuration check should be considered.
+# TODO(zyf): After refactoring, elastic rl's configuration check should be considered.
 def validate_config(
     config: DictConfig,
     use_reference_policy: bool,
@@ -267,10 +267,7 @@ def validate_config(
             "into one trajectory per turn."
         )
     if wants_thinking_disabled(thinking_template) and chat_template:
-        # Reject only templates that actually prefill an unclosed `<think>` on history.
-        # An accumulating template that emits a bare `content` stays balanced with
-        # thinking off, which is what SkyRL runs in
-        # `examples/train/thunder_agent/scripts/r2egym_32b/run_trainer.sh`.
+        # Reject templates that prefill an unclosed `<think>`. Balanced content-only templates remain valid.
         template_source = resolve_chat_template_value(chat_template)
         if template_source and template_prefills_assistant_think(template_source):
             raise ValueError(

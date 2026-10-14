@@ -10,4 +10,5 @@ __all__ = [
     "HermesToolParser",
     "Qwen3XMLToolParser",
     "XmlFcToolParser",
+    "parse_xml_fc_to_bash",
 ]

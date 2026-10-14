@@ -70,48 +70,6 @@ class _GPUSlotReserver:
         return "ok"
 
 
-# NOTE(zyf): these two functions are used for checking plasma in ray whether is big enough to put model parameters.
-#   whether needed need to be checked. (TODO)
-# @ray.remote(num_cpus=0)
-# def _inspect_plasma_backing_on_node() -> dict:
-#     node_id = ray.get_runtime_context().get_node_id()
-#     return inspect_local_plasma_backing(node_id)
-
-
-# def _validate_cluster_plasma_backing(config) -> None:
-#     """Fail before model startup when Plasma's mmap filesystem is overcommitted."""
-#     alive_gpu_nodes = sorted(
-#         [node for node in ray.nodes() if node["Alive"] and node["Resources"].get("GPU", 0) > 0],
-#         key=lambda node: node["NodeID"],
-#     )
-#     total_nnodes = config.psrl.deployment.get("total_nnodes", None)
-#     if total_nnodes is not None:
-#         alive_gpu_nodes = alive_gpu_nodes[: int(total_nnodes)]
-#     refs = [
-#         _inspect_plasma_backing_on_node.options(
-#             scheduling_strategy=NodeAffinitySchedulingStrategy(node_id=node["NodeID"], soft=False)
-#         ).remote()
-#         for node in alive_gpu_nodes
-#     ]
-#     snapshots = ray.get(refs, timeout=60)
-#     reserve_bytes = int(os.environ.get("PSRL_PLASMA_BACKING_RESERVE_BYTES", 16 * 1024**3))
-#     if reserve_bytes < 0:
-#         raise ValueError("PSRL_PLASMA_BACKING_RESERVE_BYTES must be non-negative.")
-#     errors = [
-#         error
-#         for snapshot in snapshots
-#         if (error := plasma_backing_error(snapshot, reserve_bytes)) is not None
-#     ]
-#     if errors:
-#         details = "\n".join(f"  - {error}" for error in errors)
-#         raise RuntimeError(
-#             "Unsafe Ray Plasma backing configuration detected before model startup:\n"
-#             f"{details}\n"
-#             "Reduce Ray object-store size or clear stale files from its backing filesystem "
-#             "until the reported reserve is available."
-#         )
-
-
 def _reserve_excess_nodes(config) -> list:
     """Block GPU slots on nodes that are not needed by this job.
 
@@ -349,10 +307,8 @@ class TaskRunner:
                     deployment_config.rollout_ngpus_per_node_per_instance
                 ] * deployment_config.rollout_nnodes_per_instance
 
-            # Mode 4 (trainer_pool_only): append a fixed number of extra rollout
-            # replicas on train_pool. train_pool already exists in resource_pool_spec
-            # (created above for the actor); do NOT overwrite its spec. These replicas
-            # are time-multiplexed with the actor via NIXL sleep/wake.
+            # Append fixed idle rollout replicas to the existing trainer pool without replacing its actor resource
+            # spec.
             if deployment_config.get("mode", None) == "trainer_pool_only":
                 idle_rollout = int(deployment_config.get("trainer_pool_idle_rollout_instances", 0))
                 if idle_rollout < 0:

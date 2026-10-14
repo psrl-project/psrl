@@ -36,10 +36,13 @@ class StatusBasedSyncMixin:
                 self.config.psrl.rollout_coordination.sync_and_mig_strategy.check_interval_in_ms / 1000
             )
 
-            awake_instance_ids = await self._get_awake_instance_ids([
-                instance_id for instance_id in self.instance_to_engine_status
-                if instance_id[0] in self.tag_to_replica_ids["rollout"]
-            ])
+            awake_instance_ids = await self._get_awake_instance_ids(
+                [
+                    instance_id
+                    for instance_id in self.instance_to_engine_status
+                    if instance_id[0] in self.tag_to_replica_ids["rollout"]
+                ]
+            )
             have_syncing_instance = bool(self.replica_sync_tasks)
             sync_instance_ids = []
             for instance_id in awake_instance_ids:

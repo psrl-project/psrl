@@ -184,9 +184,7 @@ def apply_correction(batch: BatchRecord, poll_s: float) -> None:
         removable_s = min(poll_s, max(0.0, (current.dispatched_at - wait_started).total_seconds()))
         if removable_s <= 0.0:
             continue
-        removable_intervals.append(
-            (current.dispatched_at - timedelta(seconds=removable_s), current.dispatched_at)
-        )
+        removable_intervals.append((current.dispatched_at - timedelta(seconds=removable_s), current.dispatched_at))
         batch.polling_removed_s += removable_s
 
     for record in ordered:
@@ -222,8 +220,7 @@ def summarize(label: str, batches: list[BatchRecord]) -> dict[str, object]:
     completed_batches = [batch for batch in batches if batch.completed_at is not None]
     raw_batch_s = [(batch.completed_at - batch.started_at).total_seconds() for batch in completed_batches]
     corrected_batch_s = [
-        max(0.0, raw - batch.polling_removed_s)
-        for batch, raw in zip(completed_batches, raw_batch_s, strict=True)
+        max(0.0, raw - batch.polling_removed_s) for batch, raw in zip(completed_batches, raw_batch_s, strict=True)
     ]
     executor_batches = [batch for batch in completed_batches if batch.executor_elapsed_s is not None]
     raw_execution_s = [batch.executor_elapsed_s for batch in executor_batches]
@@ -265,9 +262,7 @@ def summarize(label: str, batches: list[BatchRecord]) -> dict[str, object]:
         "execution_polling_removed": _stats(
             [batch.polling_removed_s + batch.completion_polling_removed_s for batch in executor_batches]
         ),
-        "completion_polling_removed": _stats(
-            [batch.completion_polling_removed_s for batch in executor_batches]
-        ),
+        "completion_polling_removed": _stats([batch.completion_polling_removed_s for batch in executor_batches]),
         "raw_network": _stats(raw_network_s),
         "corrected_network": _stats(corrected_network_s),
         "raw_migration": _stats(raw_migration_s),
@@ -307,9 +302,7 @@ def main() -> None:
                 batch.executor_elapsed_s, batch.executor_completed_at = executor_result
             apply_correction(batch, args.poll_ms / 1000.0)
             raw_router_s = (
-                (batch.completed_at - batch.started_at).total_seconds()
-                if batch.completed_at is not None
-                else None
+                (batch.completed_at - batch.started_at).total_seconds() if batch.completed_at is not None else None
             )
             total_polling_removed_s = batch.polling_removed_s + batch.completion_polling_removed_s
             batch_rows.append(
@@ -320,9 +313,7 @@ def main() -> None:
                     "raw_router_batch_s": raw_router_s,
                     "between_request_polling_removed_s": batch.polling_removed_s,
                     "corrected_router_batch_s": (
-                        max(0.0, raw_router_s - batch.polling_removed_s)
-                        if raw_router_s is not None
-                        else None
+                        max(0.0, raw_router_s - batch.polling_removed_s) if raw_router_s is not None else None
                     ),
                     "raw_execution_s": batch.executor_elapsed_s,
                     "completion_polling_removed_s": batch.completion_polling_removed_s,

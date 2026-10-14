@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-# Start only FSDP actor workers and one CPU PS worker per actor node, then time
-# repeated TMS sleep/wake, NIXL re-registration, metadata sync, and PS pull.
-# Usage: scripts/run_train_actor_sleep_wake_probe.sh [8|16|32|all]
+# Time FSDP sleep, wake, NIXL registration, metadata sync, and PS pull with one CPU PS worker per actor node.
 set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)

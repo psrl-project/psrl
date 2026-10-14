@@ -1,13 +1,9 @@
 #!/usr/bin/env bash
 # Run all available isolated shift-down memory probes.
 #
-# The vLLM cases use the TMS sleep-memory integration test and report
-# device-wide snapshots for one isolated role.  The actor cases use the FSDP
-# actor probe.  A failed case is recorded and does not stop later cases.
+# Probe each role in isolation. Record failed cases and continue to the remaining cases.
 #
-# Usage:
-#   scripts/run_shift_down_memory_probes.sh
-#   PSRL_SHIFT_DOWN_MEMORY_ROLES=reward,rollout scripts/run_shift_down_memory_probes.sh
+# Run `bash examples/elastic_analysis/run_shift_down_memory_probes.sh` with `PSRL_SHIFT_DOWN_MEMORY_ROLES`.
 #
 # Model paths can be overridden with the model-specific environment variables
 # used below, for example PSRL_TMS_VLLM_7B_MODEL=/path/to/Qwen2.5-7B.
@@ -83,9 +79,7 @@ run_tms_case() {
     export PSRL_TMS_VLLM_INIT_TIMEOUT_S="${INIT_TIMEOUT_S}"
     export PSRL_TMS_VLLM_OPERATION_TIMEOUT_S="${OPERATION_TIMEOUT_S}"
     export PSRL_TMS_VLLM_TP_SIZE="${tp_size}"
-    # Reward workers validate the node-shared cache configuration even before
-    # model construction.  Enable the test arena explicitly so reward probes
-    # reach the sleep stage; rollout probes use the ordinary NIXL path.
+    # Enable the reward test arena so node-shared cache validation succeeds before the sleep probe.
     if [[ "${role}" == "reward" ]]; then
         export PSRL_TMS_VLLM_WEIGHT_ARENA=1
     else
@@ -149,7 +143,7 @@ run_actor_case() {
     fi
 }
 
-# These are the requested isolated model/parallelism cases.  The parameter IDs
+# These are the requested isolated model/parallelism cases. The parameter IDs
 # are implemented by test_rm_tms_smoke.py below the TMS sleep-memory test.
 if has_role reward; then
     run_tms_case reward glm-z1-9b-tp1 glm_z1_9b_tp1 PSRL_TMS_VLLM_GLM_9B_MODEL \

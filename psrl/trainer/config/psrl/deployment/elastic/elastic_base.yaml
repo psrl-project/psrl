@@ -10,10 +10,7 @@ shared_nnodes: 1
 # per-node list with length shared_nnodes, e.g. [4, 8].
 shared_ngpus_per_node: 8
 
-# Whether trainer GPUs may be reused by rollout/reward-model replicas while the trainer sleeps.
-# When enabled, train_pool is split with the same bundle-placement rules as shared_rollout_pool,
-# but instances from different pools never exchange bundles.
-# Incompatible with `psrl.fine_grain_overlap.granularity` other than `none`.
+# Reuse sleeping trainer GPUs for rollout and RM replicas within each pool. Requires overlap granularity `none`.
 enable_trainer_pool: False
 
 # Whether to enable policy-based scaling decisions in ElasticExecutor monitor loop
@@ -27,30 +24,20 @@ scaling_policy_variant: throughput-optimal
 monitor_interval_ms: 1000
 
 # Max seconds per monitor tick to wait on coordinator Ray RPCs (engine snapshot + router backlog).
-# Prevents the monitor from hanging silently if a coordinator/router blocks; <=0 disables the cap.
+# Prevents the monitor from hanging silently if a coordinator/router blocks. <=0 disables the cap.
 coordinator_sync_timeout_s: 10
 
-# Max seconds for each SLEEP/WAKE_UP/ABORT exec_command from ElasticExecutor to a coordinator.
-# Omit or 0 = wait indefinitely. When set, avoids pending stuck forever if a worker/router hangs.
-# NOTE: must be generous enough to cover model load time (typically 20-30s) plus any queuing
-# delay in the coordinator command handler.  60s was too aggressive and caused spurious timeouts.
+# Coordinator command timeout in seconds. Zero waits indefinitely. Include model load and command queue time.
 coordinator_command_timeout_s: 180
 
 # Keep the trainer awake briefly when the next buffer is not ready yet.
 # This avoids paying a 10-15s trainer wake cost for short generation gaps.
 trainer_ready_grace_s: 5
 
-# Consecutive monitor ticks while policy is blocked by an unfinished scale decision; at this
-# count, emit a high-severity diagnostic. The live transition lease is never abandoned because
-# allowing a second decision to overlap an unknown first decision corrupts instance state.
-# Rough wall time ≈ ticks * (monitor_interval_ms / 1000), e.g. 180 ticks @ 1000ms ≈ 3 minutes.
+# Report a blocked policy after this many monitor ticks. Keep its transition lease to prevent overlapping decisions.
 decision_execution_abandon_stall_ticks: 360
 
-# Wake-up immunity window (ms): after an instance wakes up (or completes an in-place
-# model sync), it is protected from being scaled down for this duration.
-# Prevents the rapid sleep-wake oscillation that occurs when the scaling policy sees
-# zero throughput on a freshly-woken or mid-sync instance and immediately scales it
-# back down.  Set to 0 to disable.
+# Protect newly awakened or synchronized instances from scale-down for this many milliseconds. Zero disables it.
 wakeup_immunity_ms: 10000
 
 # Minimum number of awake instances kept for each role.
@@ -59,10 +46,3 @@ min_awake_per_role: 1
 
 # Cooldown window after each scaling action to avoid oscillation
 cooldown_ms: 20000
-
-# Periodically ABORT waiting-only uids so the router can see them. Independent
-# of scaling_policy_variant. False keeps the vLLM-scheduler-only path.
-# NOTE(zyf): deprecated
-# interrupt_vllm_waiting_when_running_only: true
-# interrupt_vllm_waiting_interval_s: 2.0
-# interrupt_vllm_waiting_ratio: 1.0

@@ -7,11 +7,11 @@ The script produces three figures:
 2. Elastic awake GPUs for Rollout, GenRM, and Trainer.
 3. Engine-running and router-waiting sequences by role.
 
-All x axes use minutes since training step 1 starts.  Long intervals without a
+All x axes use minutes since training step 1 starts. Long intervals without a
 scaling decision or an awake-GPU state change are compressed with broken-axis
-markers so that the transition windows remain readable.  Successful elastic
+markers so that the transition windows remain readable. Successful elastic
 scaling actions are marked when execution completes, rather than when the
-policy decision is accepted.  The selected disaggregated run did not
+policy decision is accepted. The selected disaggregated run did not
 periodically log router backlog, so that series is shown as unavailable unless
 ``--disaggregated-router-backlog-csv`` is supplied.
 """
@@ -35,9 +35,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/psrl-matplotlib-cache")
 
 DEFAULT_ELASTIC_DIR = (
-    REPO_ROOT / "logs/verl_deployment_modes/"
-    "mixed_mode5_bs_128_share_24_elastic_Qwen2.5-7B_"
-    "Qwen3-30B-A3B-Thinking-2507"
+    REPO_ROOT / "logs/verl_deployment_modes/mixed_mode5_bs_128_share_24_elastic_Qwen2.5-7B_Qwen3-30B-A3B-Thinking-2507"
 )
 DEFAULT_DISAGGREGATED_DIR = (
     REPO_ROOT / "logs/verl_deployment_modes/"
@@ -232,9 +230,7 @@ def parse_disaggregated_boundaries(path: Path) -> list[datetime]:
     with path.open(encoding="utf-8", errors="replace") as log_file:
         for line in log_file:
             if match := RE_TRAINING_BATCH.match(line):
-                by_batch[int(match.group("batch"))] = _parse_timestamp(
-                    match.group("ts")
-                )
+                by_batch[int(match.group("batch"))] = _parse_timestamp(match.group("ts"))
     if 0 not in by_batch:
         raise RuntimeError(f"No training batch 0 boundary found in {path}")
     expected = list(range(max(by_batch) + 1))
@@ -286,9 +282,7 @@ def parse_elastic_samples(
     origin: datetime,
     step_ends: Sequence[datetime],
 ) -> RunData:
-    statuses: dict[datetime, dict[str, dict[int, tuple[float, float]]]] = defaultdict(
-        lambda: defaultdict(dict)
-    )
+    statuses: dict[datetime, dict[str, dict[int, tuple[float, float]]]] = defaultdict(lambda: defaultdict(dict))
     backlogs: dict[datetime, dict[str, float]] = {}
     end = step_ends[-1]
 
@@ -324,9 +318,7 @@ def parse_elastic_samples(
                 except (SyntaxError, ValueError):
                     continue
                 if isinstance(by_role, dict):
-                    backlogs[timestamp] = {
-                        role: _safe_float(by_role.get(role)) for role in ROLES
-                    }
+                    backlogs[timestamp] = {role: _safe_float(by_role.get(role)) for role in ROLES}
 
     if not statuses:
         raise RuntimeError(f"No elastic status samples found in {monitor_path}")
@@ -338,10 +330,7 @@ def parse_elastic_samples(
     latest_backlog = {role: 0.0 for role in ROLES}
     samples: list[Sample] = []
     for timestamp in sorted(statuses):
-        while (
-            backlog_index < len(backlog_times)
-            and backlog_times[backlog_index] <= timestamp
-        ):
+        while backlog_index < len(backlog_times) and backlog_times[backlog_index] <= timestamp:
             latest_backlog = backlogs[backlog_times[backlog_index]]
             backlog_index += 1
         totals = {
@@ -381,9 +370,7 @@ def _classify_stat_collector(path: Path) -> tuple[str, int] | None:
     return None
 
 
-def _parse_stat_collector(
-    path: Path, origin: datetime, end: datetime
-) -> dict[datetime, RolePoint]:
+def _parse_stat_collector(path: Path, origin: datetime, end: datetime) -> dict[datetime, RolePoint]:
     points: dict[datetime, RolePoint] = {}
     with path.open(encoding="utf-8", errors="replace") as log_file:
         for line in log_file:
@@ -395,9 +382,7 @@ def _parse_stat_collector(
             if not (timestamp_match and throughput_match and running_match):
                 continue
             try:
-                timestamp = _to_second(
-                    datetime.fromisoformat(timestamp_match.group("timestamp"))
-                )
+                timestamp = _to_second(datetime.fromisoformat(timestamp_match.group("timestamp")))
                 throughput = float(throughput_match.group(1))
                 running = float(running_match.group(1))
             except ValueError:
@@ -408,9 +393,7 @@ def _parse_stat_collector(
     return points
 
 
-def parse_backlog_csv(
-    path: Path | None, origin: datetime
-) -> dict[datetime, dict[str, float]]:
+def parse_backlog_csv(path: Path | None, origin: datetime) -> dict[datetime, dict[str, float]]:
     if path is None:
         return {}
     points: dict[datetime, dict[str, float]] = {}
@@ -421,9 +404,7 @@ def parse_backlog_csv(
         if missing:
             raise RuntimeError(f"Missing columns {sorted(missing)} in {path}")
         for row in reader:
-            timestamp = _to_second(
-                origin + timedelta(seconds=float(row["wall_time_s"]))
-            )
+            timestamp = _to_second(origin + timedelta(seconds=float(row["wall_time_s"])))
             points[timestamp] = {
                 ROLLOUT: max(0.0, float(row["rollout_waiting"])),
                 GENRM: max(0.0, float(row["genrm_waiting"])),
@@ -440,9 +421,7 @@ def parse_disaggregated_samples(
     if len(boundaries) < 2:
         raise RuntimeError("Need a next-step boundary to close the disaggregated run")
     end = boundaries[-1]
-    instances: dict[str, dict[int, dict[datetime, RolePoint]]] = {
-        role: {} for role in ROLES
-    }
+    instances: dict[str, dict[int, dict[datetime, RolePoint]]] = {role: {} for role in ROLES}
     all_times: set[datetime] = set()
     for path in sorted(run_dir.glob("StatCollector*.log")):
         metadata = _classify_stat_collector(path)
@@ -464,10 +443,7 @@ def parse_disaggregated_samples(
     latest: dict[str, dict[int, RolePoint]] = {role: {} for role in ROLES}
     samples: list[Sample] = []
     for timestamp in sorted(all_times):
-        while (
-            backlog_index < len(backlog_times)
-            and backlog_times[backlog_index] <= timestamp
-        ):
+        while backlog_index < len(backlog_times) and backlog_times[backlog_index] <= timestamp:
             latest_backlog = backlogs[backlog_times[backlog_index]]
             backlog_index += 1
         totals: dict[str, tuple[float, float]] = {}
@@ -478,9 +454,7 @@ def parse_disaggregated_samples(
             fresh = [
                 point
                 for point in latest[role].values()
-                if 0.0
-                <= (timestamp - point.timestamp).total_seconds()
-                <= ACTIVE_SNAPSHOT_MAX_AGE_S
+                if 0.0 <= (timestamp - point.timestamp).total_seconds() <= ACTIVE_SNAPSHOT_MAX_AGE_S
             ]
             totals[role] = (
                 sum(point.throughput for point in fresh),
@@ -505,14 +479,10 @@ def parse_disaggregated_samples(
                 genrm_waiting=latest_backlog[GENRM] if backlogs else math.nan,
             )
         )
-    return RunData(
-        "Disaggregated", origin, tuple(samples), waiting_recorded=bool(backlogs)
-    )
+    return RunData("Disaggregated", origin, tuple(samples), waiting_recorded=bool(backlogs))
 
 
-def parse_scaling_events(
-    path: Path, origin: datetime, end: datetime
-) -> list[ScalingEvent]:
+def parse_scaling_events(path: Path, origin: datetime, end: datetime) -> list[ScalingEvent]:
     accepted_actions: dict[int, list[tuple[str, str, int]]] = defaultdict(list)
     completions: list[tuple[datetime, int, str, bool, int]] = []
     with path.open(encoding="utf-8", errors="replace") as log_file:
@@ -552,9 +522,7 @@ def parse_scaling_events(
     action_indices: dict[tuple[int, str], int] = defaultdict(int)
     events: list[ScalingEvent] = []
     for timestamp, decision_id, action, succeeded, actual_actions in completions:
-        matching = [
-            item for item in accepted_actions.get(decision_id, ()) if item[1] == action
-        ]
+        matching = [item for item in accepted_actions.get(decision_id, ()) if item[1] == action]
         key = (decision_id, action)
         action_index = action_indices[key]
         action_indices[key] += 1
@@ -583,10 +551,7 @@ def parse_awake_gpus(path: Path, origin: datetime, end: datetime) -> list[AwakeP
                     continue
                 if not isinstance(by_role, dict):
                     continue
-                counts = {
-                    role: int(_safe_float(by_role.get(role))) * TP_SIZE[role]
-                    for role in ROLES
-                }
+                counts = {role: int(_safe_float(by_role.get(role))) * TP_SIZE[role] for role in ROLES}
                 if timestamp < origin:
                     last_before_origin = (timestamp, counts)
                 elif timestamp <= end:
@@ -601,11 +566,7 @@ def parse_awake_gpus(path: Path, origin: datetime, end: datetime) -> list[AwakeP
 
     if not awake_events:
         raise RuntimeError(f"No awake-instance summaries found in {path}")
-    current_awake = (
-        last_before_origin[1]
-        if last_before_origin is not None
-        else {role: 0 for role in ROLES}
-    )
+    current_awake = last_before_origin[1] if last_before_origin is not None else {role: 0 for role in ROLES}
     current_trainer = 0
     trainer_events.sort(key=lambda item: item[0])
     trainer_index = 0
@@ -618,10 +579,7 @@ def parse_awake_gpus(path: Path, origin: datetime, end: datetime) -> list[AwakeP
         )
     ]
     for timestamp, counts in awake_events:
-        while (
-            trainer_index < len(trainer_events)
-            and trainer_events[trainer_index][0] <= timestamp
-        ):
+        while trainer_index < len(trainer_events) and trainer_events[trainer_index][0] <= timestamp:
             current_trainer = trainer_events[trainer_index][1]
             trainer_index += 1
         current_awake = counts
@@ -642,9 +600,7 @@ def _select_samples(data: RunData, step_range: tuple[int, int] | None) -> RunDat
     start, end = step_range
     samples = tuple(sample for sample in data.samples if start <= sample.step <= end)
     if not samples:
-        raise RuntimeError(
-            f"{data.label} has no samples in requested steps {start}-{end}"
-        )
+        raise RuntimeError(f"{data.label} has no samples in requested steps {start}-{end}")
     return RunData(data.label, data.origin, samples, data.waiting_recorded)
 
 
@@ -653,11 +609,7 @@ def _time_minutes(origin: datetime, timestamps: Iterable[datetime]) -> list[floa
 
 
 def _selected_time_bounds(runs: Sequence[RunData]) -> tuple[float, float]:
-    values = [
-        (sample.timestamp - run.origin).total_seconds() / 60.0
-        for run in runs
-        for sample in run.samples
-    ]
+    values = [(sample.timestamp - run.origin).total_seconds() / 60.0 for run in runs for sample in run.samples]
     left = min(values)
     if any(sample.step == 1 for run in runs for sample in run.samples):
         left = min(0.0, left)
@@ -696,9 +648,7 @@ def _build_broken_time_axis(
     activity.extend(
         minute
         for event in events
-        if activity_xlim[0]
-        <= (minute := (event.timestamp - origin).total_seconds() / 60.0)
-        <= activity_xlim[1]
+        if activity_xlim[0] <= (minute := (event.timestamp - origin).total_seconds() / 60.0) <= activity_xlim[1]
     )
     activity = sorted(set(activity))
     if not activity or compression_ratio >= 1.0:
@@ -809,9 +759,7 @@ def _scaling_handles(events: Sequence[ScalingEvent]):
                 linestyle="None",
                 markersize=6,
                 label=(
-                    f"{ROLE_LABEL[event.role]} "
-                    f"{'scale-up' if event.action == 'scale_up' else 'scale-down'} "
-                    "completed"
+                    f"{ROLE_LABEL[event.role]} {'scale-up' if event.action == 'scale_up' else 'scale-down'} completed"
                 ),
             )
         )
@@ -824,11 +772,7 @@ def _mark_scaling_events(
     origin: datetime,
     xlim: tuple[float, float],
 ) -> list[ScalingEvent]:
-    visible = [
-        event
-        for event in events
-        if xlim[0] <= (event.timestamp - origin).total_seconds() / 60.0 <= xlim[1]
-    ]
+    visible = [event for event in events if xlim[0] <= (event.timestamp - origin).total_seconds() / 60.0 <= xlim[1]]
     for event in visible:
         x = (event.timestamp - origin).total_seconds() / 60.0
         color = ROLE_COLOR[event.role]
@@ -901,9 +845,7 @@ def plot_throughput(
         _style_axis(axis, f"{ylabel}\n(tokens/s)")
 
     elastic_event_xlim = _selected_time_bounds((runs[0],))
-    visible_events = _mark_scaling_events(
-        axes, events, runs[0].origin, elastic_event_xlim
-    )
+    visible_events = _mark_scaling_events(axes, events, runs[0].origin, elastic_event_xlim)
     _configure_time_axis(axes, time_axis)
     handles, labels = axes[0].get_legend_handles_labels()
     handles.extend(_scaling_handles(visible_events))
@@ -917,12 +859,9 @@ def plot_throughput(
         fontsize=8.5,
     )
     axes[-1].set_xlabel(_time_axis_label(time_axis))
-    step_text = (
-        "" if step_range is None else f" | steps {step_range[0]}-{step_range[1]}"
-    )
+    step_text = "" if step_range is None else f" | steps {step_range[0]}-{step_range[1]}"
     fig.suptitle(
-        "32-GPU Case Study: Qwen2.5-7B + Qwen3-30B-A3B\n"
-        f"Throughput vs time{step_text}",
+        f"32-GPU Case Study: Qwen2.5-7B + Qwen3-30B-A3B\nThroughput vs time{step_text}",
         fontsize=13,
     )
     fig.tight_layout(rect=(0, 0, 1, 0.96))
@@ -1007,9 +946,7 @@ def plot_awake_gpus(
         ncol=2,
         fontsize=8.5,
     )
-    step_text = (
-        "" if step_range is None else f" | steps {step_range[0]}-{step_range[1]}"
-    )
+    step_text = "" if step_range is None else f" | steps {step_range[0]}-{step_range[1]}"
     axis.set_title(f"Elastic awake GPUs by role vs time{step_text}")
     fig.tight_layout()
     _save_figure(fig, output_stem, formats, dpi)
@@ -1073,9 +1010,7 @@ def plot_sequences(
             color="#666666",
         )
     elastic_event_xlim = _selected_time_bounds((runs[0],))
-    visible_events = _mark_scaling_events(
-        axes, events, runs[0].origin, elastic_event_xlim
-    )
+    visible_events = _mark_scaling_events(axes, events, runs[0].origin, elastic_event_xlim)
     _configure_time_axis(axes, time_axis)
     handles, labels = axes[0].get_legend_handles_labels()
     scale_handles = _scaling_handles(visible_events)
@@ -1090,9 +1025,7 @@ def plot_sequences(
         fontsize=8.2,
     )
     axes[-1].set_xlabel(_time_axis_label(time_axis))
-    step_text = (
-        "" if step_range is None else f" | steps {step_range[0]}-{step_range[1]}"
-    )
+    step_text = "" if step_range is None else f" | steps {step_range[0]}-{step_range[1]}"
     fig.suptitle(
         "32-GPU Case Study: sequence pressure vs time" + step_text,
         fontsize=13,
@@ -1127,23 +1060,13 @@ def export_run_csv(data: RunData, path: Path) -> None:
                     f"{sample.harmonic_throughput:.6f}",
                     f"{sample.rollout_running:.6f}",
                     f"{sample.genrm_running:.6f}",
-                    (
-                        f"{sample.rollout_waiting:.6f}"
-                        if math.isfinite(sample.rollout_waiting)
-                        else ""
-                    ),
-                    (
-                        f"{sample.genrm_waiting:.6f}"
-                        if math.isfinite(sample.genrm_waiting)
-                        else ""
-                    ),
+                    (f"{sample.rollout_waiting:.6f}" if math.isfinite(sample.rollout_waiting) else ""),
+                    (f"{sample.genrm_waiting:.6f}" if math.isfinite(sample.genrm_waiting) else ""),
                 )
             )
 
 
-def export_awake_csv(
-    points: Sequence[AwakePoint], origin: datetime, path: Path
-) -> None:
+def export_awake_csv(points: Sequence[AwakePoint], origin: datetime, path: Path) -> None:
     with path.open("w", encoding="utf-8", newline="") as csv_file:
         writer = csv.writer(csv_file)
         writer.writerow(("wall_time_s", "rollout_gpus", "genrm_gpus", "trainer_gpus"))
@@ -1158,9 +1081,7 @@ def export_awake_csv(
             )
 
 
-def export_scaling_csv(
-    events: Sequence[ScalingEvent], origin: datetime, path: Path
-) -> None:
+def export_scaling_csv(events: Sequence[ScalingEvent], origin: datetime, path: Path) -> None:
     with path.open("w", encoding="utf-8", newline="") as csv_file:
         writer = csv.writer(csv_file)
         writer.writerow(("wall_time_s", "role", "action", "num_instances"))
@@ -1178,9 +1099,7 @@ def export_scaling_csv(
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--elastic-run-dir", type=Path, default=DEFAULT_ELASTIC_DIR)
-    parser.add_argument(
-        "--disaggregated-run-dir", type=Path, default=DEFAULT_DISAGGREGATED_DIR
-    )
+    parser.add_argument("--disaggregated-run-dir", type=Path, default=DEFAULT_DISAGGREGATED_DIR)
     parser.add_argument(
         "--disaggregated-router-backlog-csv",
         type=Path,
@@ -1217,10 +1136,7 @@ def _parse_args() -> argparse.Namespace:
         "--idle-compression-ratio",
         type=float,
         default=DEFAULT_IDLE_COMPRESSION_RATIO,
-        help=(
-            "Displayed width / elapsed width for idle intervals "
-            f"(default: {DEFAULT_IDLE_COMPRESSION_RATIO})."
-        ),
+        help=(f"Displayed width / elapsed width for idle intervals (default: {DEFAULT_IDLE_COMPRESSION_RATIO})."),
     )
     parser.add_argument(
         "--no-broken-time-axis",
@@ -1234,9 +1150,7 @@ def main() -> None:
     args = _parse_args()
     if (args.step_start is None) != (args.step_end is None):
         raise SystemExit("--step-start and --step-end must be specified together")
-    if args.step_start is not None and (
-        args.step_start <= 0 or args.step_start > args.step_end
-    ):
+    if args.step_start is not None and (args.step_start <= 0 or args.step_start > args.step_end):
         raise SystemExit("Step range must satisfy 1 <= --step-start <= --step-end")
     step_range = None if args.step_start is None else (args.step_start, args.step_end)
     formats = tuple(item.strip().lower() for item in args.formats.split(",") if item)
@@ -1253,11 +1167,7 @@ def main() -> None:
     for run_dir in (elastic_dir, disaggregated_dir):
         if not run_dir.is_dir():
             raise SystemExit(f"Run directory not found: {run_dir}")
-    backlog_csv = (
-        args.disaggregated_router_backlog_csv.resolve()
-        if args.disaggregated_router_backlog_csv
-        else None
-    )
+    backlog_csv = args.disaggregated_router_backlog_csv.resolve() if args.disaggregated_router_backlog_csv else None
     if backlog_csv is not None and not backlog_csv.is_file():
         raise SystemExit(f"Router backlog CSV not found: {backlog_csv}")
 
@@ -1265,12 +1175,8 @@ def main() -> None:
     disaggregated_origin = parse_first_step_start(disaggregated_dir)
     executor_path = elastic_dir / "ElasticExecutor.log"
     elastic_step_ends = parse_elastic_step_ends(executor_path)
-    disaggregated_boundaries = parse_disaggregated_boundaries(
-        disaggregated_dir / "MainRayTrainer.log"
-    )
-    elastic = parse_elastic_samples(
-        elastic_dir / "ElasticMonitor.log", elastic_origin, elastic_step_ends
-    )
+    disaggregated_boundaries = parse_disaggregated_boundaries(disaggregated_dir / "MainRayTrainer.log")
+    elastic = parse_elastic_samples(elastic_dir / "ElasticMonitor.log", elastic_origin, elastic_step_ends)
     disaggregated = parse_disaggregated_samples(
         disaggregated_dir,
         disaggregated_origin,
@@ -1278,9 +1184,7 @@ def main() -> None:
         backlog_csv,
     )
     events = parse_scaling_events(executor_path, elastic_origin, elastic_step_ends[-1])
-    awake_points = parse_awake_gpus(
-        executor_path, elastic_origin, elastic_step_ends[-1]
-    )
+    awake_points = parse_awake_gpus(executor_path, elastic_origin, elastic_step_ends[-1])
 
     selected_runs = (
         _select_samples(elastic, step_range),
@@ -1315,12 +1219,8 @@ def main() -> None:
 
     export_run_csv(elastic, output_dir / "elastic_timeseries.csv")
     export_run_csv(disaggregated, output_dir / "disaggregated_timeseries.csv")
-    export_awake_csv(
-        awake_points, elastic_origin, output_dir / "elastic_awake_gpus.csv"
-    )
-    export_scaling_csv(
-        events, elastic_origin, output_dir / "elastic_scaling_events.csv"
-    )
+    export_awake_csv(awake_points, elastic_origin, output_dir / "elastic_awake_gpus.csv")
+    export_scaling_csv(events, elastic_origin, output_dir / "elastic_scaling_events.csv")
 
     plot_throughput(
         selected_runs,

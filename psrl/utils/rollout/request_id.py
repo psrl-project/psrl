@@ -2,7 +2,7 @@
 
 vLLM V1 ``InputProcessor.assign_request_id`` rewrites externally supplied IDs to
 ``{external_req_id}-{random_uuid()[:8]}`` (8 hex chars) for uniqueness. PSRL
-tracks active generation tasks by integer ``uid`` from the data pipeline; scheduler
+tracks active generation tasks by integer ``uid`` from the data pipeline. scheduler
 stats and ABORT commands use the internal vLLM id string.
 """
 
@@ -27,7 +27,7 @@ def parse_psrl_uid_from_request_id(request_id: int | str) -> int | str:
     Examples:
         973 -> 973
         "973" -> 973
-        "973-8d745705" -> 973  (vLLM internal id; external part is PSRL uid)
+        "973-8d745705" -> 973 (vLLM internal id. external part is PSRL uid)
     """
     if isinstance(request_id, int):
         return request_id

@@ -41,9 +41,7 @@ val_datas:
         reward_model_name: null
         reward_coef: 1.0
 
-# Maximum prompt length. All prompts will be left-padded to this length.
-# An error will be reported if the length is too long.
-# oc.select: default val for rollout.prompt_length
+# Left-pad prompts to this maximum length. Reject longer prompts.
 max_prompt_length: 512
 
 # Maximum response length. Rollout in RL algorithms (e.g. PPO) generates up to this length.
@@ -56,9 +54,7 @@ train_batch_size: 1024
 # Batch size used during validation. Can be null.
 val_batch_size: null
 
-# Whether to return the original input_ids without adding chat template.
-# This is used when the reward model's chat template differs from the policy.
-# If using a model-based RM with different templates, this should be True.
+# Keep original input IDs when the reward model uses a different chat template.
 return_raw_input_ids: False
 
 # Whether to return the original chat (prompt) without applying chat template.

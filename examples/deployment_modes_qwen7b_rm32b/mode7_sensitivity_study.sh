@@ -1,25 +1,14 @@
 #!/usr/bin/env bash
-# Mode 7 — ITL decision-window sensitivity on the Qwen2.5-7B (TP1) + Qwen3-30B-A3B
-# (TP4) setting from this directory's _common_deployment.sh.
-# Topology: 4 nodes (2 train + 2 shared).
+# Mode 7 sweeps ITL decision windows for Qwen2.5-7B and Qwen3-30B-A3B on two trainer and two shared nodes.
 #
-# Switches (env vars):
-#   POLICY=throughput-optimal|rule-based
-#   USE_COST_MODEL=1|0              use fitted ITL cost model for throughput
-#   USE_REBALANCE=1|0               post-scale-up ABORT (request-level simulator)
-#   INTERRUPT_VLLM_WAITING=1|0      periodic waiting-queue ABORT (policy-independent)
-#   DECISION_WINDOW_S=<float>       ITL planner horizon in seconds (baseline 30.0)
+# Set `DECISION_WINDOW_S` for the planner horizon. Policy, cost-model, rebalance, and waiting-abort flags also apply.
 #
 # USE_REBALANCE=1 requires POLICY=throughput-optimal. USE_REBALANCE=0 only skips
-# post-scale-up ABORT; ITL candidate scoring still uses request-level evaluation.
+# post-scale-up ABORT. ITL candidate scoring still uses request-level evaluation.
 #
-# Recommended sweep: 5.0, 10.0, 20.0, 30.0, 60.0, 90.0.
-# If experiment capacity is limited, use 10.0, 30.0, 60.0.
-# Run one value at a time so experiments do not share the same Ray cluster.
+# Sweep windows of 5, 10, 20, 30, 60, and 90 seconds. Run one value at a time per Ray cluster.
 #
-# Usage (30-second baseline):
-#   DECISION_WINDOW_S=30.0 \
-#     bash mode7_sensitivity_study.sh [smoke_test=0] [extra hydra overrides...]
+# Run `bash examples/deployment_modes_qwen7b_rm32b/mode7_sensitivity_study.sh` with `DECISION_WINDOW_S=30.0`.
 set -euo pipefail
 
 _normalize_bool() {
@@ -84,7 +73,7 @@ shift || true
 
 COST_MODEL_DIR=/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/trainer/config/cost_model
 # Rollout routing in parent _common_deployment.sh points at qwen2.5_1.5b.json.
-# This folder's model is Qwen2.5-7B; pass the matching file last so it wins.
+# This folder's model is Qwen2.5-7B. pass the matching file last so it wins.
 ROLLOUT_COST_MODEL="${COST_MODEL_DIR}/qwen2.5_7b.json"
 RM_COST_MODEL="${COST_MODEL_DIR}/qwen3_30b_a3b_thinking_2507.json"
 

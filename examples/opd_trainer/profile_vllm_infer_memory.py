@@ -44,7 +44,10 @@ def parse_args() -> argparse.Namespace:
         "--response-len",
         type=int,
         default=None,
-        help="Trailing tokens to score via prompt_logprobs. Default: seq_len - prompt_len (or seq_len-1 if prompt_len=0).",
+        help=(
+            "Trailing tokens to score via prompt_logprobs. "
+            "Default: seq_len - prompt_len (or seq_len-1 if prompt_len=0)."
+        ),
     )
     parser.add_argument("--tp-size", type=int, default=1, help="vLLM tensor_parallel_size.")
     parser.add_argument(

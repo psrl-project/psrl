@@ -93,10 +93,7 @@ class WeightArenaHandle:
                 "Model weights escaped the weight arena after materialization: "
                 f"count={len(outside_bindings)} first_bindings={outside_bindings[:8]}."
             )
-        # Empty tensors have no registered storage and are intentionally not
-        # returned by _collect_module_bindings; a loader may materialize one
-        # later without changing the NIXL-visible weight set. New non-empty
-        # bindings still cannot be introduced without being detected above.
+        # Empty tensors have no registered storage and may materialize later. Detect any new non-empty model bindings.
         if binding_count > self.stats.tensor_binding_count:
             raise RuntimeError(
                 "Model weight binding count changed after arena materialization: "
@@ -358,9 +355,7 @@ def prepare_module_for_direct_fsdp2_weight_arena(
             f"device_counts={dict(sorted(device_counts.items()))}."
         )
 
-    # CPU state_dict tensors retain their original storages after to_empty(),
-    # so they remain available to set_model_state_dict(). An all-meta receiving
-    # rank is already in the desired layout and must not be rematerialized.
+    # CPU state-dict tensors retain storage across `to_empty`. Do not rematerialize receiving ranks already on meta.
     if device_counts.get("cpu", 0):
         module.to_empty(device="meta")
 
@@ -606,7 +601,7 @@ def materialize_module_weights_in_arena(
     """Materialize meta/CPU parameters and buffers directly into arena allocations.
 
     Existing Tensor objects are preserved with ``swap_tensors``. CPU storages are
-    copied directly into their final arena ranges; meta storages are left
+    copied directly into their final arena ranges. meta storages are left
     uninitialized for the caller's normal weight loader to populate.
     """
     _validate_config(max_chunk_bytes, alignment_bytes)
@@ -733,7 +728,7 @@ def materialize_fsdp2_model_weights_in_arena(
 
     Parameter shards must still be CPU/meta so direct mode never retains an old
     CUDA weight allocation. FSDP may independently move small module buffers to
-    the target CUDA device while sharding; preserve those values while rebinding
+    the target CUDA device while sharding. preserve those values while rebinding
     them into the arena. Non-persistent buffers are restored again after the
     initial NIXL pull because they are not part of the transferred state dict.
     """
@@ -1018,7 +1013,7 @@ def _weight_tms_pool_key(mem_pools: dict, tms_tag: str, enable_cpu_backup: bool)
 
     TMS keeps separate pools for the same tag depending on whether CPU backup
     is enabled. The caller must select the setting used by the worker's model
-    allocation context; a same-tag pool with the opposite setting belongs to a
+    allocation context. a same-tag pool with the opposite setting belongs to a
     different allocation class and must remain untouched.
     """
     pool_key = (tms_tag, bool(enable_cpu_backup))
@@ -1070,9 +1065,7 @@ def _pack_named_tensors_in_fresh_tms_pool(
             f"tag={tms_tag!r} pool_key={source_pool_key!r} pool_use_count={source_pool_use_count}."
         )
 
-    # Complete all validation before releasing the source pool object. Every
-    # model storage must come from that pool; otherwise the TMS allocation
-    # lifetime assumptions below do not hold.
+    # Validate that every model storage belongs to the source pool before releasing it, preserving TMS lifetimes.
     _validate_config(max_chunk_bytes, alignment_bytes)
     source_groups = _group_bindings(named_tensors, alignment_bytes, require_cuda)
     model_source_allocations = {
@@ -1119,9 +1112,7 @@ def _pack_named_tensors_in_fresh_tms_pool(
 
     torch.cuda.synchronize()
     gc.collect()
-    # Swapping the pool after every binding has moved releases the old pool's
-    # inactive cache. Live non-model allocations keep their TMS metadata and
-    # remain pauseable after the MemPool object is destroyed.
+    # Release the old pool only after every binding moves. Live non-model allocations retain their TMS metadata.
     _install_packed_tms_pool(impl._mem_pools, source_pool_key, arena_pool)
     del source_pool
     gc.collect()

@@ -108,7 +108,7 @@ python -m uv pip install -r requirements/build/cuda.txt
 python -m uv pip install --no-build-isolation -e .
 popd
 
-# Qwen3.5 model configs require Transformers 5.x; reinstall after vLLM dependencies.
+# Qwen3.5 model configs require Transformers 5.x. reinstall after vLLM dependencies.
 python -m uv pip install "transformers[hf_xet]==5.5.0"
 
 if [ -z "$VERL_PATH" ]; then
@@ -137,9 +137,6 @@ popd
 
 echo "8. Apply patch for dependencies..."
 
-# bash "$PSRL_PATH/patch/apply_patch.sh" vllm
-# bash "$PSRL_PATH/patch/apply_patch.sh" verl
-# bash "$PSRL_PATH/patch/apply_patch.sh" transfer_queue
 
 echo "9. Install torch_memory_saver"
 python -m uv pip install git+https://github.com/fzyzcjy/torch_memory_saver.git@d64a6394d1e09c613fab90260054cecc2684586d --no-cache-dir --force-reinstall

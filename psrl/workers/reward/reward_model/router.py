@@ -31,9 +31,7 @@ psrl_logger = logging.getLogger("reward_model_router")
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
 
 
-# ---------------------------------------------------------------------------
-# Strategy registry
-# ---------------------------------------------------------------------------
+# --- Strategy registry ---
 _RM_ROUTE_STRATEGY_REGISTRY: dict[str, type["RewardModelRouteStrategyBase"]] = {}
 
 
@@ -91,9 +89,7 @@ def _request_token_num(request: DataProto) -> int:
     return 0
 
 
-# ---------------------------------------------------------------------------
-# Strategy base + implementations
-# ---------------------------------------------------------------------------
+# --- Strategy implementations ---
 class RewardModelRouteStrategyBase(ABC):
     """Base class for reward-model routing strategies.
 
@@ -109,7 +105,8 @@ class RewardModelRouteStrategyBase(ABC):
         self.logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
         self.instance_to_engine_status = {
             i: EngineStats(
-                instance_id=i,
+                replica_idx=i,
+                data_parallel_rank=0,
                 model_version=0,
                 snapshot=EngineStats.get_default_snapshot(),
             )
@@ -131,12 +128,15 @@ class RewardModelRouteStrategyBase(ABC):
 
     def update_instance_loads(self, instance_to_load: dict[int, int]) -> None:
         """Update local load counters from router-side probes."""
+        return None
 
     def push_request(self, request: DataProto, instance_id: int) -> None:
         """Record a routed request."""
+        return None
 
     def pop_request(self, request: DataProto, instance_id: int) -> None:
         """Record a finished request."""
+        return None
 
     def force_route_unchecked(self, request: DataProto, instance_id: int) -> int:
         """Record a simulation-selected route without applying admission rules."""
@@ -281,7 +281,7 @@ class ITLBalanceRewardModelRouteStrategy(RewardModelRouteStrategyBase):
         )
         if best_idx is None:
             self.logger.warning(
-                "[router] No reward workers under ITL threshold %s; active_loads=%s.",
+                "[router] No reward workers under ITL threshold %s. active_loads=%s.",
                 self._itl_max_itl,
                 active_loads,
             )
@@ -319,9 +319,7 @@ class CostModelBasedRewardModelRouteStrategy(RewardModelRouteStrategyBase):
             if tp_pp not in self.cost_model:
                 raise ValueError(f"tp_pp {tp_pp!r} is not in cost model.")
 
-        self.max_num_waiting_reqs_after_preemption = int(
-            self.strategy_kwargs["max_num_waiting_reqs_after_preemption"]
-        )
+        self.max_num_waiting_reqs_after_preemption = int(self.strategy_kwargs["max_num_waiting_reqs_after_preemption"])
         self.max_concurrent_seqs_per_instance = int(self.strategy_kwargs["max_concurrent_seqs_per_instance"])
         self.delta_throughput_threshold = float(self.strategy_kwargs["delta_throughput_threshold"])
         self.logging_interval_s = float(self.strategy_kwargs.get("logging_interval_in_ms", 1000)) / 1000.0
@@ -336,11 +334,7 @@ class CostModelBasedRewardModelRouteStrategy(RewardModelRouteStrategyBase):
         self.instance_to_running_request_num = {i: 0 for i in range(self.n_instances)}
         self.instance_to_waiting_request_num = {i: 0 for i in range(self.n_instances)}
         self.instance_to_token_num = {i: 0 for i in range(self.n_instances)}
-        # Cost-model strategies need engine-status snapshots (token / waiting
-        # queue) to estimate throughput correctly. Until the coordinator pushes
-        # real snapshots via ``update_instance_to_engine_status``, fall back to
-        # load-based eager dispatch so requests are never stranded in the router
-        # queue (see ``_route_blind``).
+        # Use load-based dispatch until engine snapshots arrive so cost-model routing cannot strand pending requests.
         self._has_engine_status = False
 
     def _get_request_token_num(self, request: DataProto, log_len: bool = False) -> int:
@@ -403,13 +397,11 @@ class CostModelBasedRewardModelRouteStrategy(RewardModelRouteStrategyBase):
         for idx in candidates:
             idx = int(idx)
             parts.append(
-                (
-                    f"{idx}:req={self.instance_to_request_num.get(idx, 0)},"
-                    f"run={self.instance_to_running_request_num.get(idx, 0)},"
-                    f"wait={self.instance_to_waiting_request_num.get(idx, 0)},"
-                    f"tok={self.instance_to_token_num.get(idx, 0)},"
-                    f"max={self.instance_to_max_model_len.get(idx, 0)}"
-                )
+                f"{idx}:req={self.instance_to_request_num.get(idx, 0)},"
+                f"run={self.instance_to_running_request_num.get(idx, 0)},"
+                f"wait={self.instance_to_waiting_request_num.get(idx, 0)},"
+                f"tok={self.instance_to_token_num.get(idx, 0)},"
+                f"max={self.instance_to_max_model_len.get(idx, 0)}"
             )
         return "; ".join(parts)
 
@@ -458,13 +450,7 @@ class CostModelBasedRewardModelRouteStrategy(RewardModelRouteStrategyBase):
         instance_id = int(instance_id)
         self.instance_to_request_num[instance_id] += 1
         self.instance_to_running_request_num[instance_id] += 1
-        # Only maintain a router-side token estimate when no engine-status
-        # snapshots are available. Once the coordinator pushes real snapshots
-        # (``_has_engine_status``), ``instance_to_token_num`` is the engine
-        # truth refreshed every coordinator sync; accumulating per-dispatch
-        # token estimates here would inflate it within a greedy batch and make
-        # ``_can_run_directly`` falsely refuse dispatch while the real worker
-        # still has kv-cache headroom.
+        # Estimate tokens only before engine snapshots arrive. Adding estimates to snapshots double-counts dispatches.
         if not self._has_engine_status:
             self.instance_to_token_num[instance_id] += self._get_request_token_num(request)
 
@@ -476,7 +462,9 @@ class CostModelBasedRewardModelRouteStrategy(RewardModelRouteStrategyBase):
     def pop_request(self, request: DataProto, instance_id: int) -> None:
         instance_id = int(instance_id)
         self.instance_to_request_num[instance_id] = max(0, self.instance_to_request_num[instance_id] - 1)
-        self.instance_to_running_request_num[instance_id] = max(0, self.instance_to_running_request_num[instance_id] - 1)
+        self.instance_to_running_request_num[instance_id] = max(
+            0, self.instance_to_running_request_num[instance_id] - 1
+        )
         if not self._has_engine_status:
             self.instance_to_token_num[instance_id] = max(
                 0,
@@ -514,10 +502,9 @@ class ThroughputOptimalRewardModelRouteStrategy(CostModelBasedRewardModelRouteSt
             if self.instance_to_token_num[candidate] + request_token_num > self.instance_to_max_model_len[candidate]:
                 token_blocked += 1
                 continue
-            delta_throughput = (
-                self._estimate_curr_throughput_after_route_request(request, candidate)
-                - self._estimate_curr_throughput(candidate)
-            )
+            delta_throughput = self._estimate_curr_throughput_after_route_request(
+                request, candidate
+            ) - self._estimate_curr_throughput(candidate)
             if delta_throughput > best_delta_throughput:
                 best_delta_throughput = delta_throughput
                 best_candidate = candidate
@@ -535,16 +522,11 @@ class ThroughputOptimalRewardModelRouteStrategy(CostModelBasedRewardModelRouteSt
 
         threshold = self._estimate_baseline_delta_throughput(request, best_candidate) * self.delta_throughput_threshold
         best_request_num = self.instance_to_request_num[best_candidate]
-        if (
-            best_delta_throughput >= threshold
-            and best_request_num < self.max_concurrent_seqs_per_instance
-        ):
+        if best_delta_throughput >= threshold and best_request_num < self.max_concurrent_seqs_per_instance:
             self.push_request(request, best_candidate)
             return best_candidate
         reason = (
-            "marginal_throughput_below_threshold"
-            if best_delta_throughput < threshold
-            else "max_concurrent_seqs_cap"
+            "marginal_throughput_below_threshold" if best_delta_throughput < threshold else "max_concurrent_seqs_cap"
         )
         self._maybe_log_route_reject(
             reason,
@@ -600,10 +582,9 @@ class ThroughputOptimalRewardModelRouteStrategy(CostModelBasedRewardModelRouteSt
         instance_id = int(instance_id)
         if not self._can_run_directly(request, instance_id):
             return 0.0
-        delta_throughput = (
-            self._estimate_curr_throughput_after_route_request(request, instance_id)
-            - self._estimate_curr_throughput(instance_id)
-        )
+        delta_throughput = self._estimate_curr_throughput_after_route_request(
+            request, instance_id
+        ) - self._estimate_curr_throughput(instance_id)
         baseline = self._estimate_baseline_delta_throughput(request, instance_id) * self.delta_throughput_threshold
         if delta_throughput < baseline:
             return 0.0
@@ -639,9 +620,7 @@ class ThroughputOptimalWithBudgetRewardModelRouteStrategy(ThroughputOptimalRewar
         return token_num
 
 
-# ---------------------------------------------------------------------------
-# Router actor
-# ---------------------------------------------------------------------------
+# --- Router actor ---
 @ray.remote(concurrency_groups={"control": 5})
 class PSRL_RewardModelRouter:
     """Queue-based reward-model router with pluggable routing strategies.
@@ -667,17 +646,16 @@ class PSRL_RewardModelRouter:
         self.worker_handles = worker_handles
         self.worker_groups = worker_groups
         self.reward_model_config = reward_model_config
-        self.rollout_name = str(reward_model_config.rollout.name).lower() if reward_model_config is not None else "vllm"
+        self.rollout_name = (
+            str(reward_model_config.rollout.name).lower() if reward_model_config is not None else "vllm"
+        )
         self.request_counts = {i: 0 for i in range(len(worker_handles))}
         self.paused_worker_indices: set[int] = set()
         self.retry_delay = retry_delay
         self.request_futures: dict[str, asyncio.Future] = {}
         self.routing_status_update_queue: asyncio.Queue[None] = asyncio.Queue(maxsize=1)
         self.worker_probe_backoff_until: dict[int, float] = {}
-        # Min-heap items: (missing_flag, buffer_id, fifo_seq, request_key, request).
-        # missing_flag: 0 if buffer_id present (routed first), 1 if absent (demoted).
-        # buffer_id: normalized id for ordering (smaller first); 0 when missing_flag==1.
-        # fifo_seq: monotonic tie-break for FIFO among equal priority.
+        # Order heap entries by missing buffer ID, buffer ID, then FIFO sequence. Missing IDs sort after known IDs.
         self.requests_to_route: list[tuple[int, int, int, str, DataProto]] = []
         self.routing_lock = asyncio.Lock()
         self._is_routing = False
@@ -699,9 +677,7 @@ class PSRL_RewardModelRouter:
                     self.max_concurrent_requests_per_instance = cap
             except (TypeError, ValueError):
                 self.max_concurrent_requests_per_instance = None
-        self.worker_active_task_timeout_s = self._positive_float_config(
-            "router_active_task_timeout_s", 1.0
-        )
+        self.worker_active_task_timeout_s = self._positive_float_config("router_active_task_timeout_s", 1.0)
         self.worker_probe_backoff_s = self._positive_float_config(
             "router_worker_probe_backoff_s", max(1.0, self.worker_active_task_timeout_s)
         )
@@ -735,9 +711,7 @@ class PSRL_RewardModelRouter:
         self._load_cache_ts: float = -1.0
 
         # Strategy init.
-        self.route_strategy_config = route_strategy_config or _cfg_get(
-            reward_model_config, "routing_strategy", None
-        )
+        self.route_strategy_config = route_strategy_config or _cfg_get(reward_model_config, "routing_strategy", None)
         self.waiting_admission_cap: int | None = None
         raw_waiting_admission_cap = _cfg_get(
             self.route_strategy_config,
@@ -765,7 +739,7 @@ class PSRL_RewardModelRouter:
             "fallback": 0,
         }
         self._exclusive_rebalance_migration_queue_enabled = bool(
-            itl_cfg.get("exclusive_rebalance_migration_queue", False)
+            cost_cfg.get("exclusive_rebalance_migration_queue", False)
         )
         self._rebalance_requests_to_route: deque[tuple[str, DataProto]] = deque()
         self._rebalance_pending_request_ids: set[str] = set()
@@ -941,11 +915,7 @@ class PSRL_RewardModelRouter:
             self.route_strategy.update_instance_loads(active_loads)
 
             dispatched_any = False
-            while (
-                self.requests_to_route
-                and not self._interrupt_routing
-                and not self._exclusive_rebalance_active()
-            ):
+            while self.requests_to_route and not self._interrupt_routing and not self._exclusive_rebalance_active():
                 peeked_key, peeked_request = self._peek_request()
                 worker_idx = self._select_worker_for_request(peeked_request, active_loads)
                 if worker_idx is None:
@@ -984,7 +954,7 @@ class PSRL_RewardModelRouter:
         worker_idx: int,
         inflight_at_dispatch: int,
     ):
-        """Route one request to a selected worker; requeue when needed."""
+        """Route one request to a selected worker. requeue when needed."""
         if request_key not in self.request_futures:
             self._release_strategy_worker(request_key, request, worker_idx)
             for request_uid in self._request_uid_values(request):
@@ -1002,8 +972,7 @@ class PSRL_RewardModelRouter:
             exclusive_pending_uids = {
                 canonical_psrl_request_id(request_uid)
                 for request_uid in request_uid_values
-                if canonical_psrl_request_id(request_uid)
-                in getattr(self, "_rebalance_pending_request_ids", set())
+                if canonical_psrl_request_id(request_uid) in getattr(self, "_rebalance_pending_request_ids", set())
             }
             exclusive_enqueued = self._enqueue_exclusive_rebalance_request(request_key, request)
             if not exclusive_enqueued:
@@ -1055,8 +1024,7 @@ class PSRL_RewardModelRouter:
             exclusive_pending_uids = {
                 canonical_psrl_request_id(request_uid)
                 for request_uid in request_uid_values
-                if canonical_psrl_request_id(request_uid)
-                in getattr(self, "_rebalance_pending_request_ids", set())
+                if canonical_psrl_request_id(request_uid) in getattr(self, "_rebalance_pending_request_ids", set())
             }
             exclusive_enqueued = self._enqueue_exclusive_rebalance_request(request_key, request)
             for request_uid in request_uid_values:
@@ -1081,8 +1049,7 @@ class PSRL_RewardModelRouter:
             exclusive_pending_uids = {
                 canonical_psrl_request_id(request_uid)
                 for request_uid in request_uid_values
-                if canonical_psrl_request_id(request_uid)
-                in getattr(self, "_rebalance_pending_request_ids", set())
+                if canonical_psrl_request_id(request_uid) in getattr(self, "_rebalance_pending_request_ids", set())
             }
             exclusive_enqueued = self._enqueue_exclusive_rebalance_request(request_key, result)
             for request_uid in request_uid_values:
@@ -1126,7 +1093,7 @@ class PSRL_RewardModelRouter:
             elif completion_status == "missing_vllm_prefill" and migration_overhead is not None:
                 psrl_logger.warning(
                     "RM migration completion has no vLLM prefill metric: "
-                    "request=%s migration_id=%s network_s=%.6f; dropping terminal tracker state.",
+                    "request=%s migration_id=%s network_s=%.6f. dropping terminal tracker state.",
                     request_uid,
                     migration_overhead.get("migration_id"),
                     migration_overhead["network_s"],
@@ -1145,7 +1112,9 @@ class PSRL_RewardModelRouter:
         if self.rollout_name in ("transformers", "hf"):
             if self.worker_groups is None:
                 raise RuntimeError("Transformers reward routing requires worker_groups for all-rank execution.")
-            results = await asyncio.gather(*self.worker_groups[worker_idx].execute_all_async("generate_async", request))
+            results = await asyncio.gather(
+                *self.worker_groups[worker_idx].execute_all_async("generate_async", request)
+            )
             return self._select_rank_zero_result(results)
         return await worker_handle.generate_async.remote(request)
 
@@ -1172,8 +1141,7 @@ class PSRL_RewardModelRouter:
         return [
             idx
             for idx in self.request_counts
-            if idx not in self.paused_worker_indices
-            and self.worker_probe_backoff_until.get(idx, 0.0) <= now
+            if idx not in self.paused_worker_indices and self.worker_probe_backoff_until.get(idx, 0.0) <= now
         ]
 
     async def _get_cached_active_loads(self) -> dict[int, int]:
@@ -1189,15 +1157,8 @@ class PSRL_RewardModelRouter:
 
         now = time.monotonic()
         cache_fresh = (now - self._load_cache_ts) < self.load_cache_ttl_s
-        if (
-            cache_fresh
-            and self._load_cache
-            and all(idx in self._load_cache for idx in available_indices)
-        ):
-            return {
-                idx: max(0, self._load_cache[idx], self.request_counts.get(idx, 0))
-                for idx in available_indices
-            }
+        if cache_fresh and self._load_cache and all(idx in self._load_cache for idx in available_indices):
+            return {idx: max(0, self._load_cache[idx], self.request_counts.get(idx, 0)) for idx in available_indices}
 
         loads = await self._get_available_active_loads(available_indices)
         if loads:
@@ -1215,7 +1176,7 @@ class PSRL_RewardModelRouter:
             if isinstance(result, Exception):
                 self.worker_probe_backoff_until[idx] = time.monotonic() + self.worker_probe_backoff_s
                 psrl_logger.warning(
-                    "[router] Excluding worker %d because active task count fetch failed: %s; backoff=%.3fs",
+                    "[router] Excluding worker %d because active task count fetch failed: %s. backoff=%.3fs",
                     idx,
                     result,
                     self.worker_probe_backoff_s,
@@ -1224,16 +1185,13 @@ class PSRL_RewardModelRouter:
             active_loads[idx] = max(0, int(result), self.request_counts.get(idx, 0))
         return active_loads
 
-    def _select_worker_for_request(
-        self, request: DataProto, active_loads: dict[int, int]
-    ) -> int | None:
+    def _select_worker_for_request(self, request: DataProto, active_loads: dict[int, int]) -> int | None:
         """Select a worker for a specific request using the active strategy."""
         now = time.monotonic()
         candidates_loads = {
             idx: load
             for idx, load in active_loads.items()
-            if idx not in self.paused_worker_indices
-            and self.worker_probe_backoff_until.get(idx, 0.0) <= now
+            if idx not in self.paused_worker_indices and self.worker_probe_backoff_until.get(idx, 0.0) <= now
         }
         if self.waiting_admission_cap is not None:
             candidates_loads = {
@@ -1245,9 +1203,7 @@ class PSRL_RewardModelRouter:
             return None
         if self.max_concurrent_requests_per_instance is not None:
             candidates_loads = {
-                idx: load
-                for idx, load in candidates_loads.items()
-                if load < self.max_concurrent_requests_per_instance
+                idx: load for idx, load in candidates_loads.items() if load < self.max_concurrent_requests_per_instance
             }
         if not candidates_loads:
             return None
@@ -1273,7 +1229,7 @@ class PSRL_RewardModelRouter:
                 return int(destination)
             self._planned_migration_counters["fallback"] += len(request_uids)
             psrl_logger.info(
-                "Planned RM migration target invalid; request=%s destinations=%s candidates=%s. "
+                "Planned RM migration target invalid. request=%s destinations=%s candidates=%s. "
                 "Falling back immediately.",
                 self._format_request_uids(request),
                 sorted(planned_destinations),
@@ -1399,7 +1355,7 @@ class PSRL_RewardModelRouter:
             len(self._rebalance_pending_request_ids),
         )
         if not self._rebalance_pending_request_ids:
-            psrl_logger.info("Exclusive RM rebalance completed; resuming normal routing.")
+            psrl_logger.info("Exclusive RM rebalance completed. resuming normal routing.")
         self._signal_routing_update()
 
     def _enqueue_exclusive_rebalance_request(self, request_key: str, request: DataProto) -> bool:
@@ -1417,11 +1373,9 @@ class PSRL_RewardModelRouter:
             for uid in pending_uids
             if uid in self._planned_migration_destinations
         }
-        if len(destinations) != 1 or any(
-            uid not in self._planned_migration_destinations for uid in pending_uids
-        ):
+        if len(destinations) != 1 or any(uid not in self._planned_migration_destinations for uid in pending_uids):
             psrl_logger.error(
-                "Exclusive RM rebalance cannot resolve one simulated destination for request=%s; "
+                "Exclusive RM rebalance cannot resolve one simulated destination for request=%s. "
                 "returning it to normal routing. destinations=%s",
                 self._format_request_uids(request),
                 sorted(destinations),
@@ -1501,8 +1455,8 @@ class PSRL_RewardModelRouter:
                 except Exception:
                     self._enqueue_request(request_key, request)
                     psrl_logger.exception(
-                        "Exclusive RM rebalance normal fallback failed; request=%s destinations=%s "
-                        "requeued to normal routing; migration timing discarded.",
+                        "Exclusive RM rebalance normal fallback failed. request=%s destinations=%s "
+                        "requeued to normal routing. migration timing discarded.",
                         self._format_request_uids(request),
                         sorted(planned_destinations),
                     )
@@ -1511,7 +1465,7 @@ class PSRL_RewardModelRouter:
                 if fallback_destination is None:
                     self._enqueue_request(request_key, request)
                     psrl_logger.warning(
-                        "Exclusive RM rebalance destination unreachable; request=%s destinations=%s "
+                        "Exclusive RM rebalance destination unreachable. request=%s destinations=%s "
                         "normal strategy found no route, requeued to normal routing.",
                         self._format_request_uids(request),
                         sorted(planned_destinations),
@@ -1535,8 +1489,8 @@ class PSRL_RewardModelRouter:
                 task.add_done_callback(lambda future: future.result())
                 self._is_routing = True
                 psrl_logger.warning(
-                    "Exclusive RM rebalance destination unreachable; request=%s destinations=%s "
-                    "fell back to normal destination=%s; migration timing discarded.",
+                    "Exclusive RM rebalance destination unreachable. request=%s destinations=%s "
+                    "fell back to normal destination=%s. migration timing discarded.",
                     self._format_request_uids(request),
                     sorted(planned_destinations),
                     fallback_destination,
@@ -1559,7 +1513,7 @@ class PSRL_RewardModelRouter:
             self._is_routing = True
             dispatched_any = True
             # Preserve FIFO dispatch order through the asynchronous worker
-            # handoff; the next item is released after redispatch settles.
+            # handoff. the next item is released after redispatch settles.
             break
         return dispatched_any
 
@@ -1791,27 +1745,16 @@ class PSRL_RewardModelRouter:
         inflight_route_order = total_pending
         for instance_id in sorted(self.request_counts):
             engine_status = self.instance_to_engine_status.get(instance_id)
-            scheduler_stats = (
-                engine_status.snapshot.get("scheduler_stats", {})
-                if engine_status is not None
-                else {}
-            )
+            scheduler_stats = engine_status.snapshot.get("scheduler_stats", {}) if engine_status is not None else {}
             prompt_map = {
                 str(request_id): int(value)
-                for request_id, value in (
-                    scheduler_stats.get("req_id_to_prompt_token_num", {}) or {}
-                ).items()
+                for request_id, value in (scheduler_stats.get("req_id_to_prompt_token_num", {}) or {}).items()
             }
             response_map = {
                 str(request_id): int(value)
-                for request_id, value in (
-                    scheduler_stats.get("req_id_to_response_token_num", {}) or {}
-                ).items()
+                for request_id, value in (scheduler_stats.get("req_id_to_response_token_num", {}) or {}).items()
             }
-            waiting_ids = {
-                str(request_id)
-                for request_id in scheduler_stats.get("req_id_in_waiting", []) or []
-            }
+            waiting_ids = {str(request_id) for request_id in scheduler_stats.get("req_id_in_waiting", []) or []}
             request_rows = []
             for request_uid in sorted(set(prompt_map) | set(response_map)):
                 request = request_by_uid.get(canonical_psrl_request_id(request_uid))
@@ -1822,8 +1765,7 @@ class PSRL_RewardModelRouter:
                         "seq_len": (
                             self._request_token_num(request)
                             if request is not None
-                            else prompt_map.get(request_uid, 0)
-                            + response_map.get(request_uid, 0)
+                            else prompt_map.get(request_uid, 0) + response_map.get(request_uid, 0)
                         ),
                         "source_instance_id": instance_id,
                         "is_waiting": request_uid in waiting_ids,
@@ -1840,9 +1782,7 @@ class PSRL_RewardModelRouter:
                 {
                     "instance_id": instance_id,
                     "is_awake": instance_id not in self.paused_worker_indices,
-                    "model_version": (
-                        int(engine_status.model_version) if engine_status is not None else 0
-                    ),
+                    "model_version": (int(engine_status.model_version) if engine_status is not None else 0),
                     "requests": request_rows,
                     "route_request_count": max(
                         self.request_counts.get(instance_id, 0),
@@ -1887,10 +1827,7 @@ class PSRL_RewardModelRouter:
     def update_instance_status(self, instance_to_engine_status: dict[int, EngineStats]) -> None:
         """Update route-strategy engine status snapshots."""
         self.instance_to_engine_status.update(
-            {
-                int(instance_id): engine_status
-                for instance_id, engine_status in instance_to_engine_status.items()
-            }
+            {int(instance_id): engine_status for instance_id, engine_status in instance_to_engine_status.items()}
         )
         self.route_strategy.update_instance_to_engine_status(instance_to_engine_status)
         self._invalidate_load_cache()
@@ -1970,9 +1907,7 @@ class PSRL_RewardModelRouter:
         return _request_token_num(request)
 
 
-# ---------------------------------------------------------------------------
-# Launcher
-# ---------------------------------------------------------------------------
+# --- Launcher ---
 def launch_router_process(
     worker_handles: list[ray.actor.ActorHandle],
     worker_groups: list[Any] | None,
@@ -1990,7 +1925,7 @@ def launch_router_process(
         worker_handles: List of RewardModelWorker Ray handles.
         worker_groups: Worker groups for all-rank (transformers) execution.
         config: Full PSRL Hydra config for the router actor.
-        max_attempts: Unused; kept for API compatibility.
+        max_attempts: Unused. kept for API compatibility.
         retry_delay: Delay between retries (in seconds).
         verbose: Enable verbose logging.
         max_concurrency: Ray actor max concurrency.

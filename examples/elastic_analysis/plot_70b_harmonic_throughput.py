@@ -70,21 +70,14 @@ def read_csv(path: Path) -> RunData:
 
 
 def select_steps(data: RunData, step_start: int, step_end: int) -> RunData:
-    selected = [
-        index
-        for index, step in enumerate(data.steps)
-        if step_start <= step <= step_end
-    ]
+    selected = [index for index, step in enumerate(data.steps) if step_start <= step <= step_end]
     if not selected:
         raise RuntimeError(f"No samples found for steps {step_start}-{step_end}")
     time_origin = data.wall_time_s[selected[0]]
     return RunData(
         wall_time_s=[data.wall_time_s[index] - time_origin for index in selected],
         steps=[data.steps[index] for index in selected],
-        metrics={
-            metric: [values[index] for index in selected]
-            for metric, values in data.metrics.items()
-        },
+        metrics={metric: [values[index] for index in selected] for metric, values in data.metrics.items()},
     )
 
 
@@ -148,18 +141,10 @@ def main() -> None:
     output_dir = (args.output_dir or input_dir).resolve()
     if (args.step_start is None) != (args.step_end is None):
         raise SystemExit("--step-start and --step-end must be specified together")
-    if args.step_start is not None and (
-        args.step_start <= 0 or args.step_start > args.step_end
-    ):
+    if args.step_start is not None and (args.step_start <= 0 or args.step_start > args.step_end):
         raise SystemExit("Step range must satisfy 1 <= --step-start <= --step-end")
-    step_range = (
-        None
-        if args.step_start is None
-        else (args.step_start, args.step_end)
-    )
-    filename_suffix = (
-        "" if step_range is None else f"_steps_{step_range[0]}-{step_range[1]}"
-    )
+    step_range = None if args.step_start is None else (args.step_start, args.step_end)
+    filename_suffix = "" if step_range is None else f"_steps_{step_range[0]}-{step_range[1]}"
     run_data = []
     for label, filename, color in RUNS:
         path = input_dir / filename

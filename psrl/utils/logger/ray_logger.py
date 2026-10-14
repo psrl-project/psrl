@@ -7,11 +7,11 @@ import time
 from contextlib import contextmanager
 from enum import Enum
 
-import torch
-
 
 def get_worker_info():
     """Get the worker info from the environment variables."""
+    import torch
+
     worker_ip = os.getenv("LOCAL_IP", None)
     if worker_ip is None:
         worker_ip = socket.gethostbyname(socket.gethostname())

@@ -1,11 +1,12 @@
 # Copyright 2025 Bytedance Ltd. and/or its affiliates
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
+# Licensed under the Apache License, Version 2.0 (the "License").
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
+# SPDX-License-Identifier: Apache-2.0
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -105,9 +106,7 @@ class _VocabParallelKLDivergence(torch.autograd.Function):
         target_topk_indices = target_topk_indices - vocab_start_index
         target_topk_indices[~topk_indices_in_vocab_mask] = 0
 
-        # Target probs/logps (teacher distribution restricted to top-k), masked to this shard.
-        # Note: `target_topk_mass` is computed *before* masking-out-of-shard entries, so it represents
-        # the mass of the provided top-k distribution (global), independent of TP sharding.
+        # Compute `target_topk_mass` before shard masking so it represents the global teacher top-k probability mass.
         if log_prob_min_clamp is not None:
             target_topk_logps = target_topk_logps.clamp_min(log_prob_min_clamp)
         target_topk_logps = target_topk_logps.float()
@@ -145,9 +144,7 @@ class _VocabParallelKLDivergence(torch.autograd.Function):
         # For out-of-shard entries, log p is set to 0 so they contribute nothing after all-reduce.
         vp_source_topk_logps[~topk_indices_in_vocab_mask] = 0
 
-        #   This computes the forward KL: KL(P || Q), where
-        #     P = target distribution (teacher top-k probs) and
-        #     Q = source distribution (student probs at those indices).
+        # Compute forward KL from teacher top-k probabilities to student probabilities at the same indices.
         per_token_kl_loss = torch.sum(
             target_topk_probs * (target_topk_logps - vp_source_topk_logps),
             dim=-1,
@@ -182,7 +179,7 @@ class _VocabParallelKLDivergence(torch.autograd.Function):
     ):
         """
         Backprop for the per-token loss:
-            L = sum_{i in S} q_i * (log q_i - clamp(log p_i))
+            `L = sum_{i in S} q_i * (log q_i - clamp(log p_i))`
 
         where:
           - S are the provided target top-k indices (global top-k, then masked per shard)
@@ -195,7 +192,7 @@ class _VocabParallelKLDivergence(torch.autograd.Function):
         Define m_A = sum_{i in A} q_i (aggregated across TP ranks).
 
         Then for any vocab index j on this shard (with p = softmax(logits)):
-            dL/dz_j = m_A * p_j - q_j * 1[j in A]
+            `dL/dz_j = m_A * p_j - q_j * 1[j in A]`
         """
         vp_source_probs, target_topk_probs, target_topk_indices, active_mask, target_active_mass = ctx.saved_tensors
 
@@ -207,9 +204,7 @@ class _VocabParallelKLDivergence(torch.autograd.Function):
         target_topk_probs_flat = target_topk_probs.view(-1, topk)  # (b*s, topk)
         target_topk_indices_flat = target_topk_indices.view(-1, topk)  # (b*s, topk)
 
-        # Subtract q_j for active entries (i.e., j in A), accumulating repeats via scatter_add_.
-        # Index 0 is used as a dummy for top-k entries not on this shard (their q is zeroed by mask),
-        # but index 0 may also be a real token index; scatter_add_ correctly accumulates duplicates.
+        # Use `scatter_add_` because the dummy zero index can also be a real token index or occur repeatedly.
         sub = target_topk_probs_flat * active_mask.view(-1, topk).to(grad_input_2d.dtype)  # (b*s, topk)
         grad_input_2d.scatter_add_(dim=1, index=target_topk_indices_flat, src=-sub)
 
@@ -237,7 +232,9 @@ def compute_forward_kl_topk(
     - student_mass: (bsz, seqlen/cp_size)
     - teacher_mass: (bsz, seqlen/cp_size)
     """
-    assert teacher_topk_log_probs.is_nested and teacher_topk_ids.is_nested
+    assert teacher_topk_log_probs.is_nested and teacher_topk_ids.is_nested, (
+        "Teacher top-k log probabilities and IDs must be nested tensors."
+    )
 
     # 1. split across cp groups (bsz, seqlen, topk) => (bsz, seqlen/cp_size, topk)
     if data_format == "thd":
@@ -246,7 +243,13 @@ def compute_forward_kl_topk(
     else:
         teacher_topk_log_probs_cp_split, *_ = preprocess_bshd_engine(teacher_topk_log_probs, pre_process=True)
         teacher_topk_ids_cp_split, *_ = preprocess_bshd_engine(teacher_topk_ids, pre_process=True)
-    assert teacher_topk_log_probs_cp_split.shape[:2] == teacher_topk_ids_cp_split.shape[:2] == student_logits.shape[:2]
+    assert (
+        teacher_topk_log_probs_cp_split.shape[:2] == teacher_topk_ids_cp_split.shape[:2] == student_logits.shape[:2]
+    ), (
+        f"Teacher log probability, teacher ID, and student token shapes must match after context splitting, got "
+        f"{teacher_topk_log_probs_cp_split.shape[:2]!r}, {teacher_topk_ids_cp_split.shape[:2]!r}, "
+        f"and {student_logits.shape[:2]!r}."
+    )
 
     # 2. compute token-wise KL divergence across tp groups
     distillation_loss_config: DistillationLossConfig = config.distillation_loss

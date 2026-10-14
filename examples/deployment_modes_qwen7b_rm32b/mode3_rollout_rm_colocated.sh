@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Mode 3: rollout and RM time-multiplex a 16-GPU shared pool; trainer is separate.
+# Mode 3: rollout and RM time-multiplex a 16-GPU shared pool. trainer is separate.
 # Usage: bash mode3_rollout_rm_colocated.sh [smoke_test=0] [extra hydra overrides...]
 set -euo pipefail
 

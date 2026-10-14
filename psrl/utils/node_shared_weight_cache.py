@@ -429,7 +429,7 @@ def publish_or_map_weight_arena(
         data_path_result = data_path
         inode = data_path.stat().st_ino
         unique_cache_bytes = _namespace_cache_bytes(lease.namespace)
-    assert mapping is not None and arenas is not None
+    assert mapping is not None and arenas is not None, "A published node cache must have a mapping and arenas."
     return NodeSharedArenaCache(
         arenas=arenas,
         cache_key=cache_key,
@@ -492,7 +492,7 @@ def _select_backend(
 
 
 def _mark_prefer_memfd(namespace: Path) -> None:
-    """Best-effort node-wide hint; low shm space must not block fallback."""
+    """Best-effort node-wide hint. low shm space must not block fallback."""
     try:
         (namespace / ".prefer-memfd").touch(mode=0o600, exist_ok=True)
     except OSError as exc:
@@ -651,7 +651,7 @@ def _publish_memfd(
         success = True
     finally:
         if not success and release is not None:
-            # Registration may have succeeded before mapping failed.  Release
+            # Registration may have succeeded before mapping failed. Release
             # the broker client reference so the arena can be reclaimed.
             release()
         os.close(fd)

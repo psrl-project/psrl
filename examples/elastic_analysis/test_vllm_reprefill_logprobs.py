@@ -1,4 +1,4 @@
-"""Compare vLLM continuous decode with abort + full-prefix reprefill.
+r"""Compare vLLM continuous decode with abort + full-prefix reprefill.
 
 The experiment uses one vLLM ``AsyncLLM`` instance and the same tokenized
 prompt for every run:
@@ -8,16 +8,16 @@ prompt for every run:
 
 The public vLLM generation API exposes sampled-token logprobs, not raw logits.
 This script therefore compares chosen-token logprobs and, when requested,
-the returned top-k/all-token logprob maps.  It also requests ``prompt_logprobs``
-for reprefill requests.  Those values are the direct prefill-vs-decode check
+the returned top-k/all-token logprob maps. It also requests ``prompt_logprobs``
+for reprefill requests. Those values are the direct prefill-vs-decode check
 for tokens that were already generated before an interruption.
 
 Run in the repository environment, for example:
 
-  source env/env_311.sh
-  PYTHONPATH=. python scripts/test_vllm_reprefill_logprobs.py \
-      --model /path/to/model --prompt-token-ids '[1, 2, 3, 4]' \
-      --total-tokens 32 --chunk-size 4 --output /tmp/reprefill.json
+  source env/psrl.sh
+  PYTHONPATH=. python examples/elastic_analysis/test_vllm_reprefill_logprobs.py \
+      --model models/Qwen2.5-7B --prompt-token-ids '[1, 2, 3, 4]' \
+      --total-tokens 32 --chunk-size 4 --output reprefill.json
 
 Use ``--self-test`` to validate the comparison logic without a model or GPU.
 """
@@ -88,8 +88,7 @@ def _records_from_output(token_ids: Any, logprobs: Any) -> list[dict[str, Any]]:
     entries = list(logprobs)
     if len(entries) != len(token_ids):
         raise RuntimeError(
-            "vLLM output token/logprob length mismatch: "
-            f"tokens={len(token_ids)} logprobs={len(entries)}"
+            f"vLLM output token/logprob length mismatch: tokens={len(token_ids)} logprobs={len(entries)}"
         )
 
     records = []
@@ -97,9 +96,7 @@ def _records_from_output(token_ids: Any, logprobs: Any) -> list[dict[str, Any]]:
         values = _logprob_map(entry)
         chosen = values.get(str(token_id))
         if chosen is None:
-            raise RuntimeError(
-                f"chosen token {token_id} is absent from the returned logprob map"
-            )
+            raise RuntimeError(f"chosen token {token_id} is absent from the returned logprob map")
         records.append(
             {
                 "token_id": token_id,
@@ -118,8 +115,7 @@ def _prompt_records(prompt_token_ids: Any, prompt_logprobs: Any) -> list[dict[st
     entries = list(prompt_logprobs)
     if len(entries) != len(token_ids):
         raise RuntimeError(
-            "vLLM prompt token/logprob length mismatch: "
-            f"tokens={len(token_ids)} logprobs={len(entries)}"
+            f"vLLM prompt token/logprob length mismatch: tokens={len(token_ids)} logprobs={len(entries)}"
         )
     records = []
     for token_id, entry in zip(token_ids, entries, strict=True):
@@ -174,13 +170,9 @@ def _compare_records(
         "token_mismatches": token_mismatches[:20],
         "token_mismatch_count": len(token_mismatches),
         "max_abs_chosen_logprob_diff": max(chosen_diffs, default=None),
-        "mean_abs_chosen_logprob_diff": (
-            sum(chosen_diffs) / len(chosen_diffs) if chosen_diffs else None
-        ),
+        "mean_abs_chosen_logprob_diff": (sum(chosen_diffs) / len(chosen_diffs) if chosen_diffs else None),
         "max_abs_returned_logprob_diff": max(top_diffs, default=None),
-        "num_chosen_diffs_above_significance": sum(
-            diff > significance for diff in chosen_diffs
-        ),
+        "num_chosen_diffs_above_significance": sum(diff > significance for diff in chosen_diffs),
         "classification": _classification(
             same_tokens=not token_mismatches and len(reference) == len(candidate),
             max_diff=max(chosen_diffs, default=None),
@@ -189,9 +181,7 @@ def _compare_records(
     }
 
 
-def _classification(
-    *, same_tokens: bool, max_diff: float | None, significance: float
-) -> str:
+def _classification(*, same_tokens: bool, max_diff: float | None, significance: float) -> str:
     if not same_tokens:
         return "token_sequence_diverged"
     if max_diff is None:
@@ -226,6 +216,7 @@ async def _collect_request(
 
     latest_output = None
     abort_sent = False
+
     async def consume() -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool]:
         nonlocal latest_output, abort_sent
         stream = engine.generate(
@@ -293,9 +284,7 @@ async def _run_experiment(args: argparse.Namespace, prompt_token_ids: list[int])
         "max_model_len": args.max_model_len,
         "max_num_seqs": 1,
         "max_logprobs": (
-            -1
-            if args.logprobs == -1 or args.prompt_logprobs == -1
-            else max(args.logprobs, args.prompt_logprobs, 1)
+            -1 if args.logprobs == -1 or args.prompt_logprobs == -1 else max(args.logprobs, args.prompt_logprobs, 1)
         ),
         "enable_prefix_caching": args.enable_prefix_caching,
         "enable_chunked_prefill": args.enable_chunked_prefill,
@@ -324,12 +313,8 @@ async def _run_experiment(args: argparse.Namespace, prompt_token_ids: list[int])
                 timeout_s=args.timeout_s,
             )
             if aborted or len(records) != args.total_tokens:
-                raise RuntimeError(
-                    f"continuous run returned {len(records)} tokens; expected {args.total_tokens}"
-                )
-            continuous_runs.append(
-                {"records": records, "prompt_records": prompt_records}
-            )
+                raise RuntimeError(f"continuous run returned {len(records)} tokens; expected {args.total_tokens}")
+            continuous_runs.append({"records": records, "prompt_records": prompt_records})
 
         boundaries = _chunk_schedule(args.total_tokens, args.chunk_sizes)
         interrupted_records: list[dict[str, Any]] = []
@@ -350,9 +335,7 @@ async def _run_experiment(args: argparse.Namespace, prompt_token_ids: list[int])
             if not segment_records:
                 raise RuntimeError(f"interrupted segment {segment_index} returned no tokens")
             if boundary < args.total_tokens and not aborted:
-                raise RuntimeError(
-                    f"interrupted segment {segment_index} did not finish with vLLM abort"
-                )
+                raise RuntimeError(f"interrupted segment {segment_index} did not finish with vLLM abort")
             if len(segment_records) > expected_segment_len:
                 segment_records = segment_records[:expected_segment_len]
             interrupted_records.extend(segment_records)
@@ -379,8 +362,7 @@ async def _run_experiment(args: argparse.Namespace, prompt_token_ids: list[int])
 
         if len(interrupted_records) != args.total_tokens:
             raise RuntimeError(
-                f"interrupted run returned {len(interrupted_records)} tokens; "
-                f"expected {args.total_tokens}"
+                f"interrupted run returned {len(interrupted_records)} tokens; expected {args.total_tokens}"
             )
 
         # Score the final complete prefix too. This covers the final chunk,
@@ -475,9 +457,7 @@ def _prompt_ids(args: argparse.Namespace) -> list[int]:
         download_dir=args.download_dir,
     )
     try:
-        encoded = tokenizer.encode(
-            args.prompt, add_special_tokens=args.add_special_tokens
-        )
+        encoded = tokenizer.encode(args.prompt, add_special_tokens=args.add_special_tokens)
         return [int(token_id) for token_id in encoded]
     except TypeError:
         return [int(token_id) for token_id in tokenizer.encode(args.prompt)]
@@ -533,7 +513,7 @@ def main(argv: list[str] | None = None) -> int:
         import torch
 
         cuda_available = bool(torch.cuda.is_available() and torch.cuda.device_count() > 0)
-    except Exception as exc:  # pragma: no cover - environment-specific import failure
+    except Exception as exc:  # pragma: no cover. environment-specific import failure
         cuda_available = False
         print(f"GPU probe failed: {exc}", file=sys.stderr)
     if not cuda_available:

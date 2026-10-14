@@ -423,11 +423,8 @@ class RewardLoopManager(CommandExtension):
                 reward = result["result"] if result.get("error") is None else None
                 if result.get("error") is not None:
                     psrl_logger.error(
-                        "Reward worker %s failed uid=%s keys=%s error=%s",
-                        result["worker_id"],
-                        result["uid"],
-                        result["request_keys"],
-                        result["error"],
+                        f"Reward worker {result['worker_id']} failed for uid={result['uid']!r}, "
+                        f"keys={result['request_keys']!r}. Error: {result['error']!r}."
                     )
                 if reward is not None:
                     reward["response_len"] = result["response_len"]

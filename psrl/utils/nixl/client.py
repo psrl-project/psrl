@@ -441,10 +441,7 @@ class NIXLStorageClient:
                 self._track_registered_desc(reg_descs)
             stage_seconds["register_memory"] = time.perf_counter() - stage_start
 
-            # Rebuild desc bytes for all shards. Group by mem_type to batch all
-            # get_xfer_descs calls: O(mem_types) round-trips instead of O(N_shards).
-
-            # Precompute {shard_idx: local_pos} for each key: O(1) lookup vs O(S) list.index()
+            # Batch descriptor rebuilds by memory type. Precompute shard positions to avoid repeated linear searches.
             stage_start = time.perf_counter()
             reregister_shard_pos_cache: dict[str, dict] = {
                 key: {s: i for i, s in enumerate(ti.sharding.shard_indices)}
@@ -941,7 +938,7 @@ class NIXLStorageClient:
             time.sleep(0.1)
         self._is_connected = True
         # NOTE(yfzhao): Client only waits until it can see the server, not until
-        # the server has loaded this client's metadata for reverse notify
+        # the server has loaded this client's metadata for reverse notify.
         psrl_logger.info(
             f"[nixl-handshake] {self.client_name} connect done: "
             f"fetch_md={t_fetch - t0:.3f}s send_local_md={t_send - t_fetch:.3f}s "
@@ -1979,7 +1976,7 @@ class NIXLMultiStorageClients:
         self._is_connected = True
         for client in self.multi_clients:
             client._is_connected = True
-        # NOTE(yfzhao): Same one-way readiness as NIXLStorageClient.connect_to_server
+        # NOTE(yfzhao): Same one-way readiness as NIXLStorageClient.connect_to_server.
         psrl_logger.info(
             f"[nixl-handshake] {self.agent_name} connect done: "
             f"fetch_md={t_fetch - t0:.3f}s send_local_md={t_send - t_fetch:.3f}s "

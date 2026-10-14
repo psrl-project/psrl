@@ -92,13 +92,11 @@ def _patch_engine_client_runtime_snapshots() -> None:
         self,
     ) -> dict[int, dict]:
         engines = tuple(self.core_engines)
-        snapshots = await asyncio.gather(*(
-            self._call_utility_async("psrl_get_runtime_snapshot", engine=engine)
-            for engine in engines
-        ))
+        snapshots = await asyncio.gather(
+            *(self._call_utility_async("psrl_get_runtime_snapshot", engine=engine) for engine in engines)
+        )
         return {
-            int.from_bytes(engine, "little"): snapshot
-            for engine, snapshot in zip(engines, snapshots, strict=True)
+            int.from_bytes(engine, "little"): snapshot for engine, snapshot in zip(engines, snapshots, strict=True)
         }
 
     AsyncMPClient.psrl_get_runtime_snapshots_async = psrl_get_runtime_snapshots_async

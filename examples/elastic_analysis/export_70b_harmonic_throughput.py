@@ -7,12 +7,12 @@ configuration:
     H = (w_rollout + w_rm) / (w_rollout / rollout_tp + w_rm / rm_tp)
 
 where each raw request-count weight is ``running + router backlog`` and a zero
-weight falls back to 1.  ElasticMonitor contains both terms for the elastic RL
-run.  The disaggregated StatCollector logs contain only in-engine request
+weight falls back to 1. ElasticMonitor contains both terms for the elastic RL
+run. The disaggregated StatCollector logs contain only in-engine request
 counts, so its unavailable router backlog is explicitly treated as zero.
 
 When exactly one role has zero measured throughput, the exported metric falls
-back to the non-zero role's throughput (the one-sided sum).  It is zero only
+back to the non-zero role's throughput (the one-sided sum). It is zero only
 when both roles have zero throughput.
 """
 
@@ -32,14 +32,10 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 DEFAULT_DISAGGREGATED_RUN = (
-    REPO_ROOT
-    / "logs/verl_deployment_modes/"
-    "mixed_mode1_roll_4_rm_4_disaggregated_Qwen2.5-72B_Qwen3.5-122B-A10B"
+    REPO_ROOT / "logs/verl_deployment_modes/mixed_mode1_roll_4_rm_4_disaggregated_Qwen2.5-72B_Qwen3.5-122B-A10B"
 )
 DEFAULT_ELASTIC_RUN = (
-    REPO_ROOT
-    / "logs/verl_deployment_modes/"
-    "mixed_mode5_bs_128_share_64_elastic_rl_Qwen2.5-72B_Qwen3.5-122B-A10B"
+    REPO_ROOT / "logs/verl_deployment_modes/mixed_mode5_bs_128_share_64_elastic_rl_Qwen2.5-72B_Qwen3.5-122B-A10B"
 )
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "logs/verl_deployment_modes/70b_harmonic_throughput"
 
@@ -60,9 +56,7 @@ RE_TRAINING_BATCH = re.compile(
     r"\[Begin Event\] WAIT - Wait for training batch (?P<batch>\d+)\s*$"
 )
 RE_SNAPSHOT_TIMESTAMP = re.compile(r"'timestamp':\s*'(?P<timestamp>[^']+)'")
-RE_THROUGHPUT = re.compile(
-    r"'generation_throughput':\s*(?:np\.float64\()?([\d.eE+-]+)"
-)
+RE_THROUGHPUT = re.compile(r"'generation_throughput':\s*(?:np\.float64\()?([\d.eE+-]+)")
 RE_NUM_RUNNING = re.compile(r"'num_running_reqs':\s*(\d+)")
 RE_ROLLOUT_LOG = re.compile(r"^StatCollector_I(?P<instance>\d+)\.log$")
 RE_RM_LOG = re.compile(r"^StatCollector_RM_.+_I(?P<instance>\d+)\.log$")
@@ -142,9 +136,7 @@ def _parse_stat_collector(path: Path) -> dict[datetime, RolePoint]:
             if not (timestamp_match and throughput_match and running_match):
                 continue
             try:
-                timestamp = _to_second(
-                    datetime.fromisoformat(timestamp_match.group("timestamp"))
-                )
+                timestamp = _to_second(datetime.fromisoformat(timestamp_match.group("timestamp")))
                 throughput = float(throughput_match.group(1))
                 running = float(running_match.group(1))
             except ValueError:
@@ -156,10 +148,8 @@ def _parse_stat_collector(path: Path) -> dict[datetime, RolePoint]:
 
 
 def parse_disaggregated_points(run_dir: Path) -> list[CombinedPoint]:
-    """Aggregate fresh StatCollector snapshots; router backlog is unavailable."""
-    instances: dict[str, dict[int, dict[datetime, RolePoint]]] = {
-        role: {} for role in ROLES
-    }
+    """Aggregate fresh StatCollector snapshots. router backlog is unavailable."""
+    instances: dict[str, dict[int, dict[datetime, RolePoint]]] = {role: {} for role in ROLES}
     all_times: set[datetime] = set()
     for path in sorted(run_dir.glob("StatCollector*.log")):
         metadata = _classify_stat_collector(path)
@@ -187,9 +177,7 @@ def parse_disaggregated_points(run_dir: Path) -> list[CombinedPoint]:
             active = [
                 point
                 for point in latest[role].values()
-                if 0.0
-                <= (timestamp - point.timestamp).total_seconds()
-                <= ACTIVE_SNAPSHOT_MAX_AGE_SEC
+                if 0.0 <= (timestamp - point.timestamp).total_seconds() <= ACTIVE_SNAPSHOT_MAX_AGE_SEC
             ]
             totals[role] = (
                 sum(point.throughput for point in active),
@@ -217,9 +205,7 @@ def _safe_float(value: object) -> float:
 
 def parse_elastic_points(log_path: Path) -> list[CombinedPoint]:
     """Aggregate ElasticMonitor status and align its router backlog snapshots."""
-    statuses: dict[datetime, dict[str, dict[int, tuple[float, float]]]] = defaultdict(
-        lambda: defaultdict(dict)
-    )
+    statuses: dict[datetime, dict[str, dict[int, tuple[float, float]]]] = defaultdict(lambda: defaultdict(dict))
     backlogs: dict[datetime, dict[str, float]] = {}
 
     with log_path.open(encoding="utf-8", errors="replace") as log_file:
@@ -252,9 +238,7 @@ def parse_elastic_points(log_path: Path) -> list[CombinedPoint]:
             if not isinstance(by_role, dict):
                 continue
             timestamp = _to_second(_parse_log_timestamp(match.group("ts")))
-            backlogs[timestamp] = {
-                role: _safe_float(by_role.get(role, 0.0)) for role in ROLES
-            }
+            backlogs[timestamp] = {role: _safe_float(by_role.get(role, 0.0)) for role in ROLES}
 
     if not statuses:
         raise RuntimeError(f"No ElasticMonitor status samples found in {log_path}")
@@ -294,16 +278,11 @@ def weighted_harmonic_throughput(point: CombinedPoint) -> float:
         return rollout_throughput + rm_throughput
     rollout_weight = point.rollout_pressure if point.rollout_pressure > 0.0 else 1.0
     rm_weight = point.rm_pressure if point.rm_pressure > 0.0 else 1.0
-    denominator = (
-        rollout_weight / rollout_throughput
-        + rm_weight / rm_throughput
-    )
+    denominator = rollout_weight / rollout_throughput + rm_weight / rm_throughput
     return (rollout_weight + rm_weight) / denominator
 
 
-def export_csv(
-    points: list[CombinedPoint], boundaries: list[datetime], output_path: Path
-) -> int:
+def export_csv(points: list[CombinedPoint], boundaries: list[datetime], output_path: Path) -> int:
     training_start = boundaries[0]
     output_path.parent.mkdir(parents=True, exist_ok=True)
     row_count = 0
@@ -328,9 +307,7 @@ def export_csv(
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--disaggregated-run-dir", type=Path, default=DEFAULT_DISAGGREGATED_RUN
-    )
+    parser.add_argument("--disaggregated-run-dir", type=Path, default=DEFAULT_DISAGGREGATED_RUN)
     parser.add_argument("--elastic-run-dir", type=Path, default=DEFAULT_ELASTIC_RUN)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     return parser.parse_args()
@@ -345,17 +322,13 @@ def main() -> None:
         if not run_dir.is_dir():
             raise SystemExit(f"Run directory not found: {run_dir}")
 
-    disaggregated_boundaries = parse_training_boundaries(
-        disaggregated_run / "MainRayTrainer.log"
-    )
+    disaggregated_boundaries = parse_training_boundaries(disaggregated_run / "MainRayTrainer.log")
     elastic_boundaries = parse_training_boundaries(elastic_run / "MainRayTrainer.log")
 
     print(f"Parsing disaggregated StatCollector logs under {disaggregated_run}")
     disaggregated_points = parse_disaggregated_points(disaggregated_run)
     disaggregated_output = output_dir / "disaggregated_harmonic_throughput.csv"
-    disaggregated_rows = export_csv(
-        disaggregated_points, disaggregated_boundaries, disaggregated_output
-    )
+    disaggregated_rows = export_csv(disaggregated_points, disaggregated_boundaries, disaggregated_output)
 
     print(f"Parsing elastic monitor {elastic_run / 'ElasticMonitor.log'}")
     elastic_points = parse_elastic_points(elastic_run / "ElasticMonitor.log")
@@ -368,9 +341,7 @@ def main() -> None:
         f"output={disaggregated_output}"
     )
     print(
-        f"elastic_rl: {elastic_rows} rows, "
-        f"training_start={elastic_boundaries[0].isoformat()}, "
-        f"output={elastic_output}"
+        f"elastic_rl: {elastic_rows} rows, training_start={elastic_boundaries[0].isoformat()}, output={elastic_output}"
     )
 
 

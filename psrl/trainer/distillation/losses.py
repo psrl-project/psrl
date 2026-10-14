@@ -1,11 +1,12 @@
 # Copyright 2025 Bytedance Ltd. and/or its affiliates
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
+# Licensed under the Apache License, Version 2.0 (the "License").
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
+# SPDX-License-Identifier: Apache-2.0
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -235,7 +236,7 @@ def distillation_loss(
     - distillation_loss: Aggregated distillation loss scalar.
     - distillation_metrics: Dictionary of metrics.
     """
-    assert distillation_config is not None
+    assert distillation_config is not None, "Distillation requires a configuration."
     loss_config: DistillationLossConfig = distillation_config.distillation_loss
     distillation_loss_fn = get_distillation_loss_fn(loss_config.loss_mode)
     distillation_losses, distillation_metrics = distillation_loss_fn(
@@ -314,7 +315,11 @@ def compute_forward_kl_topk(
         response_mask_bool = data["response_mask"].bool().to_padded_tensor(False)
     else:
         response_mask_bool = data["response_mask"].bool()
-    assert distillation_losses.shape == student_mass.shape == teacher_mass.shape == response_mask_bool.shape
+    assert distillation_losses.shape == student_mass.shape == teacher_mass.shape == response_mask_bool.shape, (
+        f"Distillation losses, student mass, teacher mass, and response mask shapes must match, got "
+        f"{distillation_losses.shape!r}, {student_mass.shape!r}, {teacher_mass.shape!r}, "
+        f"and {response_mask_bool.shape!r}."
+    )
 
     # Log amount of mass in the top-k log probabilities for both student and teacher.
     student_mass = student_mass[response_mask_bool]
@@ -359,7 +364,10 @@ def compute_distillation_loss_reverse_kl_estimator(
         response_mask_bool = data["response_mask"].bool().to_padded_tensor(False)
     else:
         response_mask_bool = data["response_mask"].bool()
-    assert teacher_log_probs.shape == student_log_probs.shape == response_mask_bool.shape
+    assert teacher_log_probs.shape == student_log_probs.shape == response_mask_bool.shape, (
+        f"Teacher log probability, student log probability, and response mask shapes must match, got "
+        f"{teacher_log_probs.shape!r}, {student_log_probs.shape!r}, and {response_mask_bool.shape!r}."
+    )
 
     loss_config: DistillationLossConfig = distillation_config.distillation_loss
     distillation_losses = kl_penalty(

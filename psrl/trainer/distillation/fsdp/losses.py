@@ -1,11 +1,12 @@
 # Copyright 2025 Bytedance Ltd. and/or its affiliates
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
+# Licensed under the Apache License, Version 2.0 (the "License").
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
+# SPDX-License-Identifier: Apache-2.0
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -51,7 +52,9 @@ def compute_forward_kl_topk(
     - student_mass: (bsz, seqlen/sp_size)
     - teacher_mass: (bsz, seqlen/sp_size)
     """
-    assert teacher_topk_log_probs.is_nested and teacher_topk_ids.is_nested
+    assert teacher_topk_log_probs.is_nested and teacher_topk_ids.is_nested, (
+        "Teacher top-k log probabilities and IDs must be nested tensors."
+    )
     teacher_topk_log_probs = teacher_topk_log_probs.values().unsqueeze(0)  # (1, total_nnz, topk)
     teacher_topk_ids = teacher_topk_ids.values().unsqueeze(0)  # (1, total_nnz, topk)
 
@@ -59,7 +62,10 @@ def compute_forward_kl_topk(
     if get_ulysses_sequence_parallel_world_size() > 1:
         teacher_topk_log_probs = slice_input_tensor(teacher_topk_log_probs, dim=1)
         teacher_topk_ids = slice_input_tensor(teacher_topk_ids, dim=1)
-    assert teacher_topk_log_probs.shape[:2] == teacher_topk_ids.shape[:2] == student_logits.shape[:2]
+    assert teacher_topk_log_probs.shape[:2] == teacher_topk_ids.shape[:2] == student_logits.shape[:2], (
+        f"Teacher log probability, teacher ID, and student token shapes must match, got "
+        f"{teacher_topk_log_probs.shape[:2]!r}, {teacher_topk_ids.shape[:2]!r}, and {student_logits.shape[:2]!r}."
+    )
 
     # 2. compute token-wise KL divergence across sp groups
     student_log_probs = F.log_softmax(student_logits, dim=-1)

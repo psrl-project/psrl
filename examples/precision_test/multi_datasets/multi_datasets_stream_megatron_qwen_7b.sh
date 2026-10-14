@@ -77,8 +77,8 @@ val_top_p=0.7
 rollout_is=token
 rollout_is_threshold=2.0
 
-# NOTE(lhy): parameters of the actor cannot be offloaded when using nixl_cpu mode
-# May support this in the future
+# NOTE(lhy): Parameters of the actor cannot be offloaded when using nixl_cpu mode
+# May support this in the future.
 offload=True
 
 PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path="${PSRL_PATH}/psrl/trainer/config" --config-name='ppo_megatron_trainer' \
@@ -165,11 +165,3 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path="${PSRL_PATH}/p
     trainer.save_freq=200 \
     trainer.total_epochs=10 \
     trainer.total_training_steps=200 2>&1 | tee ${PSRL_WORKSPACE}/logs/${experiment_name}_${LOCAL_IP}.log
-
-    # reward.active_managers='[dapo]' \
-    # reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer} \
-    # reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len} \
-    # reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \
-    # reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.log=False \
-    # reward.managers.dapo.reward_kwargs.max_resp_len=${max_response_length} \
-

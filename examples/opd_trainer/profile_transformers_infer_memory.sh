@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
 # Launch Transformers TP/EP inference memory profiler.
 #
-# Usage:
-#   MODEL_PATH=/path/to/model SEQ_LEN=4096 TP=8 EP=8 \
-#     bash examples/opd_trainer/profile_transformers_infer_memory.sh
+# Run `bash examples/opd_trainer/profile_transformers_infer_memory.sh` with `MODEL_PATH`, `SEQ_LEN`, `TP`, and `EP`.
 #
 # Requires: source env (conda) and torchrun with NPROC == TP.
 

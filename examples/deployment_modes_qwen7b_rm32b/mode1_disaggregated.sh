@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-# Mode 1: independent rollout, RM, and trainer pools.
-# Four nodes: 8 TP1 rollout instances, 2 TP4 RM instances, and a 16-GPU trainer.
-# Usage: bash mode1_disaggregated.sh [smoke_test=0] [extra hydra overrides...]
+# Mode 1 runs eight TP1 rollout instances, two TP4 RM replicas, and a 16-GPU trainer in separate pools.
 set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)

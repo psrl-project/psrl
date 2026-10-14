@@ -2,7 +2,7 @@
 TMS / LD_PRELOAD helpers shared by rollout (`configure_worker`) and trainer (`RayWorkerGroup.worker_env`).
 
 Aligned with main_psrl agentic_rl: train workers use `TMS_INIT_ENABLE=1` and `PSRL_TMS_ENABLE`
-when `tms.range` is train/all; rollout gen_worker uses `TMS_INIT_ENABLE=0` (vLLM subprocess path).
+when `tms.range` is train/all. rollout gen_worker uses `TMS_INIT_ENABLE=0` (vLLM subprocess path).
 """
 
 from __future__ import annotations

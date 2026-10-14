@@ -3,9 +3,9 @@
 
 This is the StatCollector counterpart of plot_elastic_monitor_totals_compare.py.
 It overlays an elastic run with an optional non-elastic run, using the snapshot
-timestamp embedded in each StatCollector record to align instances.  The five
+timestamp embedded in each StatCollector record to align instances. The five
 subplots are total generation throughput, running requests, waiting requests,
-active StatCollector instances, and resident tokens.  Router backlog is not
+active StatCollector instances, and resident tokens. Router backlog is not
 available in StatCollector logs, so it intentionally is not inferred here.
 """
 
@@ -46,18 +46,17 @@ COLOR_MIN4_ROLLOUT = "#7fb3d5"
 COLOR_MIN0_REWARDMODEL = "#922b21"
 COLOR_MIN0_ROLLOUT = "#1a5276"
 
-NON_ELASTIC_LOG_DIR = (
-    REPO_ROOT
-    / "logs/verl_deployment_modes/mixed_test_none_request_level_candidate_evaluation_mode5_bs_128_share_32_elastic_rl_Qwen2.5-32B_Qwen3-30B-A3B-Thinking-2507"
+NON_ELASTIC_LOG_DIR = REPO_ROOT / (
+    "logs/verl_deployment_modes/mixed_test_none_request_level_candidate_evaluation_mode5_"
+    "bs_128_share_32_elastic_rl_Qwen2.5-32B_Qwen3-30B-A3B-Thinking-2507"
 )
-ELASTIC_LOG_DIR = (
-    REPO_ROOT
-    / "logs/verl_deployment_modes/mixed_test_new_request_level_candidate_evaluation_mode5_bs_128_share_32_elastic_rl_Qwen2.5-32B_Qwen3-30B-A3B-Thinking-2507"
+ELASTIC_LOG_DIR = REPO_ROOT / (
+    "logs/verl_deployment_modes/mixed_test_new_request_level_candidate_evaluation_mode5_"
+    "bs_128_share_32_elastic_rl_Qwen2.5-32B_Qwen3-30B-A3B-Thinking-2507"
 )
 _OUT_TAG = "elastic_only" if PLOT_ELASTIC_ONLY else "compare_none_vs_new"
 OUT_PATH = (
-    REPO_ROOT
-    / f"logs/verl_deployment_modes/{_OUT_TAG}_none_new/"
+    REPO_ROOT / f"logs/verl_deployment_modes/{_OUT_TAG}_none_new/"
     f"StatCollector_none_new_share_32_totals_{PLOT_WINDOW_START_MIN}-{PLOT_WINDOW_END_MIN}_min.png"
 )
 
@@ -65,12 +64,8 @@ RE_TIMESTAMP = re.compile(r"'timestamp':\s*'(?P<timestamp>[^']+)'")
 RE_THROUGHPUT = re.compile(r"'generation_throughput':\s*(?:np\.float64\()?([\d.eE+-]+)")
 RE_NUM_RUNNING = re.compile(r"'num_running_reqs':\s*(\d+)")
 RE_NUM_WAITING = re.compile(r"'num_waiting_reqs':\s*(\d+)")
-RE_PROMPT_SECTION = re.compile(
-    r"'req_id_to_prompt_token_num':\s*\{(.*?)\},\s*'req_id_to_response_token_num'"
-)
-RE_RESP_SECTION = re.compile(
-    r"'req_id_to_response_token_num':\s*\{(.*?)\},\s*'req_id_in_waiting'"
-)
+RE_PROMPT_SECTION = re.compile(r"'req_id_to_prompt_token_num':\s*\{(.*?)\},\s*'req_id_to_response_token_num'")
+RE_RESP_SECTION = re.compile(r"'req_id_to_response_token_num':\s*\{(.*?)\},\s*'req_id_in_waiting'")
 RE_DICT_INT_VALS = re.compile(r":\s*(\d+)")
 RE_ROLLOUT = re.compile(r"^StatCollector_I(\d+)\.log$")
 RE_RM = re.compile(r"^StatCollector_RM_.+_I(\d+)\.log$")
@@ -169,9 +164,7 @@ def prepare_series(log_dir: Path) -> tuple[list[float], dict[str, dict[str, list
     all_times_sorted = sorted(all_times)
     t0 = all_times_sorted[0]
     if not any(
-        PLOT_WINDOW_START_MIN
-        <= (timestamp - t0).total_seconds() / 60.0
-        <= PLOT_WINDOW_END_MIN
+        PLOT_WINDOW_START_MIN <= (timestamp - t0).total_seconds() / 60.0 <= PLOT_WINDOW_END_MIN
         for timestamp in all_times_sorted
     ):
         raise SystemExit(f"No StatCollector samples in plot window: {log_dir}")
@@ -220,18 +213,28 @@ def plot_merged(
     fig, axes = plt.subplots(5, 1, figsize=FIGSIZE, sharex=True, layout="constrained")
     curves = []
     if non_elastic is not None:
-        curves.extend([
-            ("min_4 (non-elastic)", non_elastic, "RewardModel", COLOR_MIN4_REWARDMODEL),
-            ("min_4 (non-elastic)", non_elastic, "Rollout", COLOR_MIN4_ROLLOUT),
-        ])
-    curves.extend([
-        ("min_0 (elastic)", elastic, "RewardModel", COLOR_MIN0_REWARDMODEL),
-        ("min_0 (elastic)", elastic, "Rollout", COLOR_MIN0_ROLLOUT),
-    ])
+        curves.extend(
+            [
+                ("min_4 (non-elastic)", non_elastic, "RewardModel", COLOR_MIN4_REWARDMODEL),
+                ("min_4 (non-elastic)", non_elastic, "Rollout", COLOR_MIN4_ROLLOUT),
+            ]
+        )
+    curves.extend(
+        [
+            ("min_0 (elastic)", elastic, "RewardModel", COLOR_MIN0_REWARDMODEL),
+            ("min_0 (elastic)", elastic, "Rollout", COLOR_MIN0_ROLLOUT),
+        ]
+    )
     for axis, (metric, ylabel) in zip(axes, metric_specs):
         for run_label, (x_values, values), role, color in curves:
-            axis.plot(x_values, values[role][metric], label=f"{role} ({run_label})", color=color,
-                      linewidth=LINE_WIDTH, alpha=0.95)
+            axis.plot(
+                x_values,
+                values[role][metric],
+                label=f"{role} ({run_label})",
+                color=color,
+                linewidth=LINE_WIDTH,
+                alpha=0.95,
+            )
         axis.set_ylabel(ylabel)
         axis.set_xlim(PLOT_WINDOW_START_MIN, PLOT_WINDOW_END_MIN)
         if ylims[metric] is not None:

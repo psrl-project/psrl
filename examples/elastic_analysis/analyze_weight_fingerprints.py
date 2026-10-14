@@ -200,8 +200,7 @@ def main() -> None:
     output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps(report["summary"], sort_keys=True))
     if args.fail_on_mismatch and (
-        report["summary"]["mismatched_checks"]
-        or report["summary"]["trainer_sleep_wake_mismatches"]
+        report["summary"]["mismatched_checks"] or report["summary"]["trainer_sleep_wake_mismatches"]
     ):
         raise SystemExit(1)
 

@@ -1,20 +1,12 @@
 #!/usr/bin/env bash
-# Mode 6 — elastic RL ablation on the Qwen2.5-1.5B (TP1) + GLM-Z1-9B-0414 (TP1)
-# setting from this directory's _common_deployment.sh.
-# Topology: 4 nodes (2 train + 2 shared).
+# Mode 6 ablates elastic RL with Qwen2.5-1.5B and GLM-Z1-9B-0414 on two trainer and two shared nodes.
 #
-# Switches (env vars):
-#   POLICY=throughput-optimal|rule-based
-#   USE_COST_MODEL=1|0              use fitted ITL cost model for throughput
-#   USE_REBALANCE=1|0               post-scale-up ABORT (request-level simulator)
-#   INTERRUPT_VLLM_WAITING=1|0      periodic waiting-queue ABORT (policy-independent)
+# Set `POLICY`, `USE_COST_MODEL`, `USE_REBALANCE`, and `INTERRUPT_VLLM_WAITING` to select ablations.
 #
 # USE_REBALANCE=1 requires POLICY=throughput-optimal. USE_REBALANCE=0 only skips
-# post-scale-up ABORT; ITL candidate scoring still uses request-level evaluation.
+# post-scale-up ABORT. ITL candidate scoring still uses request-level evaluation.
 #
-# Usage:
-#   POLICY=rule-based USE_COST_MODEL=0 USE_REBALANCE=0 INTERRUPT_VLLM_WAITING=1 \
-#     bash mode6_ablation_study_copy.sh [smoke_test=0] [extra hydra overrides...]
+# Run from the repository root: `bash examples/deployment_modes/mode6_ablation_study_copy.sh [smoke_test=0]`.
 set -euo pipefail
 
 _normalize_bool() {
@@ -69,7 +61,7 @@ export PSRL_DEPLOY_OPTIMIZER_OFFLOAD=${PSRL_DEPLOY_OPTIMIZER_OFFLOAD:-True}
 shift || true
 
 COST_MODEL_DIR=/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/trainer/config/cost_model
-# Match this folder's defaults (Qwen2.5-1.5B + GLM-Z1-9B); pass last so they win
+# Match this folder's defaults (Qwen2.5-1.5B + GLM-Z1-9B). pass last so they win
 # over _common_deployment.sh routing defaults.
 ROLLOUT_COST_MODEL="${COST_MODEL_DIR}/qwen2.5_1.5b.json"
 RM_COST_MODEL="${COST_MODEL_DIR}/glm_z1_9b_0414.json"

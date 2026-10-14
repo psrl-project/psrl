@@ -106,9 +106,7 @@ def _weight_arena_worker_env(psrl_config, role: str) -> dict[str, str]:
         return {}
 
     if role != "reward" and psrl_config.get("ps_mode") not in ("nixl_cpu", "nixl_gpu"):
-        raise RuntimeError(
-            f"psrl.nixl.weight_arena for role={role} requires psrl.ps_mode to be nixl_cpu or nixl_gpu."
-        )
+        raise RuntimeError(f"psrl.nixl.weight_arena for role={role} requires psrl.ps_mode to be nixl_cpu or nixl_gpu.")
     tms_config = psrl_config.get("tms", {}) or {}
     if tms_config.get("range") != "all":
         raise RuntimeError(f"psrl.nixl.weight_arena for role={role} requires psrl.tms.range=all.")
@@ -219,9 +217,7 @@ class PSRL_vLLMHttpServer(vLLMHttpServer):
         # YaRN extends that ceiling by `factor`.
         engine_kwargs = vllm_engine_kwargs(self.config)
         native = get_max_position_embeddings(self.model_config.hf_config)
-        effective = effective_max_position_embeddings(
-            self.model_config.hf_config, engine_kwargs, native
-        )
+        effective = effective_max_position_embeddings(self.model_config.hf_config, engine_kwargs, native)
         hf_config = self.model_config.hf_config
         if effective == native:
             super()._validate_configs()

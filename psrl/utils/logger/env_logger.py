@@ -1,12 +1,12 @@
 import logging
 import os
 
-import torch
-
 from .memory_logger import get_all_gpu_memory_info
 
 
 def log_env_info(psrl_logger: logging.Logger, level: int = logging.INFO):
+    import torch
+
     # Log environment variables
     psrl_logger.log(level, "=== Environment Variables ===")
     for k in sorted(os.environ):

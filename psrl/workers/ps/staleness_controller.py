@@ -1,25 +1,13 @@
 import enum
-import logging
 from dataclasses import dataclass
 from functools import wraps
 
 import numpy as np
 
-# NOTE(lhy): Standard logging keeps this module importable without heavy PSRL dependencies
-# while integrating with the runtime root logger.
-try:
-    from psrl.utils.logger import get_ps_logger as _get_ps_logger
+from psrl.utils.logger import get_ps_logger
+from psrl.workers.gen.utils import RolloutInstanceId
 
-    psrl_logger = _get_ps_logger()
-except Exception:
-    psrl_logger = logging.getLogger("psrl.workers.ps.staleness_controller")
-
-# NOTE(lhy): Define the lightweight `RolloutInstanceId` locally to avoid importing Ray
-# and vLLM through the generation package.
-try:
-    from psrl.workers.gen.utils import RolloutInstanceId
-except Exception:
-    RolloutInstanceId = tuple  # type: ignore[assignment,misc]
+psrl_logger = get_ps_logger()
 
 
 def _state_locked(func):

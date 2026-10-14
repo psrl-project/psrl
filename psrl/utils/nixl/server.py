@@ -118,7 +118,7 @@ class NIXLMetaServer:
                             already_recved_agents.add(agent_name)
                         if is_new_agent:
                             # NOTE(yfzhao): A received sharding notif does not prove the
-                            # server loaded this agent's metadata for reverse send_notif
+                            # server loaded this agent's metadata for reverse send_notif.
                             psrl_logger.info(
                                 f"[nixl-handshake] received sharding from agent={agent_name} "
                                 f"clients={list(multi_shardings)} "
@@ -328,10 +328,6 @@ class NIXLMetaServer:
         PUSH_SIDE and PULL_SIDE clients receive descriptors only for PS clients that
         occur in their per-key communication plans.
         """
-
-        # TODO(zyf): check the correctness
-        # my_clients: set[str] = set(self.connected_clients[agent_name])
-        # return my_clients | self.comm_plan.target_clients_for(my_clients)
 
         my_clients: set[str] = set(self.connected_clients[agent_name])
         relevant: set[str] = set(my_clients)  # always include own clients

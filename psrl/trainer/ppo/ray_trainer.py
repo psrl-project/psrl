@@ -103,13 +103,12 @@ from psrl.workers.gen.rollout_coordination import RolloutCoordinator
 from psrl.workers.gen.rollout_gateway import RolloutGateway
 from psrl.workers.gen.smg_adapter import build_pause_resume_payload
 from psrl.workers.gen.vllm_async_server import GenInterface, PSRL_vLLMReplica
-from psrl.workers.ps import (
+from psrl.workers.ps.ps_manager import PSManager
+from psrl.workers.ps.ps_storage_worker import PSStoragePlan, PSStorageWorker
+from psrl.workers.ps.ps_worker_group import (
     PSClassWithInitArgs,
-    PSManager,
     PSResourcePool,
     PSResourceSpec,
-    PSStoragePlan,
-    PSStorageWorker,
     PSWorkerGroup,
 )
 from psrl.workers.reward.client import reward_manager_concurrency

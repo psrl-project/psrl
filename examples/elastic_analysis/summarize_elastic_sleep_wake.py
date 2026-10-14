@@ -2,12 +2,12 @@
 """Summarize actor, rollout, and GenRM sleep/wakeup latency.
 
 The four default run specifications reproduce the model combinations used in
-the elastic deployment comparison.  One completed command is one sample; TP
+the elastic deployment comparison. One completed command is one sample. TP
 ranks are not counted separately.
 
 Rollout and GenRM samples use the executor-side wall time spent awaiting the
-coordinator command (``sleep_s`` or ``wakeup_s``).  Actor samples use trainer
-``total_s``.  Initialization is excluded by selecting the interval from the
+coordinator command (``sleep_s`` or ``wakeup_s``). Actor samples use trainer
+``total_s``. Initialization is excluded by selecting the interval from the
 first training-batch wait through the next wait after the final completed actor
 update, when that next wait exists.
 """
@@ -26,9 +26,7 @@ from datetime import datetime
 from pathlib import Path
 
 TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S,%f"
-TIMESTAMP_RE = re.compile(
-    r"^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3})"
-)
+TIMESTAMP_RE = re.compile(r"^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3})")
 WAIT_RE = re.compile(r"\[Begin Event\] WAIT - Wait for training batch (?P<batch>\d+)")
 UPDATE_END_RE = re.compile(r"\[End Event\] TRAIN - Update actor")
 TRAINER_RE = re.compile(
@@ -40,12 +38,8 @@ HANDLER_RE = re.compile(
     r"decision_id=(?P<decision_id>\d+) begin task=.*?"
     r"'role_name': <PSRL_Role\.(?P<role>Rollout|RewardModel):"
 )
-ACTION_OVERHEAD_RE = re.compile(
-    r"\[ELASTIC_OVERHEAD\] operation=(?P<action>scale_up|scale_down)\b(?P<body>.*)"
-)
-SCALING_ACTION_RE = re.compile(
-    r"\[ELASTIC_OVERHEAD\] operation=scaling_action\b(?P<body>.*)"
-)
+ACTION_OVERHEAD_RE = re.compile(r"\[ELASTIC_OVERHEAD\] operation=(?P<action>scale_up|scale_down)\b(?P<body>.*)")
+SCALING_ACTION_RE = re.compile(r"\[ELASTIC_OVERHEAD\] operation=scaling_action\b(?P<body>.*)")
 PRE_SLEEP_RE = re.compile(
     r"elastic_rm scale_up_handler decision_id=(?P<decision_id>\d+) "
     r"pre_sleep_other count=(?P<count>\d+)"
@@ -81,8 +75,7 @@ DEFAULT_RUNS = (
         genrm_model="GLM-Z1-9B",
         genrm_tp=1,
         genrm_ep=None,
-        run_dir="mixed_mode5_overhead_bs_128_share_32_elastic_rl_"
-        "Qwen2.5-1.5B_GLM-Z1-9B-0414",
+        run_dir="mixed_mode5_overhead_bs_128_share_32_elastic_rl_Qwen2.5-1.5B_GLM-Z1-9B-0414",
     ),
     RunSpec(
         case="2",
@@ -91,8 +84,7 @@ DEFAULT_RUNS = (
         genrm_model="Qwen3-30B-A3B",
         genrm_tp=4,
         genrm_ep=4,
-        run_dir="mixed_mode5_OVERHEAD_bs_128_share_16_elastic_"
-        "Qwen2.5-7B_Qwen3-30B-A3B-Thinking-2507",
+        run_dir="mixed_mode5_OVERHEAD_bs_128_share_16_elastic_Qwen2.5-7B_Qwen3-30B-A3B-Thinking-2507",
     ),
     RunSpec(
         case="3",
@@ -101,8 +93,7 @@ DEFAULT_RUNS = (
         genrm_model="Qwen3-30B-A3B",
         genrm_tp=4,
         genrm_ep=4,
-        run_dir="mixed_mode5_bs_128_share_32_elastic_rl_"
-        "Qwen2.5-32B_Qwen3-30B-A3B-Thinking-2507",
+        run_dir="mixed_mode5_bs_128_share_32_elastic_rl_Qwen2.5-32B_Qwen3-30B-A3B-Thinking-2507",
     ),
     RunSpec(
         case="4",
@@ -111,8 +102,7 @@ DEFAULT_RUNS = (
         genrm_model="Qwen3.5-122B-A10B",
         genrm_tp=8,
         genrm_ep=8,
-        run_dir="mixed_mode5_overhead_bs_128_share_32_elastic_rl_"
-        "Qwen2.5-72B_Qwen3.5-122B-A10B",
+        run_dir="mixed_mode5_overhead_bs_128_share_32_elastic_rl_Qwen2.5-72B_Qwen3.5-122B-A10B",
     ),
 )
 
@@ -200,10 +190,7 @@ def _timestamp(line: str) -> datetime | None:
 
 
 def _fields(body: str) -> dict[str, str]:
-    return {
-        match.group("key"): match.group("value").rstrip(",")
-        for match in KEY_VALUE_RE.finditer(body)
-    }
+    return {match.group("key"): match.group("value").rstrip(",") for match in KEY_VALUE_RE.finditer(body)}
 
 
 def _finite_float(raw: str | None) -> float | None:
@@ -329,12 +316,10 @@ def _parse_executor_metadata(
         for line in handle:
             handler_match = HANDLER_RE.search(line)
             if handler_match is not None:
-                task_text = line[handler_match.start():]
+                task_text = line[handler_match.start() :]
                 num_match = re.search(r"'num_instances': (?P<count>\d+)", task_text)
                 step_match = re.search(r"'training_step': (?P<step>-?\d+)", task_text)
-                has_pre_wake_other = not bool(
-                    re.search(r"'pre_wake_other_preferred': \[\]", task_text)
-                )
+                has_pre_wake_other = not bool(re.search(r"'pre_wake_other_preferred': \[\]", task_text))
                 targets[(handler_match.group("action"), handler_match.group("decision_id"))] = TargetInfo(
                     role=handler_match.group("role"),
                     requested_instances=(int(num_match.group("count")) if num_match else None),
@@ -397,9 +382,7 @@ def parse_executor_events(spec: RunSpec, run_path: Path, window: RunWindow) -> l
             if target is None:
                 raise ValueError(f"missing target-role metadata for {key} in {executor_log}")
             if target.has_pre_wake_other:
-                raise ValueError(
-                    f"cannot attribute combined multi-role wakeup for {key} in {executor_log}"
-                )
+                raise ValueError(f"cannot attribute combined multi-role wakeup for {key} in {executor_log}")
             status = statuses.get(key)
             if status is not None and not status.success:
                 continue
@@ -422,15 +405,31 @@ def parse_executor_events(spec: RunSpec, run_path: Path, window: RunWindow) -> l
                 if sleep_s is not None and sleep_s > 0 and (status is None or sleep_count > 0):
                     events.append(
                         _event(
-                            spec, window, timestamp, other_component, "sleep", sleep_s,
-                            sleep_count, "ElasticExecutor.log:sleep_s", action, decision_id,
+                            spec,
+                            window,
+                            timestamp,
+                            other_component,
+                            "sleep",
+                            sleep_s,
+                            sleep_count,
+                            "ElasticExecutor.log:sleep_s",
+                            action,
+                            decision_id,
                         )
                     )
                 if wakeup_s is not None and wakeup_s > 0 and (status is None or wake_count > 0):
                     events.append(
                         _event(
-                            spec, window, timestamp, target_component, "wakeup", wakeup_s,
-                            wake_count, "ElasticExecutor.log:wakeup_s", action, decision_id,
+                            spec,
+                            window,
+                            timestamp,
+                            target_component,
+                            "wakeup",
+                            wakeup_s,
+                            wake_count,
+                            "ElasticExecutor.log:wakeup_s",
+                            action,
+                            decision_id,
                         )
                     )
             else:
@@ -443,8 +442,16 @@ def parse_executor_events(spec: RunSpec, run_path: Path, window: RunWindow) -> l
                 if sleep_s is not None and sleep_s > 0 and (status is None or sleep_count > 0):
                     events.append(
                         _event(
-                            spec, window, timestamp, target_component, "sleep", sleep_s,
-                            sleep_count, "ElasticExecutor.log:sleep_s", action, decision_id,
+                            spec,
+                            window,
+                            timestamp,
+                            target_component,
+                            "sleep",
+                            sleep_s,
+                            sleep_count,
+                            "ElasticExecutor.log:sleep_s",
+                            action,
+                            decision_id,
                         )
                     )
     return events
@@ -463,8 +470,7 @@ def collect_run(
     window = parse_run_window(run_path / "MainRayTrainer.log")
     if window.completed_steps <= min_steps:
         raise ValueError(
-            f"case {spec.case} has {window.completed_steps} completed steps; "
-            f"expected > {min_steps}: {run_path}"
+            f"case {spec.case} has {window.completed_steps} completed steps; expected > {min_steps}: {run_path}"
         )
     events = parse_actor_events(spec, run_path, window)
     events.extend(parse_executor_events(spec, run_path, window))
@@ -554,10 +560,7 @@ def render_markdown(
 ) -> str:
     ddof = summaries[0].ddof
     std_label = "population" if ddof == 0 else "sample"
-    by_key = {
-        (item.case, item.component, item.operation): item
-        for item in summaries
-    }
+    by_key = {(item.case, item.component, item.operation): item for item in summaries}
     selected_by_case = {item.case: item for item in selected_runs}
     lines = [
         "# Elastic sleep/wakeup latency",

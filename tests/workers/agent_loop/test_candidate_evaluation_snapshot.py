@@ -16,10 +16,17 @@ from psrl.workers.elastic.scaling_policy.evaluation.request_level_candidate_eval
     evaluate_role_candidate,
 )
 
+from tests.elastic import runtime_helpers
 from tests.elastic.runtime_helpers import _coordinator
-from tests.elastic.runtime_helpers import modules as modules
+
+elastic_modules = runtime_helpers.modules
 
 pytestmark = pytest.mark.cpu_test
+
+
+@pytest.fixture
+def modules(elastic_modules):
+    return elastic_modules
 
 
 def _snapshot_coordinator(modules, requests):

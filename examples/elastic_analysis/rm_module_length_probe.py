@@ -12,13 +12,12 @@ import numpy as np
 import ray
 import torch
 from omegaconf import OmegaConf, open_dict
+from psrl.trainer.constants_ppo import get_ppo_ray_runtime_env
+from psrl.trainer.ppo.utils import PSRL_Role, ResourcePoolManager
 from ray.util.queue import Queue as RayQueue
 from tensordict import TensorDict
 from verl import DataProto
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
-
-from psrl.trainer.constants_ppo import get_ppo_ray_runtime_env
-from psrl.trainer.ppo.utils import PSRL_Role, ResourcePoolManager
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "INFO"))
@@ -28,9 +27,7 @@ def _select_gen_reward_model(config) -> Any:
     probe_name = OmegaConf.select(config, "rm_probe.reward_model_name")
     probe_index = OmegaConf.select(config, "rm_probe.reward_model_index")
     candidates = [
-        (idx, rm)
-        for idx, rm in enumerate(config.reward_models_config.reward_models)
-        if rm.reward_loop_type == "gen"
+        (idx, rm) for idx, rm in enumerate(config.reward_models_config.reward_models) if rm.reward_loop_type == "gen"
     ]
     if not candidates:
         raise ValueError("No reward_models_config.reward_models entry with reward_loop_type=gen.")
@@ -88,12 +85,8 @@ def _create_rm_manager(config, reward_model):
     if world_size <= 0:
         raise ValueError(f"Invalid RM world_size={world_size}.")
 
-    resource_pool_spec = {
-        f"rm_probe_pool_{i}": [world_size] for i in range(num_replicas)
-    }
-    mapping = {
-        PSRL_Role.RewardModel: [f"rm_probe_pool_{i}" for i in range(num_replicas)]
-    }
+    resource_pool_spec = {f"rm_probe_pool_{i}": [world_size] for i in range(num_replicas)}
+    mapping = {PSRL_Role.RewardModel: [f"rm_probe_pool_{i}" for i in range(num_replicas)]}
     resource_pool_manager = ResourcePoolManager(
         resource_pool_spec=resource_pool_spec,
         mapping=mapping,

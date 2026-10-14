@@ -1,4 +1,4 @@
-"""
+r"""
 Compare segmented vLLM logprobs with PSRL-style trainer recomputation.
 
 The script performs inference only. It first generates interrupt/reprefill
@@ -13,21 +13,21 @@ default because it need not produce the same token IDs.
 
 Example:
 
-  source env/env_311.sh
+  source env/psrl.sh
   CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python \
-      scripts/test_vllm_reprefill_vs_fsdp.py \
+      examples/elastic_analysis/test_vllm_reprefill_vs_fsdp.py \
       --model models/Qwen2.5-7B \
       --response-length 1024 \
       --segment-lengths 32,64,128,256 \
-      --output-dir /tmp/qwen2.5-7b-reprefill-vs-psrl
+      --output-dir analysis/qwen2.5-7b-reprefill-vs-psrl
 
 For the mode5-shaped 1K / 8-interrupt run:
 
   CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python \
-      scripts/test_vllm_reprefill_vs_fsdp.py \
+      examples/elastic_analysis/test_vllm_reprefill_vs_fsdp.py \
       --model models/Qwen2.5-7B --response-length 1024 \
       --reprefill-count 8 --match-mode5 \
-      --output-dir /tmp/qwen2.5-7b-reprefill-8x
+      --output-dir analysis/qwen2.5-7b-reprefill-8x
 """
 
 from __future__ import annotations
@@ -370,23 +370,19 @@ def _response_prompt_records(
 ) -> tuple[list[float | None], list[bool]]:
     """Align vLLM prompt logprobs to the already generated response tokens."""
     if not prompt_records:
-        # Some vLLM backends/configurations may omit prompt logprobs even when
-        # requested. Preserve the experiment and make the missing values
-        # explicit so the online replacement buffer remains the fallback.
+        # Missing prompt logprobs leave the online replacement buffer in use and must remain explicit in the report.
         return [None] * len(response_ids), [False] * len(response_ids)
     response_records = prompt_records[prompt_length:]
     if len(response_records) != len(response_ids):
         raise RuntimeError(
-            "reprefill prompt logprob length mismatch: "
-            f"got {len(response_records)}, expected {len(response_ids)}"
+            f"reprefill prompt logprob length mismatch: got {len(response_records)}, expected {len(response_ids)}"
         )
     values: list[float | None] = []
     available: list[bool] = []
     for position, (record, token_id) in enumerate(zip(response_records, response_ids, strict=True)):
         if int(record["token_id"]) != int(token_id):
             raise RuntimeError(
-                f"reprefill token mismatch at response position {position}: "
-                f"{record['token_id']} != {token_id}"
+                f"reprefill token mismatch at response position {position}: {record['token_id']} != {token_id}"
             )
         value = record.get("logprob")
         values.append(float(value) if value is not None else None)
@@ -444,14 +440,12 @@ def _offpolicy_statistics(
         "training_ppl": math.exp(mean_training_log_ppl),
         "rollout_log_ppl": mean_rollout_log_ppl,
         "rollout_ppl": math.exp(mean_rollout_log_ppl),
-        # verl reports mean(log p_rollout) - mean(log p_training), which is
-        # equivalent to training_log_ppl - rollout_log_ppl.
+        # veRL reports `mean(log p_rollout) - mean(log p_training)`, equivalent to
+        # `training_log_ppl - rollout_log_ppl`.
         "log_ppl_diff": mean_training_log_ppl - mean_rollout_log_ppl,
         "log_ppl_abs_diff": abs(mean_training_log_ppl - mean_rollout_log_ppl),
         "kl": statistics.fmean(rollout_values[index] - trainer_values[index] for index in range(len(log_ratio))),
-        "k3_kl": statistics.fmean(
-            math.exp(value) - value - 1.0 for value in safe_log_ratio
-        ),
+        "k3_kl": statistics.fmean(math.exp(value) - value - 1.0 for value in safe_log_ratio),
         "ppl_ratio": math.exp(mean_training_log_ppl - mean_rollout_log_ppl),
         "chi2_token": statistics.fmean(math.exp(2.0 * value) for value in safe_log_ratio) - 1.0,
         "chi2_seq": math.exp(2.0 * safe_sequence_log_ratio) - 1.0,
@@ -463,8 +457,7 @@ def _offpolicy_batch_statistics(
 ) -> dict[str, float]:
     """Aggregate off-policy diagnostics with the same token/sequence reductions as verl."""
     pair_values = [
-        ([float(value) for value in trainer], [float(value) for value in rollout])
-        for trainer, rollout in pairs
+        ([float(value) for value in trainer], [float(value) for value in rollout]) for trainer, rollout in pairs
     ]
     if not pair_values:
         raise ValueError("off-policy batch statistics require at least one sequence")
@@ -481,10 +474,7 @@ def _offpolicy_batch_statistics(
     safe_log_ratios = [max(-20.0, min(20.0, value)) for value in log_ratios]
     sequence_stats = [_offpolicy_statistics(trainer, rollout) for trainer, rollout in pair_values]
     sequence_log_ratios = [
-        sum(
-            trainer_value - rollout_value
-            for trainer_value, rollout_value in zip(trainer, rollout, strict=True)
-        )
+        sum(trainer_value - rollout_value for trainer_value, rollout_value in zip(trainer, rollout, strict=True))
         for trainer, rollout in pair_values
     ]
     sequence_log_ppl_diffs = [stat["log_ppl_diff"] for stat in sequence_stats]
@@ -501,9 +491,7 @@ def _offpolicy_batch_statistics(
         "kl": statistics.fmean(rollout_value - trainer_value for trainer_value, rollout_value in token_pairs),
         "k3_kl": statistics.fmean(math.exp(value) - value - 1.0 for value in safe_log_ratios),
         "chi2_token": statistics.fmean(math.exp(2.0 * value) for value in safe_log_ratios) - 1.0,
-        "chi2_seq": statistics.fmean(
-            math.exp(2.0 * max(-20.0, min(20.0, value))) for value in sequence_log_ratios
-        )
+        "chi2_seq": statistics.fmean(math.exp(2.0 * max(-20.0, min(20.0, value))) for value in sequence_log_ratios)
         - 1.0,
     }
 
@@ -515,23 +503,16 @@ def _geometric_rs_batch_statistics(
 ) -> dict[str, Any]:
     """Aggregate geometric RS statistics, preserving sequence and token denominators."""
     sequence_stats = [
-        _geometric_rs_statistics(trainer, rollout, upper_threshold=upper_threshold)
-        for trainer, rollout in pairs
+        _geometric_rs_statistics(trainer, rollout, upper_threshold=upper_threshold) for trainer, rollout in pairs
     ]
     total_tokens = sum(int(stat["response_tokens"]) for stat in sequence_stats)
-    rejected_tokens = sum(
-        int(stat["response_tokens"])
-        for stat in sequence_stats
-        if stat["sequence_rejected"]
-    )
+    rejected_tokens = sum(int(stat["response_tokens"]) for stat in sequence_stats if stat["sequence_rejected"])
     geometric_ratio_mean = statistics.fmean(stat["geometric_ratio"] for stat in sequence_stats)
     geometric_ratio_min = min(stat["geometric_ratio"] for stat in sequence_stats)
     geometric_ratio_max = max(stat["geometric_ratio"] for stat in sequence_stats)
     sequence_fraction_high = statistics.fmean(stat["sequence_fraction_high"] for stat in sequence_stats)
     sequence_fraction_low = statistics.fmean(stat["sequence_fraction_low"] for stat in sequence_stats)
-    sequence_masked_fraction = statistics.fmean(
-        float(stat["sequence_rejected"]) for stat in sequence_stats
-    )
+    sequence_masked_fraction = statistics.fmean(float(stat["sequence_rejected"]) for stat in sequence_stats)
     token_masked_fraction = rejected_tokens / total_tokens if total_tokens else 0.0
     return {
         "threshold_upper": upper_threshold,
@@ -630,9 +611,7 @@ def _vllm_metadata(engine: Any, args: argparse.Namespace) -> dict[str, Any]:
         "mode5_rollout_is_threshold": 2.0 if args.match_mode5 else None,
         "mode5_rollout_rs": "geometric" if args.match_mode5 else None,
         "mode5_rollout_rs_threshold": args.mode5_rs_threshold if args.match_mode5 else None,
-        "mode5_rollout_rs_threshold_lower": (
-            1.0 / args.mode5_rs_threshold if args.match_mode5 else None
-        ),
+        "mode5_rollout_rs_threshold_lower": (1.0 / args.mode5_rs_threshold if args.match_mode5 else None),
         "mode5_rollout_token_veto_threshold": None,
     }
 
@@ -757,9 +736,7 @@ async def _generate_segmented(
         )
         segment_index += 1
 
-    # The final segment has no subsequent interrupt in the online path. Score
-    # the complete fixed prefix once more so the report can separate that
-    # actual online behavior from an all-prefill diagnostic variant.
+    # The final segment has no online interrupt. Score its full prefix separately from the all-prefill diagnostic.
     final_prefill_values: list[float | None] = [None] * len(response_ids)
     final_prefill_available = [False] * len(response_ids)
     final_replacement = list(replacement)
@@ -796,9 +773,7 @@ async def _generate_segmented(
             {
                 "available_count": sum(final_prefill_available),
                 "available_fraction": (
-                    sum(final_prefill_available) / len(final_prefill_available)
-                    if final_prefill_available
-                    else 1.0
+                    sum(final_prefill_available) / len(final_prefill_available) if final_prefill_available else 1.0
                 ),
             }
         )
@@ -1253,9 +1228,7 @@ def _case_token_rows(
                 "ratio_concat": _finite_ratio(trainer[position] - case.logprob_concat[position]),
                 "ratio_replace": _finite_ratio(trainer[position] - case.logprob_replace[position]),
                 "ratio_replace_online": _finite_ratio(trainer[position] - case.logprob_replace[position]),
-                "ratio_replace_final": _finite_ratio(
-                    trainer[position] - case.logprob_replace_final[position]
-                ),
+                "ratio_replace_final": _finite_ratio(trainer[position] - case.logprob_replace_final[position]),
             }
         )
     return rows
@@ -1277,9 +1250,7 @@ def _aggregate_grouped_rows(
             "replace": _summarize_values([row["abs_delta_replace"] for row in group]),
         }
         if "abs_delta_replace_final" in group[0]:
-            output_row["replace_final"] = _summarize_values(
-                [row["abs_delta_replace_final"] for row in group]
-            )
+            output_row["replace_final"] = _summarize_values([row["abs_delta_replace_final"] for row in group])
         output.append(output_row)
     return output
 
@@ -1301,9 +1272,7 @@ def _aggregate_method_metrics(
                 continue
             continuous = continuous_by_prompt.get(segmented.prompt_id)
             if continuous is not None:
-                method_pairs["continuous"].append(
-                    (trainer_scores[continuous.case_id], continuous.logprob_continuous)
-                )
+                method_pairs["continuous"].append((trainer_scores[continuous.case_id], continuous.logprob_continuous))
             trainer = trainer_scores[segmented.case_id]
             method_pairs["concat"].append((trainer, segmented.logprob_concat))
             # Keep the historical key "replace" as an alias for online semantics.
@@ -1440,14 +1409,11 @@ def _build_automated_conclusions(
         }
         if replace_final is not None:
             final_reductions = {
-                field: _fractional_reduction(replace[field], replace_final[field])
-                for field in comparison_fields
+                field: _fractional_reduction(replace[field], replace_final[field]) for field in comparison_fields
             }
             result["final_prefill"] = {
                 "fractional_reduction_online_to_final": final_reductions,
-                "improves_over_online": all(
-                    replace_final[field] < replace[field] for field in comparison_fields
-                ),
+                "improves_over_online": all(replace_final[field] < replace[field] for field in comparison_fields),
                 "hypothetical_masked_fraction": replace_final["ratio"]["hypothetical_masked_fraction"],
                 "mode5_geometric_rs": replace_final.get("mode5_geometric_rs"),
             }
@@ -1807,9 +1773,7 @@ def _build_report(
             "continuous_baseline_enabled": args.include_continuous_baseline,
             "final_prefix_score_enabled": getattr(args, "final_prefix_score", True),
             "reprefill_count_requested": getattr(args, "reprefill_count", None),
-            "reprefill_count_actual": sorted(
-                {len(case.reprefill_history) for case in segmented_cases}
-            ),
+            "reprefill_count_actual": sorted({len(case.reprefill_history) for case in segmented_cases}),
             "mode5_preset_enabled": getattr(args, "match_mode5", False),
             "mode5_rollout_corr_metrics_are_offline": True,
             "total_continuous_response_tokens": sum(len(case.response_token_ids) for case in continuous_cases),
@@ -1837,7 +1801,7 @@ def _build_report(
             ),
         },
         # Keep the historical flat rollout checkpoint fields for downstream
-        # report consumers; trainer snapshots are additional fields.
+        # report consumers. trainer snapshots are additional fields.
         "checkpoint_before": rollout_checkpoint_before,
         "checkpoint_after": rollout_checkpoint_after,
         "trainer_checkpoint_before": trainer_checkpoint_before,

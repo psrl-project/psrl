@@ -5,7 +5,7 @@ The input is a run directory containing ``StatCollector*.log`` files. Snapshot
 timestamps embedded in the records are resampled onto one shared time grid, so
 Rollout and RewardModel instances can be compared even though their collectors
 write independently. Numeric cells are only shown while an instance has a
-recent snapshot; stale periods are gray and exposed explicitly in the active
+recent snapshot. stale periods are gray and exposed explicitly in the active
 panel.
 
 Examples:
@@ -29,9 +29,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_LOG_DIR = (
-    REPO_ROOT
-    / "logs/verl_deployment_modes/"
-    "mixed_mode1_roll_4_rm_4_disaggregated_Qwen2.5-72B_Qwen3.5-122B-A10B"
+    REPO_ROOT / "logs/verl_deployment_modes/mixed_mode1_roll_4_rm_4_disaggregated_Qwen2.5-72B_Qwen3.5-122B-A10B"
 )
 
 ROLE_ORDER = ("Rollout", "RewardModel")
@@ -51,29 +49,17 @@ METRIC_SPECS = {
 }
 
 RE_TIMESTAMP = re.compile(r"'timestamp':\s*'(?P<timestamp>[^']+)'")
-RE_THROUGHPUT = re.compile(
-    r"'generation_throughput':\s*(?:np\.float64\()?([\d.eE+-]+)"
-)
+RE_THROUGHPUT = re.compile(r"'generation_throughput':\s*(?:np\.float64\()?([\d.eE+-]+)")
 RE_NUM_RUNNING = re.compile(r"'num_running_reqs':\s*(\d+)")
 RE_NUM_WAITING = re.compile(r"'num_waiting_reqs':\s*(\d+)")
 RE_KV_CACHE = re.compile(r"'kv_cache_usage':\s*([\d.eE+-]+)")
-RE_PROMPT_SECTION = re.compile(
-    r"'req_id_to_prompt_token_num':\s*\{(.*?)\},\s*'req_id_to_response_token_num'"
-)
-RE_RESPONSE_SECTION = re.compile(
-    r"'req_id_to_response_token_num':\s*\{(.*?)\},\s*'req_id_in_waiting'"
-)
+RE_PROMPT_SECTION = re.compile(r"'req_id_to_prompt_token_num':\s*\{(.*?)\},\s*'req_id_to_response_token_num'")
+RE_RESPONSE_SECTION = re.compile(r"'req_id_to_response_token_num':\s*\{(.*?)\},\s*'req_id_in_waiting'")
 RE_DICT_INT_VALUES = re.compile(r":\s*(\d+)")
 RE_ROLLOUT_LOG = re.compile(r"^StatCollector_I(?P<instance>\d+)\.log$")
-RE_RM_LOG = re.compile(
-    r"^StatCollector_RM_(?P<model>.+)_I(?P<instance>\d+)\.log$"
-)
-RE_LOG_TIMESTAMP = re.compile(
-    r"^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3})"
-)
-RE_TRAINING_BATCH_BEGIN = re.compile(
-    r"\[Begin Event\] WAIT - Wait for training batch (?P<step>\d+)"
-)
+RE_RM_LOG = re.compile(r"^StatCollector_RM_(?P<model>.+)_I(?P<instance>\d+)\.log$")
+RE_LOG_TIMESTAMP = re.compile(r"^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3})")
+RE_TRAINING_BATCH_BEGIN = re.compile(r"\[Begin Event\] WAIT - Wait for training batch (?P<step>\d+)")
 
 
 @dataclass(frozen=True)
@@ -155,9 +141,7 @@ def parse_snapshot_line(line: str, include_tokens: bool = True) -> Snapshot | No
     return point if all(math.isfinite(value) for value in values) else None
 
 
-def parse_instance_log(
-    path: Path, include_tokens: bool = True
-) -> tuple[Snapshot, ...]:
+def parse_instance_log(path: Path, include_tokens: bool = True) -> tuple[Snapshot, ...]:
     points: list[Snapshot] = []
     with path.open("r", encoding="utf-8", errors="replace") as log_file:
         for line in log_file:
@@ -171,9 +155,7 @@ def parse_instance_log(
 def load_instances(
     log_dir: Path, requested_roles: set[str], include_tokens: bool = True
 ) -> dict[str, list[InstanceSeries]]:
-    instances: dict[str, list[InstanceSeries]] = {
-        role: [] for role in ROLE_ORDER if role in requested_roles
-    }
+    instances: dict[str, list[InstanceSeries]] = {role: [] for role in ROLE_ORDER if role in requested_roles}
     skipped = 0
     for path in sorted(log_dir.glob("StatCollector*.log")):
         metadata = classify_log(path)
@@ -186,9 +168,7 @@ def load_instances(
         if not points:
             skipped += 1
             continue
-        instances.setdefault(role, []).append(
-            InstanceSeries(role, model, instance_id, path, points)
-        )
+        instances.setdefault(role, []).append(InstanceSeries(role, model, instance_id, path, points))
 
     for role in instances:
         instances[role].sort(key=lambda instance: (instance.instance_id, instance.model))
@@ -206,17 +186,13 @@ def parse_trainer_active_intervals(log_path: Path) -> list[TrainerInterval]:
     intervals: list[TrainerInterval] = []
     with log_path.open("r", encoding="utf-8", errors="replace") as log_file:
         for line in log_file:
-            event = next(
-                (name for name in TRAINER_ACTIVE_EVENTS if name in line), None
-            )
+            event = next((name for name in TRAINER_ACTIVE_EVENTS if name in line), None)
             if event is None:
                 continue
             timestamp_match = RE_LOG_TIMESTAMP.match(line)
             if timestamp_match is None:
                 continue
-            timestamp = datetime.strptime(
-                timestamp_match.group("timestamp"), "%Y-%m-%d %H:%M:%S,%f"
-            )
+            timestamp = datetime.strptime(timestamp_match.group("timestamp"), "%Y-%m-%d %H:%M:%S,%f")
             if "[Begin Event]" in line:
                 starts[event] = timestamp
             elif "[End Event]" in line and event in starts:
@@ -243,9 +219,7 @@ def first_steps_end_timestamp(log_path: Path, step_count: int) -> datetime:
             timestamp_match = RE_LOG_TIMESTAMP.match(line)
             if timestamp_match is None:
                 continue
-            timestamp = datetime.strptime(
-                timestamp_match.group("timestamp"), "%Y-%m-%d %H:%M:%S,%f"
-            )
+            timestamp = datetime.strptime(timestamp_match.group("timestamp"), "%Y-%m-%d %H:%M:%S,%f")
             if batch_match := RE_TRAINING_BATCH_BEGIN.search(line):
                 batch_begins[int(batch_match.group("step"))] = timestamp
             if "[End Event] TRAIN - Update actor" in line:
@@ -265,9 +239,7 @@ def first_steps_end_timestamp(log_path: Path, step_count: int) -> datetime:
     return update_end
 
 
-def trainer_active_grid(
-    grid: list[datetime], intervals: list[TrainerInterval]
-) -> object:
+def trainer_active_grid(grid: list[datetime], intervals: list[TrainerInterval]) -> object:
     import numpy as np
 
     active = np.zeros(len(grid), dtype=float)
@@ -286,19 +258,11 @@ def make_time_grid(
     end_min: float | None,
     end_timestamp: datetime | None = None,
 ) -> tuple[datetime, list[datetime]]:
-    all_instances = [
-        instance
-        for role_instances in instances_by_role.values()
-        for instance in role_instances
-    ]
+    all_instances = [instance for role_instances in instances_by_role.values() for instance in role_instances]
     origin = min(instance.points[0].timestamp for instance in all_instances)
     last_timestamp = max(instance.points[-1].timestamp for instance in all_instances)
     start = origin + timedelta(minutes=start_min or 0.0)
-    end = (
-        origin + timedelta(minutes=end_min)
-        if end_min is not None
-        else last_timestamp
-    )
+    end = origin + timedelta(minutes=end_min) if end_min is not None else last_timestamp
     if end_timestamp is not None:
         end = min(end, end_timestamp)
     if start > last_timestamp or end < origin or start > end:
@@ -319,21 +283,15 @@ def build_matrices(
     matrices: dict[str, dict[str, object]] = {}
     for role, instances in instances_by_role.items():
         role_matrices = {
-            metric: np.full((len(instances), len(grid)), np.nan, dtype=float)
-            for metric in NUMERIC_METRICS
+            metric: np.full((len(instances), len(grid)), np.nan, dtype=float) for metric in NUMERIC_METRICS
         }
-        role_matrices["active"] = np.zeros(
-            (len(instances), len(grid)), dtype=float
-        )
+        role_matrices["active"] = np.zeros((len(instances), len(grid)), dtype=float)
 
         for row, instance in enumerate(instances):
             point_index = -1
             points = instance.points
             for column, timestamp in enumerate(grid):
-                while (
-                    point_index + 1 < len(points)
-                    and points[point_index + 1].timestamp <= timestamp
-                ):
+                while point_index + 1 < len(points) and points[point_index + 1].timestamp <= timestamp:
                     point_index += 1
                 if point_index < 0:
                     continue
@@ -353,9 +311,7 @@ def _time_edges(x_minutes: object, bin_sec: float) -> object:
 
     x_values = np.asarray(x_minutes, dtype=float)
     half_bin_min = bin_sec / 120.0
-    return np.concatenate(
-        (x_values - half_bin_min, [x_values[-1] + half_bin_min])
-    )
+    return np.concatenate((x_values - half_bin_min, [x_values[-1] + half_bin_min]))
 
 
 def _tick_rows(instance_count: int, max_ticks: int = 16) -> list[int]:
@@ -403,9 +359,7 @@ def plot_heatmaps(
     from matplotlib.colors import BoundaryNorm, ListedColormap
 
     matrices = build_matrices(instances_by_role, grid, max_age_sec)
-    x_minutes = np.array(
-        [(timestamp - origin).total_seconds() / 60.0 for timestamp in grid]
-    )
+    x_minutes = np.array([(timestamp - origin).total_seconds() / 60.0 for timestamp in grid])
     x_edges = _time_edges(x_minutes, bin_sec)
 
     plot_rows = [*metrics, "trainer_active"]
@@ -418,9 +372,7 @@ def plot_heatmaps(
         layout="constrained",
     )
     numeric_limits = {
-        metric: _numeric_limit(matrices, roles, metric, percentile)
-        for metric in metrics
-        if metric in NUMERIC_METRICS
+        metric: _numeric_limit(matrices, roles, metric, percentile) for metric in metrics if metric in NUMERIC_METRICS
     }
     active_cmap = ListedColormap(["#d9d9d9", "#59a14f"])
     trainer_cmap = ListedColormap(["#d9d9d9", "#e15759"])
@@ -480,11 +432,7 @@ def plot_heatmaps(
                     fontsize=7,
                 )
                 models = ", ".join(
-                    model
-                    for model in dict.fromkeys(
-                        instance.model for instance in instances
-                    )
-                    if model != "rollout"
+                    model for model in dict.fromkeys(instance.model for instance in instances) if model != "rollout"
                 )
                 model_suffix = f"; {models}" if models else ""
                 ax.set_title(
@@ -599,11 +547,7 @@ def main() -> None:
         raise SystemExit("--start-min must be non-negative.")
     if args.end_min is not None and args.end_min < 0.0:
         raise SystemExit("--end-min must be non-negative.")
-    if (
-        args.start_min is not None
-        and args.end_min is not None
-        and args.start_min > args.end_min
-    ):
+    if args.start_min is not None and args.end_min is not None and args.start_min > args.end_min:
         raise SystemExit("--start-min must be <= --end-min.")
     if args.first_steps is not None and args.first_steps <= 0:
         raise SystemExit("--first-steps must be positive.")
@@ -620,18 +564,12 @@ def main() -> None:
 
     roles = list(dict.fromkeys(args.roles))
     metrics = list(dict.fromkeys(args.metrics))
-    instances_by_role = load_instances(
-        log_dir, set(roles), include_tokens="tokens" in metrics
-    )
+    instances_by_role = load_instances(log_dir, set(roles), include_tokens="tokens" in metrics)
     roles = [role for role in roles if role in instances_by_role]
     if not roles:
         raise SystemExit(f"No valid StatCollector logs found under {log_dir}")
     trainer_log_path = log_dir / "MainRayTrainer.log"
-    steps_end = (
-        first_steps_end_timestamp(trainer_log_path, args.first_steps)
-        if args.first_steps is not None
-        else None
-    )
+    steps_end = first_steps_end_timestamp(trainer_log_path, args.first_steps) if args.first_steps is not None else None
     origin, grid = make_time_grid(
         instances_by_role,
         args.bin_sec,
@@ -645,11 +583,7 @@ def main() -> None:
         if args.first_steps is not None
         else "StatCollector_instance_load.png"
     )
-    output_path = (
-        args.output.resolve()
-        if args.output
-        else log_dir / default_output_name
-    )
+    output_path = args.output.resolve() if args.output else log_dir / default_output_name
     limits = plot_heatmaps(
         origin=origin,
         grid=grid,
@@ -666,16 +600,9 @@ def main() -> None:
 
     elapsed_start = (grid[0] - origin).total_seconds() / 60.0
     elapsed_end = (grid[-1] - origin).total_seconds() / 60.0
-    role_summary = ", ".join(
-        f"{role}={len(instances_by_role[role])}" for role in roles
-    )
-    limit_summary = ", ".join(
-        f"{metric}={limit:g}" for metric, limit in limits.items()
-    )
-    print(
-        f"Built {len(grid)} grid points over {elapsed_start:.2f}-{elapsed_end:.2f} min; "
-        f"{role_summary}"
-    )
+    role_summary = ", ".join(f"{role}={len(instances_by_role[role])}" for role in roles)
+    limit_summary = ", ".join(f"{metric}={limit:g}" for metric, limit in limits.items())
+    print(f"Built {len(grid)} grid points over {elapsed_start:.2f}-{elapsed_end:.2f} min. {role_summary}")
     if limit_summary:
         print(f"Shared color-scale maxima: {limit_summary}")
     print(f"Trainer active intervals: {len(trainer_intervals)}")

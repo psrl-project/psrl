@@ -182,7 +182,7 @@ def resolve_response_len(seq_len: int, prompt_len: int, response_len: int | None
     if prompt_len < 0 or prompt_len >= seq_len:
         raise ValueError(f"prompt_len must be in [0, seq_len), got {prompt_len=} {seq_len=}.")
     if response_len is None:
-        # OPD teacher scores response tokens only; when prompt_len==0, at most seq_len-1 positions
+        # OPD teacher scores response tokens only. when prompt_len==0, at most seq_len-1 positions
         # have a prior logit (token 0 is never scored).
         resolved = seq_len - prompt_len if prompt_len > 0 else seq_len - 1
     else:
@@ -203,10 +203,10 @@ def forward_sequence_topk(
     use_cache: bool,
 ) -> tuple[list[list[float]], list[list[int]]]:
     """
-    Single forward on a length-L sequence; top-k logprobs for ``response_len`` trailing tokens.
+    Single forward on a length-L sequence. top-k logprobs for ``response_len`` trailing tokens.
 
     Matches ``PSRL_TransformersRollout._score_single``: for each response token at index t,
-    use logits[t - 1] to compute logprobs (teacher prefill path in OPD).
+    Use `logits[t - 1]` to compute logprobs (teacher prefill path in OPD).
     """
     seq_len = input_ids.shape[1]
     if response_len <= 0 or response_len >= seq_len:
@@ -342,7 +342,7 @@ def main() -> None:
             prof.step()
 
         if rank == 0:
-            # Summarize operator memory usage; useful for locating the biggest activation/temporary tensors.
+            # Summarize operator memory usage. useful for locating the biggest activation/temporary tensors.
             key_avgs = prof.key_averages()
             rows: list[dict] = []
             for avg in key_avgs:
@@ -375,7 +375,7 @@ def main() -> None:
             try:
                 print(key_avgs.table(sort_by="self_cuda_memory_usage", row_limit=args.torch_profiler_top_events))
             except Exception:
-                # Table output is best-effort; json summary is the reliable artifact.
+                # Table output is best-effort. json summary is the reliable artifact.
                 pass
             print(f"[torch profiler] trace_dir={trace_dir}")
             print(f"[torch profiler] top-ops json={summary_path}")

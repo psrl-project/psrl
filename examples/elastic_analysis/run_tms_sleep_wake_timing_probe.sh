@@ -1,8 +1,5 @@
 #!/usr/bin/env bash
-# Run one TMS-managed vLLM engine without starting the full trainer.
-# The rollout role also starts a minimal CPU PS and NIXL meta server, loads the
-# real checkpoint into PS memory, and measures wake/register/pull end to end.
-# Usage: scripts/run_tms_sleep_wake_timing_probe.sh [reward|rollout] [32b|7b] [instances]
+# Time TMS sleep and wake for one vLLM engine. Rollout probes also start CPU PS and NIXL metadata services.
 set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
@@ -71,9 +68,7 @@ export PSRL_LOGGING_LEVEL=${PSRL_LOGGING_LEVEL:-INFO}
 export PSRL_TMS_VLLM_MAX_TOKENS=${PSRL_TMS_VLLM_MAX_TOKENS:-1}
 export PSRL_TMS_VLLM_NUM_INSTANCES="${INSTANCE_COUNT}"
 export PSRL_TMS_VLLM_CYCLES=${PSRL_TMS_VLLM_CYCLES:-2}
-# Ray's uv hook walks the driver parent process tree even though this probe is
-# not launched with uv. Container PID namespaces can make that walk fail before
-# pytest collection, so disable only that unused environment propagation hook.
+# Disable Ray's uv environment hook because container PID namespaces can break its parent-process scan.
 export RAY_ENABLE_UV_RUN_RUNTIME_ENV=0
 export "${MODEL_ENV}=${MODEL_PATH}"
 

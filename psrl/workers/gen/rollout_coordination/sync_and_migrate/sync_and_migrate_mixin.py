@@ -179,8 +179,7 @@ class SyncAndMigrateMixin:
                         for instance_id in instance_ids:
                             self.instance_to_version_after_sync[instance_id] = target_version
                         psrl_logger.info(
-                            f"Published model version for routing: version={target_version}, "
-                            f"replicas={replica_ids!r}."
+                            f"Published model version for routing: version={target_version}, replicas={replica_ids!r}."
                         )
                     except Exception:
                         await asyncio.gather(*pull_futures, return_exceptions=True)

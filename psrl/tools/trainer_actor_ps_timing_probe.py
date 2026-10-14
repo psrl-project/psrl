@@ -351,7 +351,8 @@ def main() -> None:
     # These imports create the global port-scanner actor, so load them only
     # after connecting to the intended Ray cluster.
     from psrl.utils.nixl import GLOBAL_PORT_SCANNER, NIXLInterface
-    from psrl.workers.ps import PSManager, PSStoragePlan, PSStorageWorker
+    from psrl.workers.ps.ps_manager import PSManager
+    from psrl.workers.ps.ps_storage_worker import PSStoragePlan, PSStorageWorker
     from psrl.workers.ps.ps_worker_group import (
         PSClassWithInitArgs,
         PSResourcePool,

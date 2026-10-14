@@ -12,12 +12,12 @@ and can write five CSV files:
 * run_windows.csv: source-log timestamps and the selected relative-time window.
 
 ``--usable-only`` drops request-migration interrupt/dispatch records that do
-not have a matching terminal ``post_scale_up_rebalance`` record.  This keeps
+not have a matching terminal ``post_scale_up_rebalance`` record. This keeps
 aborted or incomplete requests out of latency statistics while preserving the
 raw parser behavior by default.
 
 Percentiles use linear interpolation over sorted samples. In current logs,
-``network_s`` spans requeue to redispatch and is not pure network transfer;
+``network_s`` spans requeue to redispatch and is not pure network transfer.
 ``abort_to_redispatch_s`` preserves the full interruption-plus-redispatch span.
 """
 
@@ -472,7 +472,7 @@ def filter_usable_migration_events(events: Iterable[MetricEvent]) -> list[Metric
     """Keep migration records with an observed terminal completion.
 
     The selective-abort path can emit an interrupt or dispatch timing even
-    when the request never returns a final result.  A terminal record carrying
+    when the request never returns a final result. A terminal record carrying
     Both ``migration_s`` and ``reprefill_s`` on the terminal record are the
     evidence that all three timing boundaries belong to one completed
     migration. Match by request ID when available and fall back to migration
@@ -601,10 +601,7 @@ def summarize_scaling_actions_per_step(
             {metric: 0 for metric in _STEP_SCALING_METRICS},
         )
         counts[event.metric] += int(event.value)
-    return [
-        ScalingActionStepSummary(run=run, step=step, **counts)
-        for (run, step), counts in sorted(grouped.items())
-    ]
+    return [ScalingActionStepSummary(run=run, step=step, **counts) for (run, step), counts in sorted(grouped.items())]
 
 
 def _in_window(timestamp: datetime | None, origin: datetime | None, start_min: float, end_min: float | None) -> bool:
@@ -750,8 +747,7 @@ def print_scaling_actions_per_step(
         return
     print("\nActual scaling actions per trainer step:")
     print(
-        "| run | step | actions | scale up | scale down | slept instances | "
-        "woken instances | instance transitions |"
+        "| run | step | actions | scale up | scale down | slept instances | woken instances | instance transitions |"
     )
     print("|---|---:|---:|---:|---:|---:|---:|---:|")
     for row in rows:

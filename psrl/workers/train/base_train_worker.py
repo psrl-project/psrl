@@ -457,10 +457,7 @@ class PSRL_BaseTrainWorker:
             # ---- DEBUG: log PS info BEFORE pull ----
             # self._debug_log_ps_info(label=f"PS_BEFORE_PULL_R{self.worker_rank}")
             fingerprint_result = self.nixl_pull_model()
-            # ---- DEBUG: log train info AFTER pull ----
-            # self._debug_log_train_info(label=f"TRAIN_AFTER_PULL_R{self.worker_rank}")
-            # NOTE(linsh): Reload after the first pull because empty initialization leaves
-            # optimizer master parameters stale, while later optimizer state remains local.
+            # NOTE(linsh): Reload optimizer master parameters after the first pull from empty initialization.
             if self.pull_times == 1:
                 self.reload_optimizer_after_pull()
         else:

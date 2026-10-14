@@ -656,10 +656,7 @@ class DataProcessor:
 
         chunks: list[dict] = []
         remaining = n_prompts
-        # `_get_train_next` rebuilds its iterators before re-raising, so the first
-        # `StopIteration` means this epoch ended rather than the dataset being finished.
-        # One rollover per call is allowed. A second consecutive raise means the
-        # dataloader yields nothing at all, and looping on that would spin forever.
+        # Allow one epoch rollover per call. A second `StopIteration` means an empty dataloader and must not spin.
         rollover_used = False
         with self.dataloader_lock:
             while remaining > 0:
@@ -910,7 +907,7 @@ class DataProcessor:
                     self.train_dataloader_iters = [iter(dl) for dl in self.train_dataloaders]
             except Exception as e:
                 psrl_logger.error(
-                    f"Fatal exception in data processing thread; stopping data processing: {e}",
+                    f"Fatal exception in data processing thread. Stopping data processing: {e}",
                     exc_info=True,
                 )
                 self.stop_data_process = True

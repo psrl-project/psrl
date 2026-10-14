@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-# Mode 4: independent main pools plus fixed replicas on idle trainer GPUs.
-# Defaults place 4 TP1 rollout and 3 TP4 RM instances on the 16-GPU train pool.
-# Usage: bash mode4_trainer_pool_only.sh [smoke_test=0] [extra hydra overrides...]
+# Mode 4 places four extra TP1 rollout instances and three TP4 RM replicas on the idle 16-GPU trainer pool.
 set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)

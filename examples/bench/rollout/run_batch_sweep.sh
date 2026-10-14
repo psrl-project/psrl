@@ -1,20 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Sweep rollout bench over models, disable_attn settings, and batch sizes.
-# Each run is assigned an exclusive GPU group and runs in parallel with the
-# other groups. Override GPU_IDS with a comma-separated list when needed.
+# Each run owns one GPU group. Set `GPU_IDS` to select the devices for the parallel sweep.
 #
-# Usage:
-#   export PSRL_WORKSPACE=/path/to/psrl
-#   bash examples/bench/rollout/run_batch_sweep.sh [tp] [prompt_len] [ep]
+# Run from the repository root: `bash examples/bench/rollout/run_batch_sweep.sh [tp] [prompt_len] [ep]`.
 #
 # EP defaults to auto-detect in run_rollout_test.sh (MoE => EP=TP, dense => EP=1).
 # Pass a third arg or set GEN_EP to override.
 #
-# Example:
-#   bash examples/bench/rollout/run_batch_sweep.sh 8 1024
-#   bash examples/bench/rollout/run_batch_sweep.sh 8 1024 8
+# For TP8 with 1024 prompt tokens, pass `8 1024`. Append `8` to enable EP8.
 
 export PSRL_WORKSPACE=/apdcephfs_zwfy10/share_303541817/yfzhao/psrl 
 
@@ -81,9 +75,7 @@ if ((${#gpu_ids[@]} % GEN_TP != 0)); then
     exit 1
 fi
 
-# A TP run owns all GPUs in its group. With the default TP=1 this creates
-# eight workers, so the 14-run sweep executes as an 8-run wave followed by a
-# 6-run wave.
+# Each TP run exclusively owns its assigned GPU group until completion.
 gpu_groups=()
 gpu_group_count=$((${#gpu_ids[@]} / GEN_TP))
 for ((group_start = 0; group_start < ${#gpu_ids[@]}; group_start += GEN_TP)); do

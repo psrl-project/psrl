@@ -10,12 +10,7 @@
 # Mode-specific required overrides are applied automatically below. Any extra
 # hydra overrides passed after <mode> are forwarded to main_ppo.
 #
-# Notes:
-# - Modes 2/3/4 require psrl.ps_mode in {nixl_cpu, nixl_gpu} (NIXL sleep/wake).
-# - Modes 2/3 require reward.launch_reward_fn_async=true and
-#   psrl.staleness=0 (per-buffer sequential rollout->reward phasing).
-# - Mode 4 enables fixed extra rollout/rm replicas on train_pool via
-#   trainer_pool_idle_{rollout,rm}_instances.
+# Modes 2, 3, and 4 require NIXL. Modes 2 and 3 require asynchronous reward and zero staleness.
 
 set -euo pipefail
 
@@ -70,8 +65,8 @@ case "$MODE" in
       reward.launch_reward_fn_async=True"
     ;;
   rollout_rm_colocated)
-    # Mode 3: rollout+rm share shared_rollout_pool; trainer on train_pool.
-    # shared pool carries the rollout/rm replicas; train_pool carries the actor.
+    # Mode 3: rollout+rm share shared_rollout_pool. trainer on train_pool.
+    # shared pool carries the rollout/rm replicas. train_pool carries the actor.
     MODE_OVERRIDES="+psrl.deployment.mode=rollout_rm_colocated \
       psrl.ps_mode=nixl_cpu \
       psrl.staleness=0 \

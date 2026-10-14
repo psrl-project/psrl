@@ -17,10 +17,6 @@ STUDENT_MODEL_PATH="${STUDENT_MODEL_PATH:-models/Qwen2.5-7B}"
 TEACHER_MODEL_PATH="${TEACHER_MODEL_PATH:-models/Qwen2.5-32B-Instruct}"
 TEACHER_MODEL_NAME="${TEACHER_MODEL_NAME:-Qwen2.5-32B-Instruct}"
 
-# USE_POLICY_GRADIENT=False
-# DISTILLATION_LOSS_MODE="k3"
-# DISTILLATION_LOSS_MODE="forward_kl_topk"
-# USE_FUSED_KERNELS=False
 USE_POLICY_GRADIENT=True
 DISTILLATION_LOSS_MODE="k1"
 USE_FUSED_KERNELS=False
@@ -34,7 +30,7 @@ PROJECT_NAME='psrl_opd'
 MAX_PROMPT=$((1024 * 1))
 MAX_RESPONSE_LENGTH=$((1024 * 8))
 MAX_MODEL_LEN=$((MAX_PROMPT + MAX_RESPONSE_LENGTH))
-# Batched-token budget for vLLM; must be > max_model_len when chunked prefill is on.
+# Batched-token budget for vLLM. must be > max_model_len when chunked prefill is on.
 MAX_NUM_TOKENS=$((1024 * 10))
 TRAIN_PROMPT_BSZ=128
 STUDENT_MICRO_BATCH_SIZE_PER_GPU=1
@@ -49,7 +45,7 @@ DAPO_OVERLONG_PENALTY_FACTOR=1.0
 STUDENT_WORLD_SIZE=2
 TEACHER_WORLD_SIZE=4
 
-# Teacher RM (OPD) vLLM parallel — gen_worker requires world_size == TP*PP (dp=1).
+# Teacher RM (OPD) vLLM parallel . gen_worker requires world_size == TP*PP (dp=1).
 # EP is passed to vLLM via expert_parallel_size, not counted in world_size.
 TEACHER_TP=2
 TEACHER_EP=1

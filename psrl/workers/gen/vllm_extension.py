@@ -168,9 +168,8 @@ class vLLMWorkerExtension:
                         "Node-shared reward checkpoint loading requires load_format "
                         f"'auto' or 'safetensors', got {checkpoint_load_format!r}."
                     )
-                # All ranks map the same read-only checkpoint pages. The model's
-                # rank-local vLLM loaders then slice/filter on CPU before copying
-                # only their TP/EP shard into the final GPU arena.
+                # Map shared read-only checkpoint pages, then slice each rank's shard on CPU before copying into its
+                # GPU arena.
                 load_config.load_format = "safetensors"
                 load_config.safetensors_load_strategy = "lazy"
                 load_config.model_loader_extra_config = {}
@@ -587,7 +586,7 @@ class vLLMWorkerExtension:
         """
         Load weights into the vLLM model runner.
 
-        This method rebuilds the weights using the provided function and arguments stemming from `reduce_tensor` calls,
+                This method rebuilds weights using the function and arguments from `reduce_tensor` calls,
         transfers them to the current CUDA device, and loads them into the vLLM model runner.
         If the weight is a DTensor, it converts it to a full tensor before loading.
         If `blocking` is True, it ensures that all operations are completed before returning.
@@ -755,6 +754,7 @@ class vLLMWorkerExtension:
         except Exception as e:
             raise ValueError(f"Error in vLLMWorkerExtension.patch_vllm_moe_model_weight_loader: {e}") from e
         return None
+
     def finalize_weight_loading(self) -> None:
         """
         Convert freshly loaded weights to runtime format and wait for completion.
@@ -1078,9 +1078,7 @@ class vLLMWorkerExtension:
         psrl_logger.info(
             f"{self.nixl_storage_client}: NIXL pull model core done ({self.pull_times} times). time: {elapsed_s}s"
         )
-        # vLLM V1 runs this extension in an EngineCore process, which does not
-        # inherit the GenWorker's file logger. Return records to the caller so
-        # the outer Ray actor can persist them in its component log.
+        # Return fingerprints to the outer Ray actor because EngineCore does not inherit its component file logger.
         return {
             "model_version": model_version,
             "raw_fingerprint": raw_fingerprint,

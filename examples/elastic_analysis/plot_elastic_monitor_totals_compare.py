@@ -27,7 +27,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # Inclusive plot range in minutes from the first aggregated timestamp in each log.
 PLOT_WINDOW_START_MIN = 0.0
 PLOT_WINDOW_END_MIN = 100.0
-# If True, only plot elastic (min_0); skip non-elastic overlay.
+# If True, only plot elastic (min_0). skip non-elastic overlay.
 PLOT_ELASTIC_ONLY = False
 # Optional y-axis ranges for the five subplots. None = auto-scale.
 PLOT_YLIM_THROUGHPUT: tuple[float, float] | None = None
@@ -60,40 +60,26 @@ RE_BACKLOG_LINE = re.compile(
     r".*Router backlog summary: by_role=(?P<br>\{[^}]+\})"
 )
 
-# min_4: light red / light blue; min_0 (elastic): dark red / dark blue; all solid.
+# min_4: light red / light blue. min_0 (elastic): dark red / dark blue. all solid.
 COLOR_MIN4_REWARDMODEL = "#f1948a"
 COLOR_MIN4_ROLLOUT = "#7fb3d5"
 COLOR_MIN0_REWARDMODEL = "#922b21"
 COLOR_MIN0_ROLLOUT = "#1a5276"
 
-NON_ELASTIC_LOG_PATH = (
-    REPO_ROOT
-    / f"logs/verl_deployment_modes/mixed_test_none_request_level_candidate_evaluation_mode5_bs_128_share_32_elastic_rl_Qwen2.5-32B_Qwen3-30B-A3B-Thinking-2507/ElasticMonitor.log"
+NON_ELASTIC_LOG_PATH = REPO_ROOT / (
+    "logs/verl_deployment_modes/mixed_test_none_request_level_candidate_evaluation_mode5_"
+    "bs_128_share_32_elastic_rl_Qwen2.5-32B_Qwen3-30B-A3B-Thinking-2507/ElasticMonitor.log"
 )
-ELASTIC_LOG_PATH = (
-    REPO_ROOT
-    / f"logs/verl_deployment_modes/mixed_test_new_request_level_candidate_evaluation_mode5_bs_128_share_32_elastic_rl_Qwen2.5-32B_Qwen3-30B-A3B-Thinking-2507/ElasticMonitor.log"
+ELASTIC_LOG_PATH = REPO_ROOT / (
+    "logs/verl_deployment_modes/mixed_test_new_request_level_candidate_evaluation_mode5_"
+    "bs_128_share_32_elastic_rl_Qwen2.5-32B_Qwen3-30B-A3B-Thinking-2507/ElasticMonitor.log"
 )
 _OUT_TAG = "elastic_only" if PLOT_ELASTIC_ONLY else "compare_none_vs_new"
 OUT_PATH = (
-    REPO_ROOT
-    / f"logs/verl_deployment_modes/{_OUT_TAG}_none_new/"
+    REPO_ROOT / f"logs/verl_deployment_modes/{_OUT_TAG}_none_new/"
     f"none_new_share_32_totals_merged_"
     f"{PLOT_WINDOW_START_MIN}-{PLOT_WINDOW_END_MIN}_min.png"
 )
-
-# NON_ELASTIC_LOG_PATH = (
-#     REPO_ROOT
-#     / f"logs/psrl_elastic_rm/none_elastic_min_4_share_8_train_8_rm_qwen_8b_rollout_qwen_7b_staleness_{STALINESS}/ElasticMonitor.log"
-# )
-# ELASTIC_LOG_PATH = (
-#     REPO_ROOT
-#     / f"logs/psrl_elastic_rm/debug_itl_policy_min_0_share_8_train_8_rm_qwen_8b_rollout_qwen_7b_staleness_{STALINESS}/ElasticMonitor.log"
-# )
-# OUT_PATH = (
-#     REPO_ROOT
-#     / f"logs/psrl_elastic_rm/compare_elastic_min0_vs_min4_itl_policy_min_0_share_8_train_8_rm_qwen_8b_rollout_qwen_7b_staleness_{STALINESS}/Initial_ElasticMonitor_rm_rollout_totals_merged.png"
-# )
 
 
 def _normalize_ts(dt: datetime) -> datetime:
@@ -124,7 +110,7 @@ def parse_monitor_totals(
     log_path: Path,
 ) -> tuple[list[datetime], dict[str, dict[str, list[float]]]]:
     """
-    Parse Instance current Status lines; aggregate throughput/running/waiting by role.
+    Parse Instance current Status lines. aggregate throughput/running/waiting by role.
 
     Returns:
         times, data[role][metric] lists aligned to times.
@@ -138,9 +124,7 @@ def parse_monitor_totals(
             m = RE_STATUS_LINE.match(line)
             if not m:
                 continue
-            dt = _normalize_ts(
-                datetime.strptime(m.group("ts"), "%Y-%m-%d %H:%M:%S,%f")
-            )
+            dt = _normalize_ts(datetime.strptime(m.group("ts"), "%Y-%m-%d %H:%M:%S,%f"))
             try:
                 status_dict = ast.literal_eval(m.group("status"))
             except (SyntaxError, ValueError):
@@ -149,9 +133,7 @@ def parse_monitor_totals(
             if role not in ROLES:
                 continue
             try:
-                grouped[dt][role]["throughput"] += float(
-                    status_dict.get("throughput", 0.0)
-                )
+                grouped[dt][role]["throughput"] += float(status_dict.get("throughput", 0.0))
                 grouped[dt][role]["running"] += float(status_dict.get("running", 0.0))
                 grouped[dt][role]["waiting"] += float(status_dict.get("waiting", 0.0))
             except (TypeError, ValueError):
@@ -161,12 +143,8 @@ def parse_monitor_totals(
         return [], {}
 
     times = sorted(grouped.keys())
-    data: dict[str, dict[str, list[float]]] = {
-        role: {metric: [] for metric in TOTAL_METRICS} for role in ROLES
-    }
-    last_seen: dict[str, dict[str, float]] = {
-        role: {metric: 0.0 for metric in TOTAL_METRICS} for role in ROLES
-    }
+    data: dict[str, dict[str, list[float]]] = {role: {metric: [] for metric in TOTAL_METRICS} for role in ROLES}
+    last_seen: dict[str, dict[str, float]] = {role: {metric: 0.0 for metric in TOTAL_METRICS} for role in ROLES}
     for dt in times:
         role_data = grouped[dt]
         for role in ROLES:
@@ -199,9 +177,7 @@ def parse_executor_summaries(
                 by_role = _parse_by_role_dict(m_awake.group("br"))
                 if by_role is None:
                     continue
-                dt = _normalize_ts(
-                    datetime.strptime(m_awake.group("ts"), "%Y-%m-%d %H:%M:%S,%f")
-                )
+                dt = _normalize_ts(datetime.strptime(m_awake.group("ts"), "%Y-%m-%d %H:%M:%S,%f"))
                 for role in ROLES:
                     grouped[dt][role]["awake"] = _role_count(by_role, role)
                 continue
@@ -212,9 +188,7 @@ def parse_executor_summaries(
             by_role = _parse_by_role_dict(m_backlog.group("br"))
             if by_role is None:
                 continue
-            dt = _normalize_ts(
-                datetime.strptime(m_backlog.group("ts"), "%Y-%m-%d %H:%M:%S,%f")
-            )
+            dt = _normalize_ts(datetime.strptime(m_backlog.group("ts"), "%Y-%m-%d %H:%M:%S,%f"))
             for role in ROLES:
                 grouped[dt][role]["backlog"] = _role_count(by_role, role)
     return grouped
@@ -229,9 +203,7 @@ def filter_by_elapsed_minutes(
 ) -> tuple[list[datetime], dict[str, dict[str, list[float]]]]:
     """Keep samples whose elapsed time since t0 is in [start_min, end_min] (inclusive)."""
     new_times: list[datetime] = []
-    new_data: dict[str, dict[str, list[float]]] = {
-        role: {metric: [] for metric in TOTAL_METRICS} for role in ROLES
-    }
+    new_data: dict[str, dict[str, list[float]]] = {role: {metric: [] for metric in TOTAL_METRICS} for role in ROLES}
     for i, t in enumerate(times):
         elapsed_min = (t - t0).total_seconds() / 60.0
         if elapsed_min < start_min or elapsed_min > end_min:
@@ -248,12 +220,8 @@ def align_summaries_to_times(
     summaries: dict[datetime, dict[str, dict[str, float]]],
 ) -> dict[str, dict[str, list[float]]]:
     """Align awake/backlog snapshots to the monitor time axis (forward-fill gaps)."""
-    data: dict[str, dict[str, list[float]]] = {
-        role: {metric: [] for metric in SUMMARY_METRICS} for role in ROLES
-    }
-    last_seen: dict[str, dict[str, float]] = {
-        role: {metric: 0.0 for metric in SUMMARY_METRICS} for role in ROLES
-    }
+    data: dict[str, dict[str, list[float]]] = {role: {metric: [] for metric in SUMMARY_METRICS} for role in ROLES}
+    last_seen: dict[str, dict[str, float]] = {role: {metric: 0.0 for metric in SUMMARY_METRICS} for role in ROLES}
     for dt in times:
         snap = summaries.get(dt)
         for role in ROLES:
@@ -280,13 +248,10 @@ def prepare_series(
 
     summaries = parse_executor_summaries(log_path)
     t0 = times[0]
-    times, data = filter_by_elapsed_minutes(
-        times, data, t0, PLOT_WINDOW_START_MIN, PLOT_WINDOW_END_MIN
-    )
+    times, data = filter_by_elapsed_minutes(times, data, t0, PLOT_WINDOW_START_MIN, PLOT_WINDOW_END_MIN)
     if not times:
         raise SystemExit(
-            f"No samples in window for {log_path} (t0={t0}, "
-            f"[{PLOT_WINDOW_START_MIN}, {PLOT_WINDOW_END_MIN}] min)."
+            f"No samples in window for {log_path} (t0={t0}, [{PLOT_WINDOW_START_MIN}, {PLOT_WINDOW_END_MIN}] min)."
         )
     summary_data = align_summaries_to_times(times, summaries)
     x_minutes = [(t - t0).total_seconds() / 60.0 for t in times]
@@ -315,7 +280,7 @@ def plot_merged(
     label_non_elastic: str = "min_4 (non-elastic)",
 ) -> None:
     """
-    Plot ElasticMonitor totals; optionally overlay non-elastic curves.
+    Plot ElasticMonitor totals. optionally overlay non-elastic curves.
 
     Args:
         series_elastic: Prepared (x, totals, summaries) for the elastic run.
@@ -325,7 +290,7 @@ def plot_merged(
         figsize (tuple[float, float]): Figure size.
         dpi (int): Save DPI.
         line_width (float): Line width.
-        series_non_elastic: Prepared series for non-elastic; None = elastic only.
+        series_non_elastic: Prepared series for non-elastic. None = elastic only.
         label_elastic (str): Legend label for elastic curves.
         label_non_elastic (str): Legend label for non-elastic curves.
     """
@@ -411,9 +376,7 @@ def plot_merged(
 
     axes[-1].set_xlabel("Elapsed time from first log timestamp (min)")
     if series_non_elastic is None:
-        fig.suptitle(
-            "ElasticMonitor — elastic only: dark red (RM), dark blue (Rollout); solid lines"
-        )
+        fig.suptitle("ElasticMonitor — elastic only: dark red (RM), dark blue (Rollout); solid lines")
     else:
         fig.suptitle(
             "ElasticMonitor — min_4: light red (RM), light blue (Rollout); "
@@ -442,15 +405,12 @@ def main() -> None:
     non_elastic = None if PLOT_ELASTIC_ONLY else prepare_series(NON_ELASTIC_LOG_PATH)
 
     if non_elastic is None:
-        print(
-            f"Elastic only: {len(elastic[0])} points | "
-            f"Window {PLOT_WINDOW_START_MIN}–{PLOT_WINDOW_END_MIN} min"
-        )
+        print(f"Elastic only: {len(elastic[0])} points | Window {PLOT_WINDOW_START_MIN} to {PLOT_WINDOW_END_MIN} min")
     else:
         print(
             f"Non-elastic: {len(non_elastic[0])} points | "
             f"Elastic: {len(elastic[0])} points | "
-            f"Window {PLOT_WINDOW_START_MIN}–{PLOT_WINDOW_END_MIN} min"
+            f"Window {PLOT_WINDOW_START_MIN} to {PLOT_WINDOW_END_MIN} min"
         )
 
     plot_merged(

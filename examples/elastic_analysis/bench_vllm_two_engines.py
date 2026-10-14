@@ -1,12 +1,12 @@
 """
 Benchmark script: launch two vLLM engines (different models) in sequence and
 record timing and GPU/RAM usage. Both engines run on the same machine and
-share 8 GPUs: each engine uses all 8 cards (TP * PP when running); they
+share 8 GPUs: each engine uses all 8 cards (TP * PP when running). they
 execute sequentially.
 
-1) Phase 1: launch each engine, then sleep immediately; record time from
+1) Phase 1: launch each engine, then sleep immediately. record time from
    launch to sleep and GPU/RAM after sleep.
-2) Phase 2: launch each engine, run one inference, then sleep; record launch
+2) Phase 2: launch each engine, run one inference, then sleep. record launch
    time, sleep time, and GPU/RAM before/after launch and before/after sleep.
 """
 
@@ -16,10 +16,7 @@ import os
 import time
 from pathlib import Path
 
-# Comment line length limit: 72 characters (wrap longer lines).
-# ---------- Hardcoded config: single machine, both engines share 8 GPUs -----
-# Both engines use the same 8 GPUs on this host; each run uses all 8 when
-# executing.
+# Both engines share all eight GPUs and run sequentially.
 SINGLE_MACHINE_GPU_IDS = "0,1,2,3,4,5,6,7"
 DEVICES_A = "0,1,2,3,4,5,6,7"
 DEVICES_B = "0,1,2,3,4,5,6,7"
@@ -27,8 +24,8 @@ DEVICES_B = "0,1,2,3,4,5,6,7"
 MODEL_A = "Qwen/Qwen2.5-0.5B"
 MODEL_B = "Qwen/Qwen2.5-1.5B"
 SLEEP_SEC = 10.0
-TP = 2   # tensor parallel size
-PP = 4   # pipeline parallel size; total GPUs per engine = TP * PP
+TP = 2  # tensor parallel size
+PP = 4  # pipeline parallel size. total GPUs per engine = TP * PP
 OUT_DIR = "./vllm_bench_out"
 
 # Worker run in subprocess: load vLLM on given GPUs and run sleep-only or
@@ -38,13 +35,14 @@ OUT_DIR = "./vllm_bench_out"
 def get_gpu_memory_mb():
     """Return per-device GPU memory allocated/reserved in MB (uses torch)."""
     import torch
+
     if not torch.cuda.is_available():
         return {}
     out = {}
     for i in range(torch.cuda.device_count()):
         torch.cuda.set_device(i)
-        allocated = torch.cuda.memory_allocated(i) / (1024 ** 2)
-        reserved = torch.cuda.memory_reserved(i) / (1024 ** 2)
+        allocated = torch.cuda.memory_allocated(i) / (1024**2)
+        reserved = torch.cuda.memory_reserved(i) / (1024**2)
         out[i] = {"allocated_mb": round(allocated, 2), "reserved_mb": round(reserved, 2)}
     return out
 
@@ -52,11 +50,12 @@ def get_gpu_memory_mb():
 def get_system_memory_mb():
     try:
         import psutil
+
         v = psutil.virtual_memory()
         return {
-            "used_mb": round(v.used / (1024 ** 2), 2),
-            "available_mb": round(v.available / (1024 ** 2), 2),
-            "total_mb": round(v.total / (1024 ** 2), 2),
+            "used_mb": round(v.used / (1024**2), 2),
+            "available_mb": round(v.available / (1024**2), 2),
+            "total_mb": round(v.total / (1024**2), 2),
         }
     except Exception:
         return {}
@@ -92,6 +91,7 @@ def worker_main(
 
     t_launch_start = time.perf_counter()
     from vllm import LLM, SamplingParams
+
     llm = LLM(
         model=model,
         tensor_parallel_size=tp,
@@ -148,7 +148,7 @@ def run_worker(
     pp: int,
     out_path: str,
 ) -> dict:
-    """Run worker in subprocess; return main-process timing and
+    """Run worker in subprocess. return main-process timing and
     subprocess-written result.
     """
     out_file = Path(out_path)
@@ -190,7 +190,12 @@ def main():
     # ---------- Phase 1: launch each engine, then sleep ----------
     print("===== Phase 1: Engine A launch -> sleep =====")
     r1a = run_worker(
-        MODEL_A, DEVICES_A, "sleep_only", SLEEP_SEC, TP, PP,
+        MODEL_A,
+        DEVICES_A,
+        "sleep_only",
+        SLEEP_SEC,
+        TP,
+        PP,
         str(out_dir / "phase1_engine_a.json"),
     )
     report["phase1_sleep_only"]["engine_a"] = r1a
@@ -200,7 +205,12 @@ def main():
 
     print("===== Phase 1: Engine B launch -> sleep =====")
     r1b = run_worker(
-        MODEL_B, DEVICES_B, "sleep_only", SLEEP_SEC, TP, PP,
+        MODEL_B,
+        DEVICES_B,
+        "sleep_only",
+        SLEEP_SEC,
+        TP,
+        PP,
         str(out_dir / "phase1_engine_b.json"),
     )
     report["phase1_sleep_only"]["engine_b"] = r1b
@@ -211,11 +221,19 @@ def main():
     # ---------- Phase 2: launch each engine, one inference, then sleep -------
     print("===== Phase 2: Engine A launch -> one inference -> sleep =====")
     r2a = run_worker(
-        MODEL_A, DEVICES_A, "inference_then_sleep", SLEEP_SEC, TP, PP,
+        MODEL_A,
+        DEVICES_A,
+        "inference_then_sleep",
+        SLEEP_SEC,
+        TP,
+        PP,
         str(out_dir / "phase2_engine_a.json"),
     )
     report["phase2_inference_then_sleep"]["engine_a"] = r2a
-    print(f"  launch: {r2a['launch_duration_sec']} s, inference: {r2a.get('inference_duration_sec')} s, sleep: {r2a['sleep_duration_sec']} s")
+    print(
+        f"  launch: {r2a['launch_duration_sec']} s, inference: {r2a.get('inference_duration_sec')} s, "
+        f"sleep: {r2a['sleep_duration_sec']} s"
+    )
     print(f"  before launch GPU/RAM: {r2a['mem_before_launch']}")
     print(f"  after launch GPU/RAM: {r2a['mem_after_launch']}")
     print(f"  before sleep GPU/RAM: {r2a['mem_before_sleep']}")
@@ -223,11 +241,19 @@ def main():
 
     print("===== Phase 2: Engine B launch -> one inference -> sleep =====")
     r2b = run_worker(
-        MODEL_B, DEVICES_B, "inference_then_sleep", SLEEP_SEC, TP, PP,
+        MODEL_B,
+        DEVICES_B,
+        "inference_then_sleep",
+        SLEEP_SEC,
+        TP,
+        PP,
         str(out_dir / "phase2_engine_b.json"),
     )
     report["phase2_inference_then_sleep"]["engine_b"] = r2b
-    print(f"  launch: {r2b['launch_duration_sec']} s, inference: {r2b.get('inference_duration_sec')} s, sleep: {r2b['sleep_duration_sec']} s")
+    print(
+        f"  launch: {r2b['launch_duration_sec']} s, inference: {r2b.get('inference_duration_sec')} s, "
+        f"sleep: {r2b['sleep_duration_sec']} s"
+    )
     print(f"  before launch GPU/RAM: {r2b['mem_before_launch']}")
     print(f"  after launch GPU/RAM: {r2b['mem_after_launch']}")
     print(f"  before sleep GPU/RAM: {r2b['mem_before_sleep']}")

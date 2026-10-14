@@ -41,9 +41,13 @@ class CommandHandlerMixin:
                 request_id = await self.server_handles[source[0]].get_external_request_id.remote(engine_request_id)
                 if request_id is None:
                     continue
-                await self._gateway_post_json("/routing_loop/migration", {
-                    "request_id": request_id, "destination": list(destination),
-                })
+                await self._gateway_post_json(
+                    "/routing_loop/migration",
+                    {
+                        "request_id": request_id,
+                        "destination": list(destination),
+                    },
+                )
                 try:
                     aborted = await self.server_handles[source[0]].abort_requests.remote([engine_request_id])
                     if not aborted:
@@ -51,7 +55,8 @@ class CommandHandlerMixin:
                     deadline = time.monotonic() + timeout
                     while True:
                         status = await self._gateway_get_json(
-                            "/routing_loop/migration", params={"request_id": request_id},
+                            "/routing_loop/migration",
+                            params={"request_id": request_id},
                         )
                         if status and status["dispatched"]:
                             break
@@ -73,11 +78,13 @@ class CommandHandlerMixin:
             *[self.server_handles[replica_id].is_sleeping.remote() for replica_id in replica_ids]
         )
         awake_replica_ids = [
-            replica_id for replica_id, is_sleeping in zip(replica_ids, sleeping_flags, strict=True)
+            replica_id
+            for replica_id, is_sleeping in zip(replica_ids, sleeping_flags, strict=True)
             if not is_sleeping and replica_id not in self.sleeping_replica_ids
         ]
         already_sleeping = [
-            replica_id for replica_id, is_sleeping in zip(replica_ids, sleeping_flags, strict=True)
+            replica_id
+            for replica_id, is_sleeping in zip(replica_ids, sleeping_flags, strict=True)
             if is_sleeping or replica_id in self.sleeping_replica_ids
         ]
         if already_sleeping:
@@ -97,7 +104,8 @@ class CommandHandlerMixin:
             if isinstance(result, BaseException)
         ]
         self.sleeping_replica_ids.update(
-            replica_id for replica_id, result in zip(awake_replica_ids, results, strict=True)
+            replica_id
+            for replica_id, result in zip(awake_replica_ids, results, strict=True)
             if not isinstance(result, BaseException)
         )
         if failures:
@@ -118,7 +126,8 @@ class CommandHandlerMixin:
             *(self.server_handles[replica_id].is_sleeping.remote() for replica_id in replica_ids)
         )
         wake_ids = [
-            replica_id for replica_id, asleep in zip(replica_ids, sleeping, strict=True)
+            replica_id
+            for replica_id, asleep in zip(replica_ids, sleeping, strict=True)
             if asleep or replica_id in self.sleeping_replica_ids
         ]
         if wake_ids:
@@ -187,8 +196,7 @@ class CommandHandlerMixin:
                 raise ValueError("ABORT command must contain 'instance_to_uids' or 'instance_ids' in args.")
 
             psrl_logger.info(
-                f"Received ABORT command: instance_to_uids={instance_to_uids!r}, "
-                f"instance_ids={instance_ids!r}."
+                f"Received ABORT command: instance_to_uids={instance_to_uids!r}, instance_ids={instance_ids!r}."
             )
             futures = []
 
@@ -231,9 +239,7 @@ class CommandHandlerMixin:
             instance_ids = command_args.get("instance_ids", None)
             curr_ps_model_version = command_args.get("curr_ps_model_version", None)
             if instance_ids is None or curr_ps_model_version is None:
-                raise ValueError(
-                    "SYNC command must contain 'instance_ids' and 'curr_ps_model_version' in args."
-                )
+                raise ValueError("SYNC command must contain 'instance_ids' and 'curr_ps_model_version' in args.")
             if not isinstance(instance_ids, list):
                 instance_ids = [instance_ids]
             instance_ids = await self._get_awake_instance_ids(instance_ids)

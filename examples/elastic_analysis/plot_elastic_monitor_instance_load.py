@@ -2,9 +2,9 @@
 """Plot per-instance load heatmaps from an ElasticMonitor.log file.
 
 The monitor emits one ``Instance current Status`` record per instance and
-monitor cycle.  This script aligns those records on the monitor timestamp and
-plots one heatmap per (metric, role) pair.  Numeric panels only color AWAKEN
-instances; ASLEEP/TRAINING periods are gray and are distinguished in the
+monitor cycle. This script aligns those records on the monitor timestamp and
+plots one heatmap per (metric, role) pair. Numeric panels only color AWAKEN
+instances. ASLEEP/TRAINING periods are gray and are distinguished in the
 categorical status panel.
 
 Examples:
@@ -28,8 +28,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_LOG_PATH = (
-    REPO_ROOT
-    / "logs/verl_deployment_modes/"
+    REPO_ROOT / "logs/verl_deployment_modes/"
     "dapo_mode5_bs_128_share_16_elastic_rl_rollout7_ds_7b_rm8b/"
     "ElasticMonitor.log"
 )
@@ -38,9 +37,7 @@ ROLE_ORDER = ("Rollout", "RewardModel")
 NUMERIC_METRICS = ("running", "waiting", "kv_cache", "throughput")
 DEFAULT_METRICS = (*NUMERIC_METRICS, "status")
 STATUS_CODES = {"ASLEEP": 0.0, "TRAINING": 1.0, "AWAKEN": 2.0}
-# Status lines from one cycle are emitted back-to-back, while monitor cycles in
-# this log are roughly five seconds apart. This gap also handles cycles that
-# happen to cross a wall-clock second boundary.
+# Group adjacent status records into cycles, including cycles that cross a wall-clock second boundary.
 MONITOR_CYCLE_GAP_SEC = 2.0
 METRIC_SPECS = {
     "running": ("Running queue", "YlGnBu"),
@@ -180,9 +177,7 @@ def select_snapshots(
     return origin, sorted(selected), selected
 
 
-def collect_instances(
-    times: list[datetime], snapshots: SnapshotMap
-) -> dict[str, list[InstanceKey]]:
+def collect_instances(times: list[datetime], snapshots: SnapshotMap) -> dict[str, list[InstanceKey]]:
     found: dict[str, set[InstanceKey]] = {role: set() for role in ROLE_ORDER}
     pool_order: dict[str, dict[str, int]] = {role: {} for role in ROLE_ORDER}
     for timestamp in times:
@@ -218,17 +213,14 @@ def build_matrices(
     for role, instances in instances_by_role.items():
         row_by_key = {key: row for row, key in enumerate(instances)}
         role_matrices = {
-            metric: np.full((len(instances), len(times)), np.nan, dtype=float)
-            for metric in DEFAULT_METRICS
+            metric: np.full((len(instances), len(times)), np.nan, dtype=float) for metric in DEFAULT_METRICS
         }
         for column, timestamp in enumerate(times):
             for key, sample in snapshots[timestamp].items():
                 if key.role != role or key not in row_by_key:
                     continue
                 row = row_by_key[key]
-                role_matrices["status"][row, column] = STATUS_CODES.get(
-                    sample.status, np.nan
-                )
+                role_matrices["status"][row, column] = STATUS_CODES.get(sample.status, np.nan)
                 if sample.status != "AWAKEN":
                     continue
                 for metric in NUMERIC_METRICS:
@@ -271,9 +263,7 @@ def _pool_summary(instances: list[InstanceKey]) -> str:
     return ", ".join(f"{pool}={count}" for pool, count in counts.items())
 
 
-def _numeric_limit(
-    matrices: dict[str, dict[str, object]], roles: list[str], metric: str, percentile: float
-) -> float:
+def _numeric_limit(matrices: dict[str, dict[str, object]], roles: list[str], metric: str, percentile: float) -> float:
     import numpy as np
 
     finite_parts = []
@@ -305,9 +295,7 @@ def plot_heatmaps(
     instances_by_role = collect_instances(times, snapshots)
     roles = [role for role in roles if role in instances_by_role]
     matrices = build_matrices(times, snapshots, instances_by_role)
-    x_minutes = np.array(
-        [(timestamp - origin).total_seconds() / 60.0 for timestamp in times]
-    )
+    x_minutes = np.array([(timestamp - origin).total_seconds() / 60.0 for timestamp in times])
     x_edges = _time_edges(x_minutes)
 
     fig_width = max(10.0, 8.5 * len(roles))
@@ -324,9 +312,7 @@ def plot_heatmaps(
     numeric_limits: dict[str, float] = {}
     for metric in metrics:
         if metric in NUMERIC_METRICS:
-            numeric_limits[metric] = _numeric_limit(
-                matrices, roles, metric, percentile
-            )
+            numeric_limits[metric] = _numeric_limit(matrices, roles, metric, percentile)
 
     status_cmap = ListedColormap(["#d9d9d9", "#4c78a8", "#59a14f"])
     status_cmap.set_bad("#ffffff")
@@ -367,9 +353,7 @@ def plot_heatmaps(
             ax.set_ylim(len(instances), 0)
             tick_rows = _tick_rows(instances)
             ax.set_yticks([tick + 0.5 for tick in tick_rows])
-            ax.set_yticklabels(
-                [f"I{instances[tick].instance_id}" for tick in tick_rows], fontsize=7
-            )
+            ax.set_yticklabels([f"I{instances[tick].instance_id}" for tick in tick_rows], fontsize=7)
             ax.set_ylabel("Instance")
             _draw_pool_boundaries(ax, instances)
             ax.set_title(
@@ -460,11 +444,7 @@ def main() -> None:
         raise SystemExit("--start-min must be non-negative.")
     if args.end_min is not None and args.end_min < 0:
         raise SystemExit("--end-min must be non-negative.")
-    if (
-        args.start_min is not None
-        and args.end_min is not None
-        and args.start_min > args.end_min
-    ):
+    if args.start_min is not None and args.end_min is not None and args.start_min > args.end_min:
         raise SystemExit("--start-min must be <= --end-min.")
     if not 0.0 < args.percentile <= 100.0:
         raise SystemExit("--percentile must be in (0, 100].")
@@ -474,19 +454,13 @@ def main() -> None:
     snapshots = parse_monitor_log(log_path)
     roles = list(dict.fromkeys(args.roles))
     pools = set(args.pools) if args.pools else None
-    origin, times, selected = select_snapshots(
-        snapshots, set(roles), pools, args.start_min, args.end_min
-    )
+    origin, times, selected = select_snapshots(snapshots, set(roles), pools, args.start_min, args.end_min)
     instances_by_role = collect_instances(times, selected)
     roles = [role for role in roles if role in instances_by_role]
     if not roles:
         raise SystemExit("No requested roles remain after applying the filters.")
 
-    output_path = (
-        args.output.resolve()
-        if args.output
-        else log_path.with_name(f"{log_path.stem}_instance_load.png")
-    )
+    output_path = args.output.resolve() if args.output else log_path.with_name(f"{log_path.stem}_instance_load.png")
     limits = plot_heatmaps(
         origin=origin,
         times=times,
@@ -500,16 +474,9 @@ def main() -> None:
 
     elapsed_start = (times[0] - origin).total_seconds() / 60.0
     elapsed_end = (times[-1] - origin).total_seconds() / 60.0
-    role_summary = ", ".join(
-        f"{role}={len(instances_by_role[role])}" for role in roles
-    )
-    limit_summary = ", ".join(
-        f"{metric}={limit:g}" for metric, limit in limits.items()
-    )
-    print(
-        f"Parsed {len(times)} monitor snapshots over "
-        f"{elapsed_start:.2f}-{elapsed_end:.2f} min; {role_summary}"
-    )
+    role_summary = ", ".join(f"{role}={len(instances_by_role[role])}" for role in roles)
+    limit_summary = ", ".join(f"{metric}={limit:g}" for metric, limit in limits.items())
+    print(f"Parsed {len(times)} monitor snapshots over {elapsed_start:.2f}-{elapsed_end:.2f} min. {role_summary}")
     if limit_summary:
         print(f"Shared color-scale maxima: {limit_summary}")
     print(f"Wrote {output_path}")

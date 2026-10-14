@@ -18,10 +18,6 @@ STUDENT_MODEL_PATH="${STUDENT_MODEL_PATH:-models/Qwen3-4B-Thinking-2507}"
 TEACHER_MODEL_PATH="${TEACHER_MODEL_PATH:-models/Qwen3-235B-A22B}"
 TEACHER_MODEL_NAME="${TEACHER_MODEL_NAME:-Qwen3-235B-A2B}"
 
-# USE_POLICY_GRADIENT=False
-# DISTILLATION_LOSS_MODE="k3"
-# DISTILLATION_LOSS_MODE="forward_kl_topk"
-# USE_FUSED_KERNELS=False
 USE_POLICY_GRADIENT=True
 DISTILLATION_LOSS_MODE="k1"
 USE_FUSED_KERNELS=False
@@ -35,7 +31,7 @@ PROJECT_NAME='psrl_opd'
 MAX_PROMPT=$((1024 * 1))
 MAX_RESPONSE_LENGTH=$((1024 * 20))
 MAX_MODEL_LEN=$((MAX_PROMPT + MAX_RESPONSE_LENGTH))
-# Batched-token budget for vLLM; must be > max_model_len when chunked prefill is on.
+# Batched-token budget for vLLM. must be > max_model_len when chunked prefill is on.
 MAX_NUM_TOKENS=$((1024 * 21))
 TRAIN_PROMPT_BSZ=128
 STUDENT_MICRO_BATCH_SIZE_PER_GPU=1
@@ -47,12 +43,7 @@ DAPO_MAX_RESP_LEN=5120
 DAPO_OVERLONG_BUFFER_LEN=$((1024 * 4))
 DAPO_OVERLONG_PENALTY_FACTOR=1.0
 
-# GPU budget (Ray checks sum of all pools; colocate_validate uses 0.9 train + 0.1 val per train GPU):
-#   rollout: STUDENT_WORLD_SIZE
-#   train:   TRAINER_NGPUS_PER_NODE * TRAINER_NNODES * 0.9
-#   val:     VAL_INSTANCES * 0.1
-#   teacher: TEACHER_WORLD_SIZE
-# 4+4+8 layout needs ~16 GPUs (e.g. 2×8-GPU nodes in one Ray cluster). Single 8-GPU node: use 8gpu profile below.
+# Budget GPUs for rollout, training, validation, and teacher pools. Colocated validation shares trainer GPUs.
 NNODES=2
 STUDENT_WORLD_SIZE=4
 TRAINER_NGPUS_PER_NODE=4
@@ -60,15 +51,7 @@ TRAINER_NNODES=1
 TEACHER_NGPUS_PER_NODE=8
 TEACHER_NNODES=1
 
-# --- 8-GPU single-node profile (uncomment and comment block above) ---
-# STUDENT_WORLD_SIZE=2
-# TRAINER_NGPUS_PER_NODE=2
-# TRAINER_NNODES=1
-# TEACHER_WORLD_SIZE=4
-# TEACHER_TP=4   # 1 replica
-
-# Teacher RM (OPD) vLLM parallel — gen_worker requires world_size == TP*PP (dp=1).
-# EP is passed to vLLM via expert_parallel_size, not counted in world_size.
+# Teacher worker size must equal TP times PP. Expert parallelism does not add worker ranks.
 TEACHER_TP=8
 TEACHER_EP=8
 TEACHER_PP=1

@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
 # Profile vLLM TP/EP inference memory (OPD teacher: prompt_logprobs + max_tokens=1).
 #
-# Usage:
-#   MODEL_PATH=models/Qwen3-235B-A22B SEQ_LEN=16384 TP=8 EP=8 \
-#     bash examples/opd_trainer/profile_vllm_infer_memory.sh
+# Run `bash examples/opd_trainer/profile_vllm_infer_memory.sh` with `MODEL_PATH`, `SEQ_LEN`, `TP`, and `EP`.
 #
 # vLLM manages TP/EP in a single driver process (no torchrun).
 

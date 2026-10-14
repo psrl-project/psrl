@@ -135,14 +135,6 @@ class PSRL_AgentLoopManager:
             self.entries_per_buffer = self.config.psrl.staleness_buffer_entries
             self.ready_entries_per_buffer = self.config.psrl.staleness_buffer_entries
 
-        # TODO(zyf): check the correctness
-        # self.train_result_queue = asyncio.Queue()
-        # self.val_result_queue = asyncio.Queue()
-        # # Validation recovery gets priority after its first result arrives. This
-        # # keeps queued training results from delaying a validation buffer.
-        # self._validation_recovery_done = asyncio.Event()
-        # self._validation_recovery_done.set()
-        # self._active_val_buffer_ids: set[int] = set()
         self.train_data_queue: asyncio.Queue = asyncio.Queue(maxsize=data_queue_size)
         self.val_data_queue: asyncio.Queue = asyncio.Queue(maxsize=data_queue_size)
         self.result_queue = asyncio.Queue()
@@ -213,19 +205,9 @@ class PSRL_AgentLoopManager:
             str | int, list[EntryInfo]
         ] = {}  # Maps parent request ids to "occupied" child entries
 
-        # Track groups whose failure has already been processed to avoid duplicate handling
-        # when multiple siblings in the same group fail concurrently. Train and validation
-        # are kept apart because their lifetimes differ: the validation record is per-round
-        # and reset by `set_val_buffer_size`, while the train record must survive every
-        # validation round for the whole run. Sharing one set made a validation round
-        # forget which train groups had died, readmitting their stragglers.
+        # Deduplicate failed groups separately for train and validation. Reset only validation records between rounds.
         #
-        # The train record is bounded instead of cleared. Train prompt ids never repeat
-        # within a realistic run, so it needs no clear-point for correctness, and no step
-        # boundary is a valid one: with `staleness > 0` an in-flight prompt outlives
-        # several buffers. The cap is sized well past the dispatch window that
-        # `_get_expected_ps_version` throttles to, so an id is only ever retired long
-        # after any request of that vintage could still arrive.
+        # Bound training failure records by the dispatch window. In-flight prompts can outlive training buffers.
         failed_id_capacity = max(4 * self.entries_per_buffer * (self.staleness + 1), 65536)
         self._failed_train_group_ids: BoundedIdSet = BoundedIdSet(failed_id_capacity)
         self._failed_val_group_ids: set[int] = set()
@@ -233,10 +215,7 @@ class PSRL_AgentLoopManager:
         # Preserve an all-failed validation result for waiters that register late.
         self._val_round_all_failed: bool = False
 
-        # Refill breaker state (train only). A failed group is purged before it is
-        # replaced, so an unbounded refill loop is the run making no progress rather
-        # than recovering. Counted consecutively and cleared by any occupied group, so
-        # sporadic failures over a long run never accumulate into a trip.
+        # Count consecutive failed refills and reset on successful occupancy. Unbounded failure means no progress.
         self.refill_failure_threshold = self.config.psrl.agentic_rl.get("refill_failure_threshold", 32)
         self._consecutive_group_failures = 0
         self._group_failure_reasons: Counter = Counter()
@@ -249,7 +228,7 @@ class PSRL_AgentLoopManager:
         psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "INFO"))
         psrl_logger.addHandler(DualOutputHandler(self.config.psrl.logging_path, self.log_prefix))
 
-        # SleepWakeOrchestrator handle (colocated modes 2/3); None otherwise.
+        # SleepWakeOrchestrator handle (colocated modes 2/3). None otherwise.
         self.sleep_wake_orchestrator = None
 
     # AGENT(VERL): `generate_sequences`, `_run_agent_loop` are moved to agent loop workers.
@@ -344,10 +323,6 @@ class PSRL_AgentLoopManager:
             and not self.train_dispatch_task.done()
             or self.val_dispatch_task is not None
             and not self.val_dispatch_task.done()
-            # or self.train_collect_task is not None
-            # and not self.train_collect_task.done()
-            # or self.val_collect_task is not None
-            # and not self.val_collect_task.done()
         ):
             return
 
@@ -360,11 +335,6 @@ class PSRL_AgentLoopManager:
         self.train_dispatch_task = self.running_loop.create_task(self._train_dispatch_data())
         self.train_dispatch_task.add_done_callback(lambda f: f.result())
         self.val_dispatch_task = self.running_loop.create_task(self._val_dispatch_data())
-        # self.val_dispatch_task.add_done_callback(lambda f: f.result())  # To avoid silent error in async tasks
-        # self.train_collect_task = self.running_loop.create_task(self._collect_results(is_validate=False))
-        # self.train_collect_task.add_done_callback(lambda f: f.result())  # To avoid silent error in async tasks
-        # self.val_collect_task = self.running_loop.create_task(self._collect_results(is_validate=True))
-        # self.val_collect_task.add_done_callback(lambda f: f.result())  # To avoid silent error in async tasks
         self.val_dispatch_task.add_done_callback(lambda f: f.result())
         self.collect_task = self.running_loop.create_task(self._collect_results())
         self.collect_task.add_done_callback(lambda f: f.result())
@@ -382,15 +352,6 @@ class PSRL_AgentLoopManager:
         self.stop_train_dispatch_task = True
         self.stop_val_dispatch_task = True
         self.stop_collect_task = True
-        # self._validation_recovery_done.set()
-        # # Wait for the background task to finish
-        # tasks = [
-        #     self.train_dispatch_task,
-        #     self.val_dispatch_task,
-        #     self.train_collect_task,
-        #     self.val_collect_task,
-        # ]
-        # await asyncio.gather(*(task for task in tasks if task is not None))
         await asyncio.gather(self.train_dispatch_task, self.val_dispatch_task, self.collect_task)
 
         await asyncio.gather(*[worker.stop_busy_loop.remote() for worker in self.agent_loop_workers])
@@ -1146,10 +1107,8 @@ class PSRL_AgentLoopManager:
                             )
                             # Clear the reserved entries for the group entry.
                             await self.ps_manager_handle.clear_reserved_entries.remote(prompt_id, is_validate)
-                            # Notify agent loop manager to retry new requests.
-                            # Not counted against the refill breaker: the filter dropped
-                            # this group on purpose, so it is an algorithmic decision
-                            # rather than a rollout fault.
+                            # Retry intentionally filtered groups without counting them as rollout failures in the
+                            # refill breaker.
                             await self._refill_failed_group(
                                 n_prompts=1,
                                 context="Group post-processing filter",

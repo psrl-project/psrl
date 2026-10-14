@@ -41,6 +41,7 @@ except ImportError:
         """Return the model unchanged when Megatron is not installed."""
         return model
 
+
 if not is_cuda_available and os.environ.get("TORCH_CUDA_ARCH_LIST") == "8.0":
     del os.environ["TORCH_CUDA_ARCH_LIST"]
 
@@ -384,9 +385,8 @@ class PSRL_EngineTrainWorker(ActorRolloutRefWorker, PSRL_BaseTrainWorker):
                                 f"PS={tuple(cpu_tensor.shape)}."
                             )
 
-                        # FSDP sleep/wake resizes the old storage to zero and back.
-                        # Replacing the buffer avoids copying into a storage that may
-                        # still be backed by an invalid CUDA allocation.
+                        # Replace resized FSDP storage to avoid copying into an invalid CUDA allocation after sleep and
+                        # wake.
                         target_device = existing.device
                         if target_device.type == "meta":
                             target_device = torch.device("cuda", device)

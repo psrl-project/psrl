@@ -1,33 +1,9 @@
 #!/usr/bin/env bash
 # Shared launch body for the five deployment-mode example scripts.
 #
-# Each mode script (mode1_disaggregated.sh ... mode5_elastic_rl.sh) exports a
-# small set of PSRL_DEPLOY_* env vars describing its pool topology / mode flags,
-# then sources this file and calls `launch_deployment_mode "$@"`. Extra hydra
-# overrides can be passed as "$@" from the mode script.
+# Mode scripts set `PSRL_DEPLOY_*`, source this file, and call `launch_deployment_mode` with Hydra overrides.
 #
-# Required env vars (set by the mode script before calling):
-#   PSRL_DEPLOY_MODE          one of disaggregated|colocated|rollout_rm_colocated|
-#                             trainer_pool_only|elastic_rl
-#   PSRL_DEPLOY_EXPERIMENT    experiment name string
-#   PSRL_DEPLOY_STALENESS     staleness (modes 2/3 require 0)
-#   PSRL_DEPLOY_RM_ASYNC      True|False (modes 2/3 require True)
-#   PSRL_DEPLOY_NNODES        total cluster nodes
-#   PSRL_DEPLOY_TRAIN_NNODES  train_pool nodes
-#   PSRL_DEPLOY_TRAIN_NGPUS   gpus per train node
-#   PSRL_DEPLOY_SHARED_NNODES   shared_rollout_pool nodes (0/unused for mode 2)
-#   PSRL_DEPLOY_SHARED_NGPUS    gpus per shared node, or a Hydra list like [4, 8]
-#   PSRL_DEPLOY_RM_NUM_REPLICAS  gen-RM num_replicas (non-elastic modes 1/4)
-#                                set to 0 to leave default
-#   PSRL_DEPLOY_SMOKE         0|1 (smoke test: 2 steps, small bsz)
-#   PSRL_DEPLOY_DATASET       dapo|gsm8k|mixed (default: dapo; mixed is 1:1)
-#   PSRL_DEPLOY_TRAIN_BACKEND fsdp2|megatron (default: fsdp2)
-#   PSRL_DEPLOY_MEGATRON_TP   Megatron tensor parallel size
-#   PSRL_DEPLOY_MEGATRON_PP   Megatron pipeline parallel size
-#   PSRL_DEPLOY_MEGATRON_CP   Megatron context parallel size
-#   PSRL_DEPLOY_MEGATRON_EP   Megatron expert parallel size
-#   PSRL_DEPLOY_MEGATRON_ETP  Megatron expert tensor parallel size
-#   PSRL_DEPLOY_EXTRA         space-separated extra hydra overrides appended last
+# Set `PSRL_DEPLOY_*` for pool topology, models, dataset, backend, and Megatron parallel sizes.
 #
 # Optional positional args to launch_deployment_mode are forwarded to main_ppo.
 
@@ -280,7 +256,7 @@ launch_deployment_mode() {
     RM_EP=$(_psrl_vllm_ep_size_for_model "${RM_MODEL_PATH}" "${RM_TP}")
     RM_NGPUS_PER_NODE_PER_INSTANCE=$(( ${RM_TP} * ${RM_PP} ))
 
-    # validation settings (on train_pool; does not use elastic path)
+    # validation settings (on train_pool. does not use elastic path)
     VAL_TP=8
     VAL_PP=1
     VAL_EP=$(_psrl_vllm_ep_size_for_model "${HF_MODEL_PATH}" "${VAL_TP}")
@@ -433,9 +409,7 @@ launch_deployment_mode() {
         psrl.deployment.validate_ngpus_per_node_per_instance=${VAL_NGPUS_PER_NODE_PER_INSTANCE}
     )
 
-    # Non-elastic modes (disaggregated, trainer_pool_only) use independent rollout
-    # / reward pools; main_ppo needs an explicit n_rollout_instances and (for the
-    # gen RM) num_replicas. Elastic modes auto-compute these from the pool sizes.
+    # Independent pools require explicit rollout and RM replica counts. Elastic modes derive counts from pool sizes.
     case "${PSRL_DEPLOY_MODE}" in
         disaggregated|trainer_pool_only)
             SHARED_TOTAL_NGPUS=$(_psrl_total_gpus_from_node_spec "${PSRL_DEPLOY_SHARED_NGPUS}" "${PSRL_DEPLOY_SHARED_NNODES}")

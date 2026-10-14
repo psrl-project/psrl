@@ -21,7 +21,7 @@ rollout:
   top_k: -1
   tensor_parallel_size: 1
   pipeline_parallel_size: 1
-  # NOTE(claude): MoE rollout uses EP=TP when >1; dense models keep EP=1
+  # NOTE(claude): MoE rollout uses EP=TP when >1. dense models keep EP=1.
   expert_parallel_size: 1
   dtype: bfloat16
   gpu_memory_utilization: 0.95
