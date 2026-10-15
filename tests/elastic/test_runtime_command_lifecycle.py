@@ -401,7 +401,11 @@ def test_planned_migrations_wait_for_dispatch_before_next_abort(modules):
             ),
         )
         coord.server_handles.update({"source": server, "destination": server})
-        replies = [{"dispatched": False}, {"dispatched": True}, {"dispatched": True}]
+        replies = [
+            {"dispatched": False, "completed": False},
+            {"dispatched": True, "completed": False},
+            {"dispatched": True, "completed": False},
+        ]
 
         async def gateway_get(path, params):
             response = replies.pop(0)
@@ -534,14 +538,15 @@ def test_sibling_transition_is_settled_before_action_failure(modules):
 
 
 @pytest.mark.parametrize("direction", ["up", "down"])
-def test_scale_handler_survives_failure_and_releases_decision(modules, direction):
+def test_scale_handler_reports_failure_and_cancels_queued_actions(modules, direction):
     async def scenario():
         executor = _executor(modules, None)
         task_queue = asyncio.Queue()
         task_queue.put_nowait({"decision_id": 1, "role_name": modules.role.Rollout, "model_name": "model"})
-        task_queue.put_nowait({"decision_id": 2, "role_name": modules.role.Rollout, "model_name": "model"})
-        executor._decision_pending_action_counts = {1: 1, 2: 1}
+        task_queue.put_nowait({"decision_id": 1, "role_name": modules.role.Rollout, "model_name": "model"})
+        executor._decision_pending_action_counts = {1: 2}
         executor._decision_execution_in_progress = True
+        executor.agent_loop_manager = SimpleNamespace(fail_pipeline=SimpleNamespace(remote=AsyncMock()))
         setattr(executor, f"scale_{direction}_task_queue", task_queue)
         setattr(executor, f"stop_scale_{direction}", False)
         completed = []
@@ -560,7 +565,9 @@ def test_scale_handler_survives_failure_and_releases_decision(modules, direction
         executor._find_instances_to_scaled_down_in_role = lambda _: [target]
         executor._interrupt_waiting_after_scale_up = AsyncMock()
         await getattr(executor, f"_scale_{direction}_handler_loop")()
-        assert len(completed) == 2, "The consumer must process the next action after a failed action."
+        assert len(completed) == 1, "A failed transition must stop further GPU ownership changes."
+        diagnosis = executor.agent_loop_manager.fail_pipeline.remote.call_args.args[0]
+        assert "transition failed" in diagnosis, "Failed scaling must reach the trainer's data waiters."
         assert executor._decision_pending_action_counts == {}
         assert executor._decision_execution_in_progress is False
 
@@ -1244,11 +1251,21 @@ def test_rollout_rebalance_preserves_opaque_engine_request_ids(modules):
     asyncio.run(scenario())
 
 
-def test_reward_rebalance_does_not_abort_nonresumable_completions(modules):
+def test_reward_rebalance_preserves_opaque_engine_request_ids(modules):
     async def scenario():
-        executor = _executor(modules, None)
-        executor._await_elastic_coordinator_command = AsyncMock()
-        await executor._interrupt_waiting_after_scale_up(modules.role.RewardModel, "model")
-        executor._await_elastic_coordinator_command.assert_not_awaited()
+        coord = SimpleNamespace(exec_command=SimpleNamespace(remote=AsyncMock(return_value=2)))
+        executor = _executor(modules, coord)
+        role = modules.role.RewardModel
+        executor.coordinators[role] = {"model": coord}
+        executor.instances_status_flags[role] = executor.instances_status_flags[modules.role.Rollout]
+        executor.instances_engine_stats[role] = {
+            "model": {("replica-1", 0): {"scheduler_stats": {"req_id_in_waiting": ["cmpl-a-0", "cmpl-b-0"]}}},
+        }
+        executor.config.psrl.rollout_coordination.partial_rollout.enable = False
+        await executor._interrupt_waiting_after_scale_up(role, "model")
+        command = coord.exec_command.remote.await_args.args[0]
+        assert command.instance_to_uids == {("replica-1", 0): ["cmpl-a-0", "cmpl-b-0"]}, (
+            "Reward rebalancing must preserve native engine request IDs."
+        )
 
     asyncio.run(scenario())

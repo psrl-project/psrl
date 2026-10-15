@@ -109,6 +109,8 @@ def test_apply_chat_template_without_max_length_forwards_overlong_prompt(tokeniz
     import asyncio
 
     class Response:
+        headers = {}
+
         async def __aenter__(self):
             return self
 
@@ -133,7 +135,7 @@ def test_apply_chat_template_without_max_length_forwards_overlong_prompt(tokeniz
     ids = unclamped["input_ids"] if hasattr(unclamped, "keys") else unclamped
     ids = ids[0].tolist()
     data = SimpleNamespace(non_tensor_batch={"raw_prompt_ids": [ids]})
-    asyncio.run(loop._query_reward_model(data, "request"))
+    asyncio.run(loop._query_reward_model(data, "7"))
     clamped = loop._http_client.post.call_args.kwargs["json"]["prompt"]
     assert len(clamped) == _RM_PROMPT_LENGTH, "The gateway prompt must fit the model context."
     assert "boxed" in glm.decode(clamped[-80:], skip_special_tokens=True).lower(), (

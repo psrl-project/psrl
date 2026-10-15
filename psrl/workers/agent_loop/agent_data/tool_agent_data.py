@@ -14,7 +14,7 @@ from psrl.environments.tool_env import ToolAction
 from psrl.tools.tool_parser.base import ToolParser
 from psrl.workers.agent_loop.agent_data.base import AgentData
 from psrl.workers.agent_loop.agent_data.conversation_agent_data import ConversationAgentData
-from psrl.workers.reward.client import RewardManagerClient
+from psrl.workers.reward.client import RewardSubmissionClient
 
 psrl_logger = logging.getLogger(__name__)
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
@@ -45,7 +45,7 @@ class ToolAgentData(ConversationAgentData):
     def __init__(
         self,
         config: DictConfig,
-        reward_manager: RewardManagerClient,
+        reward_manager: RewardSubmissionClient,
         env: Environment,
         **kwargs,
     ):

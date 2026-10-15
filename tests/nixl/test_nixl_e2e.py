@@ -729,7 +729,7 @@ def _run_nixl_e2e(cfg: DictConfig):
     global_store = GlobalStore.remote()
 
     start_time = time.time()
-    ip_to_node_id = {node["NodeManagerAddress"]: node["NodeID"] for node in ray.nodes()}
+    ip_to_node_id = {node["NodeManagerAddress"]: node["NodeID"] for node in ray.nodes() if node["Alive"]}
 
     # Create per-node PortScanner actors (required by NIXLStorageClient).
     port_scanners = create_port_scanners(ip_to_node_id)

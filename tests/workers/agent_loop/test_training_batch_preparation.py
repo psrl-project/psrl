@@ -20,7 +20,7 @@ def _manager():
     manager.ready_entries_per_buffer = 2
     manager._resolved_train_chunks = {}
     manager._train_buffer_waiters = {}
-    manager._refill_breaker_diagnosis = None
+    manager._pipeline_failure = None
     manager.ps_manager_handle = SimpleNamespace(ensure_train_buffer_exists=SimpleNamespace(remote=AsyncMock()))
     return manager
 
@@ -69,7 +69,7 @@ def test_wait_for_training_readiness_times_out_without_consuming_accumulator():
 
 def test_readiness_reports_refill_failure_even_if_data_is_present():
     manager = _manager()
-    manager._refill_breaker_diagnosis = "Rollouts cannot refill the buffer."
+    manager._pipeline_failure = "Rollouts cannot refill the buffer."
     manager.train_data_buffers[7] = ["ready"]
     with pytest.raises(RuntimeError, match="Rollouts cannot refill"):
         asyncio.run(manager.wait_for_training_readiness(7, timeout_s=0))

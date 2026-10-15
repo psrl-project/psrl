@@ -2,6 +2,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from psrl.trainer.ppo.node_placement import (
+    get_alive_node_ids_by_ip,
     get_node_ids_from_resource_pool,
     get_resource_pool_for_wg_name,
 )
@@ -9,6 +10,21 @@ from verl.single_controller.ray import RayResourcePool
 from verl.single_controller.ray.base import SubRayResourcePool
 
 pytestmark = pytest.mark.cpu_test
+
+
+@pytest.mark.parametrize("dead_record_last", [True, False])
+def test_node_ip_mapping_retains_live_node_after_restart(monkeypatch, dead_record_last):
+    import ray
+
+    live = {"NodeManagerAddress": "192.0.2.1", "NodeID": "live-node", "Alive": True}
+    dead = {"NodeManagerAddress": "192.0.2.1", "NodeID": "dead-node", "Alive": False}
+    records = [live, dead] if dead_record_last else [dead, live]
+    records.append({"NodeManagerAddress": "192.0.2.2", "NodeID": "offline-node", "Alive": False})
+    monkeypatch.setattr(ray, "nodes", lambda: records)
+
+    assert get_alive_node_ids_by_ip() == {"192.0.2.1": "live-node"}, (
+        "Actor placement must exclude dead records regardless of their order."
+    )
 
 
 class _FakePlacementGroup:

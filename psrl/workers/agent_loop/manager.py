@@ -219,9 +219,8 @@ class PSRL_AgentLoopManager:
         self.refill_failure_threshold = self.config.psrl.agentic_rl.get("refill_failure_threshold", 32)
         self._consecutive_group_failures = 0
         self._group_failure_reasons: Counter = Counter()
-        # Set once the breaker trips. `wait_for_training_batch` turns it into the
-        # exception that ends the run.
-        self._refill_breaker_diagnosis: str | None = None
+        # Consumers must see failures even when they register after inference has stopped.
+        self._pipeline_failure: str | None = None
 
         # Build logger
         self.log_prefix = "AgentLoopManager"
@@ -575,7 +574,7 @@ class PSRL_AgentLoopManager:
 
         if self._consecutive_group_failures >= self.refill_failure_threshold:
             breakdown = ", ".join(f"{reason}={count}" for reason, count in self._group_failure_reasons.most_common())
-            self._trip_refill_breaker(
+            self.fail_pipeline(
                 f"{self._consecutive_group_failures} consecutive rollout group failures with no group "
                 f"succeeding in between (threshold={self.refill_failure_threshold}). "
                 f"Terminate reasons: {breakdown}. Every failed group was replaced by a fresh prompt, so "
@@ -584,53 +583,43 @@ class PSRL_AgentLoopManager:
                 f"psrl.agentic_rl.refill_failure_threshold only if these failures are genuinely sporadic."
             )
 
-    def _trip_refill_breaker(self, diagnosis: str) -> None:
-        """Latch a refill failure and fail every training waiter with it.
-
-        Raising from the caller cannot stop the run: `notify_group_failed` is invoked
-        as a fire-and-forget task in the agent loop worker, whose done-callback logs
-        exceptions and discards them. The driver's only blocking calls into this actor
-        are `wait_for_training_batch` and `wait_for_training_chunk`, so the diagnosis is
-        latched here and converted into an exception there. Both waiter maps are failed
-        directly as well, because the trainer usually blocks before the breaker trips.
-
-        Args:
-            diagnosis (str): Human-readable explanation carried to the driver.
+    def fail_pipeline(
+        self,
+        diagnosis: str,
+    ) -> None:
         """
-        if self._refill_breaker_diagnosis is not None:
+        Preserve the first fatal failure and release every trainer consumer.
+
+        A background actor cannot fail the driver by raising in its own event loop.
+        Pending consumers receive an exception and future consumers read the same latch.
+        """
+        if self._pipeline_failure is not None:
             return
-        self._refill_breaker_diagnosis = diagnosis
-        psrl_logger.error(f"Refill breaker tripped: {diagnosis}")
-
-        # A fresh exception per future: Ray serializes each one separately, and sharing
-        # a single instance makes every waiter report the same reused traceback.
-        for buffer_id in list(self._train_buffer_waiters.keys()):
-            for fut in self._train_buffer_waiters[buffer_id]:
-                if not fut.done():
-                    fut.set_exception(self._refill_breaker_error())
-            del self._train_buffer_waiters[buffer_id]
-
-        # The chunk path is a separate waiter map. `fine_grain_overlap` blocks only
-        # here, so skipping it would leave that strategy livelocked.
-        for chunk_key in list(self._train_chunk_waiters.keys()):
-            for fut in self._train_chunk_waiters[chunk_key]:
-                if not fut.done():
-                    fut.set_exception(self._refill_breaker_error())
-            del self._train_chunk_waiters[chunk_key]
+        self._pipeline_failure = diagnosis
+        self.stop_train_dispatch_task = True
+        self.stop_val_dispatch_task = True
+        psrl_logger.error(f"Training pipeline failed: {diagnosis}.")
+        for waiters in (self._train_buffer_waiters, self._train_chunk_waiters, self._val_buffer_waiters):
+            for futures in waiters.values():
+                for fut in futures:
+                    if not fut.done():
+                        # Ray serializes each failure, so each consumer needs its own exception instance.
+                        fut.set_exception(self._pipeline_error())
+            waiters.clear()
         self._resolved_train_chunks.clear()
 
-    def _refill_breaker_error(self) -> RuntimeError:
-        """Build the exception that reports a tripped refill breaker."""
-        return RuntimeError(f"Training aborted, rollout groups cannot be refilled. {self._refill_breaker_diagnosis}")
-
-    def _raise_if_refill_breaker_tripped(self) -> None:
-        """Convert a latched refill failure into an exception for the driver.
-
-        Raises:
-            RuntimeError: When `_trip_refill_breaker` has latched a diagnosis.
+    def _pipeline_error(self) -> RuntimeError:
         """
-        if self._refill_breaker_diagnosis is not None:
-            raise self._refill_breaker_error()
+        Build an exception carrying the original pipeline diagnosis.
+        """
+        return RuntimeError(f"Training pipeline failed. {self._pipeline_failure}")
+
+    def _raise_if_pipeline_failed(self) -> None:
+        """
+        Prevent consumers from waiting for data after a fatal pipeline failure.
+        """
+        if self._pipeline_failure is not None:
+            raise self._pipeline_error()
 
     async def _refill_failed_group(self, n_prompts: int, context: str) -> int:
         """Replace `n_prompts` lost training slots and treat a zero refill as fatal.
@@ -649,7 +638,7 @@ class PSRL_AgentLoopManager:
         """
         dispatched = await self._retry_data(n_prompts=n_prompts)
         if dispatched == 0:
-            self._trip_refill_breaker(
+            self.fail_pipeline(
                 f"{context} could not dispatch a replacement for {n_prompts} lost buffer slot(s). "
                 "The failed entries were already purged, so the buffer is permanently short and no "
                 "further rollout can complete it. Check that the training dataloader still yields "
@@ -1810,7 +1799,7 @@ class PSRL_AgentLoopManager:
         """Observe readiness without consuming a batch or registering a consumer."""
         deadline = time.monotonic() + max(0.0, timeout_s)
         while True:
-            self._raise_if_refill_breaker_tripped()
+            self._raise_if_pipeline_failed()
             if buffer_id in self.train_data_buffers or (buffer_id, 0) in self._resolved_train_chunks:
                 return True
             if time.monotonic() >= deadline:
@@ -1821,13 +1810,12 @@ class PSRL_AgentLoopManager:
         """Await a training batch for a specific buffer ID.
 
         Raises:
-            RuntimeError: When the refill breaker has tripped. This is the driver's
-                only blocking call into the manager, so it is where an unfillable
-                buffer becomes a visible failure instead of a hang.
+            RuntimeError: When inference or buffer refilling has failed.
         """
-        self._raise_if_refill_breaker_tripped()
+        self._raise_if_pipeline_failed()
 
         await self.ps_manager_handle.ensure_train_buffer_exists.remote(buffer_id)
+        self._raise_if_pipeline_failed()
 
         if buffer_id in self.train_data_buffers:
             # If the buffer is ready, return immediately
@@ -1837,6 +1825,7 @@ class PSRL_AgentLoopManager:
         # TODO(lhy): Support additional stuck-buffer consumption strategies.
         if buffer_id in self.train_accumulated_buffers:
             async with AsyncBusyPollingRayLock(self.ps_manager_handle):
+                self._raise_if_pipeline_failed()
                 # Buffer collection runs concurrently with trainer RPCs. Recheck
                 # after acquiring the PS lock before touching accumulated state.
                 if buffer_id in self.train_data_buffers:
@@ -1845,16 +1834,19 @@ class PSRL_AgentLoopManager:
                     return False
 
                 await self.handle_waiting_buffer(buffer_id)
+                self._raise_if_pipeline_failed()
 
                 if self.train_accumulated_buffer_size[buffer_id] == self.ready_entries_per_buffer:
                     # Share the single publish path so READY validation, chunk
                     # emission, and accumulator cleanup stay consistent.
                     add_buffer = await self._flush_ready_buffer(buffer_id, is_validate=False)
+                    self._raise_if_pipeline_failed()
                     if add_buffer:
                         psrl_logger.info(f"Recovered training buffer: buffer_id={buffer_id}.")
                         return self.consume_buffer(buffer_id)
 
         # If the buffer is still not ready after the abort and truncate strategy, wait for it to be ready
+        self._raise_if_pipeline_failed()
         psrl_logger.info(f"Waiting for training buffer: buffer_id={buffer_id}.")
         fut = asyncio.get_event_loop().create_future()
         self._train_buffer_waiters.setdefault(buffer_id, []).append(fut)
@@ -1868,11 +1860,9 @@ class PSRL_AgentLoopManager:
         The returned boolean is true only for the final chunk.
 
         Raises:
-            RuntimeError: When the refill breaker has tripped. `fine_grain_overlap`
-                blocks only here, so this guard is what ends the run under that
-                strategy.
+            RuntimeError: When inference or buffer refilling has failed.
         """
-        self._raise_if_refill_breaker_tripped()
+        self._raise_if_pipeline_failed()
 
         key = (buffer_id, chunk_index)
         if key in self._resolved_train_chunks:
@@ -1916,8 +1906,10 @@ class PSRL_AgentLoopManager:
 
     async def wait_for_validation_batch(self, buffer_id: int) -> KVBatchMeta:
         """Await a validation batch, returning a ``KVBatchMeta``."""
+        self._raise_if_pipeline_failed()
         async with AsyncBusyPollingRayLock(self.ps_manager_handle):
             await self.ps_manager_handle.ensure_validate_buffer_exists.remote()
+        self._raise_if_pipeline_failed()
 
         if buffer_id in self.val_data_buffers:
             # If the buffer is ready, return immediately

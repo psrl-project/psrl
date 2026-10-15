@@ -15,9 +15,7 @@ import subprocess
 import threading
 import time
 
-# A dotted module name, not `__file__`. A path-shaped name sits outside the `psrl.*`
-# hierarchy, so these records never reached the configured handlers and cleanup ran with
-# no telemetry at all: zero log lines across 456 episodes.
+# Use a dotted name so cleanup logs reach the handlers configured for the `psrl` hierarchy.
 psrl_logger = logging.getLogger("psrl.utils.common.docker_utils")
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
 
@@ -32,11 +30,8 @@ _LAST_PRUNE_MONOTONIC = 0.0
 # Images removed per `docker rmi` call, to bound the argument list.
 _PRUNE_BATCH_SIZE = 200
 
-# Cleanup runs here rather than on asyncio's default executor. `asyncio.to_thread` uses
-# that shared pool, capped at `min(32, cpu+4)`, and every `docker ps`/`rm` can block for
-# tens of seconds on a loaded daemon. Dozens of episodes tearing down at once therefore
-# saturated the pool and stalled the Harbor event loop itself, which looked like a hang.
-# A dedicated small pool means cleanup can queue without ever blocking episode I/O.
+# Docker commands can block for tens of seconds. A dedicated pool prevents cleanup from saturating
+# the default executor and stalling episode I/O.
 CLEANUP_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=4,
     thread_name_prefix="psrl-docker-cleanup",
@@ -294,9 +289,8 @@ def prune_dangling_images(min_interval_secs: float = 900.0, timeout_secs: float 
 
         deadline = now + timeout_secs
         removed = 0
-        # An image still referenced by a live container cannot be deleted, only untagged.
-        # Such an id keeps reappearing in the listing, so tracking what has already been
-        # attempted is what stops this loop spinning on it until the deadline.
+        # Images referenced by live containers can remain listed after removal attempts.
+        # Track attempted IDs to avoid retrying them until the deadline.
         attempted: set[str] = set()
         while time.monotonic() < deadline:
             listed = subprocess.run(

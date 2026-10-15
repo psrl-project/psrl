@@ -58,7 +58,7 @@ class CommandHandlerMixin:
                             "/routing_loop/migration",
                             params={"request_id": request_id},
                         )
-                        if status and status["dispatched"]:
+                        if status and (status["dispatched"] or status["completed"]):
                             break
                         if time.monotonic() >= deadline:
                             raise TimeoutError(f"Request migration did not settle: request_id={request_id!r}.")

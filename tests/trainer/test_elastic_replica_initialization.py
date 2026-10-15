@@ -134,7 +134,7 @@ def test_reward_role_initializes_every_replica_concurrently(monkeypatch, elastic
     assert len(manager.replicas) == count
 
 
-def test_reward_manager_reserves_callback_capacity_independently_of_rollout_buffer(monkeypatch):
+def test_reward_managers_reserve_separate_request_and_callback_capacity(monkeypatch):
     actor = Mock()
     actor.options.return_value = actor
     monkeypatch.setattr(ray_trainer.ray, "remote", Mock(return_value=actor))
@@ -143,6 +143,7 @@ def test_reward_manager_reserves_callback_capacity_independently_of_rollout_buff
         psrl=SimpleNamespace(reward_service_ip="reward-service"),
         reward=SimpleNamespace(
             reward_loop_worker=SimpleNamespace(num_workers=8, max_concurrency_per_worker=256),
+            validation_reward_loop_worker=SimpleNamespace(num_workers=2, max_concurrency_per_worker=256),
         ),
     )
     trainer.max_concurrency = 6144
@@ -151,14 +152,114 @@ def test_reward_manager_reserves_callback_capacity_independently_of_rollout_buff
     trainer.rollout_coordinator = object()
     trainer.ps_manager_handle = object()
     trainer.reward_loop_workers = [object() for _ in range(8)]
+    trainer.validation_reward_loop_workers = [object() for _ in range(2)]
     trainer.init_reward_loop_workers = Mock()
+    handles = [object(), object()]
+    actor.remote.side_effect = handles
 
     trainer.init_reward_manager()
 
-    assert actor.options.call_args.kwargs["max_concurrency"] == 4128
+    capacities = [call.kwargs["max_concurrency"] for call in actor.options.call_args_list]
+    assert capacities == [4128, 1056], "Each reward manager must reserve its own request and callback capacity."
+    assert trainer.reward_manager is handles[0], "Training must use its own manager actor."
+    assert trainer.validation_reward_manager is handles[1], "Validation must use its own manager actor."
     trainer.init_reward_loop_workers.assert_called_once_with()
-    actor.remote.assert_called_once_with(
+    actor.remote.assert_any_call(
         config=trainer.config,
         ps_manager_handle=trainer.ps_manager_handle,
         reward_loop_workers=trainer.reward_loop_workers,
+        is_validate=False,
     )
+    actor.remote.assert_any_call(
+        config=trainer.config,
+        ps_manager_handle=trainer.ps_manager_handle,
+        reward_loop_workers=trainer.validation_reward_loop_workers,
+        is_validate=True,
+    )
+
+
+def test_reward_worker_pools_use_separate_roles_and_configuration(monkeypatch):
+    actor = Mock()
+    actor.options.return_value = actor
+    actor.remote.side_effect = [object() for _ in range(5)]
+    monkeypatch.setattr(ray_trainer, "RewardLoopWorker", actor)
+    monkeypatch.setattr(
+        ray_trainer.ray, "nodes", lambda: [{"NodeID": "cpu-node", "Alive": True, "Resources": {"CPU": 1}}]
+    )
+    trainer = object.__new__(ray_trainer.PSRL_RayPPOTrainer)
+    trainer.config = SimpleNamespace(
+        psrl=SimpleNamespace(reward_service_ip="reward-service", ps_manager_ip="ps-service"),
+        reward=SimpleNamespace(
+            reward_loop_worker=SimpleNamespace(
+                num_workers=2, max_concurrency_per_worker=7, placement="reward_service_ip"
+            ),
+            validation_reward_loop_worker=SimpleNamespace(
+                num_workers=3, max_concurrency_per_worker=11, placement="all_cpu_nodes"
+            ),
+            active_managers=[],
+            managers={},
+        ),
+    )
+    trainer.ip_to_node_id = {"reward-service": "reward-node", "ps-service": "ps-node"}
+    trainer.tokenizer = None
+    trainer.processor = None
+    trainer._build_reward_model_runtime_infos = Mock(return_value={})
+
+    trainer.init_reward_loop_workers()
+
+    assert len(trainer.reward_loop_workers) == 2, "Training pool must use its configured worker count."
+    assert len(trainer.validation_reward_loop_workers) == 3, "Validation pool must use its configured worker count."
+    options = [call.kwargs for call in actor.options.call_args_list]
+    assert [option["max_concurrency"] for option in options] == [7, 7, 11, 11, 11], (
+        "Each pool must use its configured actor concurrency."
+    )
+    assert len({option["name"] for option in options}) == 5, "Reward worker actor names must be unique across pools."
+    assert [option["scheduling_strategy"].node_id for option in options] == ["reward-node"] * 2 + ["cpu-node"] * 3, (
+        "Each pool must honor its placement configuration."
+    )
+    roles = [call.kwargs["is_validate"] for call in actor.remote.call_args_list]
+    assert roles == [False, False, True, True, True], "Each worker must receive its pool role."
+
+
+def test_reward_pools_start_together(monkeypatch):
+    get = Mock()
+    monkeypatch.setattr(ray_trainer.ray, "get", get)
+    trainer = object.__new__(ray_trainer.PSRL_RayPPOTrainer)
+    trainer.reward_manager = Mock()
+    trainer.validation_reward_manager = Mock()
+
+    trainer.start_reward_manager()
+
+    trainer.reward_manager.start_busy_loop.remote.assert_called_once_with()
+    trainer.validation_reward_manager.start_busy_loop.remote.assert_called_once_with()
+    get.assert_called_once_with(
+        [
+            trainer.reward_manager.start_busy_loop.remote.return_value,
+            trainer.validation_reward_manager.start_busy_loop.remote.return_value,
+        ]
+    )
+
+
+@pytest.mark.parametrize("shutdown_error", [None, ray_trainer.ray.exceptions.GetTimeoutError("Shutdown stalled.")])
+def test_reward_pools_release_all_actors_on_shutdown(monkeypatch, shutdown_error):
+    get = Mock(side_effect=shutdown_error)
+    kill = Mock()
+    monkeypatch.setattr(ray_trainer.ray, "get", get)
+    monkeypatch.setattr(ray_trainer.ray, "kill", kill)
+    trainer = object.__new__(ray_trainer.PSRL_RayPPOTrainer)
+    managers = [Mock(), Mock()]
+    workers = [Mock(), Mock(), Mock()]
+    trainer.reward_manager, trainer.validation_reward_manager = managers
+    trainer.reward_loop_workers = workers[:2]
+    trainer.validation_reward_loop_workers = workers[2:]
+
+    trainer.stop_reward_manager()
+
+    get.assert_called_once_with([manager.stop_busy_loop.remote.return_value for manager in managers], timeout=60)
+    assert [call.args[0] for call in kill.call_args_list] == managers + workers, (
+        "Both pools must release their actors."
+    )
+    assert trainer.reward_manager is None, "Training manager handle must be cleared."
+    assert trainer.validation_reward_manager is None, "Validation manager handle must be cleared."
+    assert not trainer.reward_loop_workers, "Training worker handles must be cleared."
+    assert not trainer.validation_reward_loop_workers, "Validation worker handles must be cleared."

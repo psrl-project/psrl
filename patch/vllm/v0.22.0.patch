@@ -19,6 +19,27 @@ Subject: [PATCH] v0.22.0 patch
  12 files changed, 486 insertions(+), 9 deletions(-)
  create mode 100644 vllm/distributed/device_communicators/nccl_suspend.py
 
+diff --git a/vllm/compilation/cuda_graph.py b/vllm/compilation/cuda_graph.py
+index b63d861997..cd9678e199 100644
+--- a/vllm/compilation/cuda_graph.py
++++ b/vllm/compilation/cuda_graph.py
+@@ -285,13 +285,9 @@ class CUDAGraphWrapper:
+             with ExitStack() as stack:
+                 if self.cudagraph_options.gc_disable:
+-                    # during every model forward for piecewise cudagraph
+-                    # mode, we will capture many pieces of cudagraphs
+-                    # (roughly one per layer). running gc again and again
+-                    # across layers will make the cudagraph capture very slow.
+-                    # therefore, we only run gc for the first graph,
+-                    # and disable gc for the rest of the graphs.
++                    # Skip repeated collections during piecewise capture. Background
++                    # callers still require the integer count returned by `gc.collect`.
+                     stack.enter_context(
+-                        patch("gc.collect", lambda *args, **kwargs: None)
++                        patch("gc.collect", lambda *args, **kwargs: 0)
+                     )
+                     stack.enter_context(
+                         patch(
 diff --git a/vllm/config/scheduler.py b/vllm/config/scheduler.py
 index fb6951ea7..893a242bc 100644
 --- a/vllm/config/scheduler.py

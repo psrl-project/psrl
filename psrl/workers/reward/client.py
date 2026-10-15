@@ -7,6 +7,7 @@ from typing import Any
 
 import ray
 from tensordict import TensorDict
+from verl.utils import tensordict_utils as tu
 
 REWARD_MANAGER_CONTROL_CONCURRENCY = 32
 
@@ -112,3 +113,27 @@ class RewardManagerClient:
         Wait for the manager to accept a completed reward result.
         """
         await self._call("put_reward_result", result)
+
+
+class RewardSubmissionClient:
+    """
+    Route agent rewards to independently bounded training and validation clients.
+    """
+
+    def __init__(
+        self,
+        training: RewardManagerClient,
+        validation: RewardManagerClient,
+    ):
+        self._training = training
+        self._validation = validation
+
+    async def compute_score(
+        self,
+        reward_inputs: TensorDict,
+    ) -> dict[str, Any] | None:
+        """
+        Select the reward pool using the request's `validate` metadata.
+        """
+        client = self._validation if tu.get(reward_inputs, "validate", False) else self._training
+        return await client.compute_score(reward_inputs)

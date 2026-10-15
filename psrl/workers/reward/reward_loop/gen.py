@@ -165,7 +165,13 @@ class GenRewardLoop(RewardLoopBase):
 
     # --- HTTP Query ---
 
-    async def _query_reward_model(self, rm_data_proto: DataProto, request_uid: str) -> dict:
+    async def _query_reward_model(
+        self,
+        rm_data_proto: DataProto,
+        request_uid: str,
+        *,
+        is_validate: bool = False,
+    ) -> dict:
         """
         Send one request to the smg gateway and return the parsed result dict.
 
@@ -205,18 +211,21 @@ class GenRewardLoop(RewardLoopBase):
             f"payload_tokens={len(raw_prompt_ids)}."
         )
 
-        interrupted_count = 0
-        while True:
-            async with self._http_client.post(url, json=payload) as resp:
-                resp.raise_for_status()
-                data = await resp.json(content_type=None)
-            if self._smg_endpoint != "/v1/completions" or not any(
-                choice.get("finish_reason") == "abort" for choice in data.get("choices", [])
-            ):
-                break
-            # RM requests restart as a whole because interrupted scores are not valid rewards.
-            interrupted_count += 1
-            psrl_logger.info(f"Requeueing interrupted reward request: uid={request_uid!r}.")
+        routing_id = str(int(request_uid))
+        headers = {
+            "x-request-id": routing_id,
+            "x-prompt-id": routing_id,
+            "x-version-tag": "0",
+            "x-is-validate": str(is_validate).lower(),
+        }
+        async with self._http_client.post(url, json=payload, headers=headers) as resp:
+            resp.raise_for_status()
+            data = await resp.json(content_type=None)
+            interrupted_count = int(resp.headers.get("x-smg-partial-rollout-count", "0"))
+        if self._smg_endpoint == "/v1/completions" and any(
+            choice.get("finish_reason") == "abort" for choice in data.get("choices", [])
+        ):
+            raise RuntimeError(f"Reward gateway returned an unfinished request: uid={request_uid!r}.")
 
         result = self._parse_response(data, request_uid)
         result["reward_metrics"]["rm_prompt_truncated_tokens"] = truncated_tokens
@@ -282,7 +291,11 @@ class GenRewardLoop(RewardLoopBase):
 
         rm_data_proto = self._build_rm_data_proto(rm_inputs, request_uid)
 
-        rm_output_dict = await self._query_reward_model(rm_data_proto, request_uid)
+        rm_output_dict = await self._query_reward_model(
+            rm_data_proto,
+            request_uid,
+            is_validate=bool(tu.get(data_item, "validate", False)),
+        )
         rm_output_str = rm_output_dict.get("rm_output_str", "")
         rm_output_value = rm_output_dict.get("rm_output_value")
         reward_metrics = rm_output_dict.get("reward_metrics", {})

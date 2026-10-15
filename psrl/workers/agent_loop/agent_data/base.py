@@ -14,7 +14,7 @@ from verl.utils.ray_utils import get_event_loop
 from psrl.environments.base import ConversationType, Environment
 from psrl.utils.dataset.utils import as_object_sample
 from psrl.workers.gen.utils import RolloutInstanceId, TokenOutput
-from psrl.workers.reward.client import RewardManagerClient
+from psrl.workers.reward.client import RewardSubmissionClient
 
 psrl_logger = logging.getLogger(__name__)
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
@@ -202,7 +202,7 @@ class AgentData(ABC, Generic[ObsType, ActType]):
     def __init__(
         self,
         config: DictConfig,
-        reward_manager: RewardManagerClient,
+        reward_manager: RewardSubmissionClient,
         env: Environment,
         **kwargs,
     ):

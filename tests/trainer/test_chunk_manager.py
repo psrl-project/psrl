@@ -56,12 +56,12 @@ class FakeManager:
 
         # The refill breaker is latch-free here: these tests cover the healthy
         # chunk path, so the guard must read as "not tripped".
-        self._refill_breaker_diagnosis = None
+        self._pipeline_failure = None
 
         # Bind real methods from the production class.
         self._emit_pending_chunks = PSRL_AgentLoopManager._emit_pending_chunks.__get__(self)
-        self._refill_breaker_error = PSRL_AgentLoopManager._refill_breaker_error.__get__(self)
-        self._raise_if_refill_breaker_tripped = PSRL_AgentLoopManager._raise_if_refill_breaker_tripped.__get__(self)
+        self._pipeline_error = PSRL_AgentLoopManager._pipeline_error.__get__(self)
+        self._raise_if_pipeline_failed = PSRL_AgentLoopManager._raise_if_pipeline_failed.__get__(self)
         self.wait_for_training_chunk = PSRL_AgentLoopManager.wait_for_training_chunk.__get__(self)
 
     def entry_infos_to_kv_batch_meta(self, entries, is_validate: bool = False) -> KVBatchMeta:

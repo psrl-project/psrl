@@ -47,6 +47,13 @@ def test_reward_router_arguments_use_native_policy_and_limits(rm_config, method)
     assert args.model_path == "models/reward-model"
     assert args.tokenizer_path == "models/reward-model"
     assert args.disable_tokenizer_autoload is True
+    assert args.routing_loop_request_sort_key == "small_id", "Reward requests must default to numeric ID order."
+
+
+def test_reward_router_accepts_explicit_queue_order(rm_config):
+    rm_config.routing_strategy.request_sort_indicator = "long_length"
+    args = build_reward_router_args(OmegaConf.create({}), "127.0.0.1", 8300, None, rm_config=rm_config)
+    assert args.routing_loop_request_sort_key == "long_length", "An explicit reward queue order must be respected."
 
 
 @pytest.mark.parametrize("method", ["itl", "throughput_optimal", "throughput_optimal_with_budget"])

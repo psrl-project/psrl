@@ -51,6 +51,16 @@ def test_multi_reward_model_config_has_managers():
     assert cfg.launch_reward_fn_async is False
 
 
+def test_validation_reward_pool_has_independent_defaults():
+    from psrl.workers.config.reward_model import MultiRewardModelConfig, RewardLoopWorkerConfig
+
+    cfg = MultiRewardModelConfig()
+    assert cfg.validation_reward_loop_worker.num_workers == 2, "Validation must have its own worker count."
+    assert cfg.validation_reward_loop_worker.max_concurrency_per_worker == 256, "Validation must bound concurrency."
+    overridden = MultiRewardModelConfig(reward_loop_worker=RewardLoopWorkerConfig(num_workers=16))
+    assert overridden.validation_reward_loop_worker.num_workers == 2, "Training overrides must not change validation."
+
+
 def test_resolve_active_managers():
     """Test resolve_active_managers function resolves names to configs."""
     from dataclasses import dataclass

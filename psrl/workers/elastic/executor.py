@@ -96,6 +96,7 @@ class ElasticExecutor:
         self.stop_monitor = False
         self.stop_scale_up = False
         self.stop_scale_down = False
+        self._runtime_failure: str | None = None
 
         # Scaling policy
         self.scaling_policy = create_scaling_policy(config=self.config, policy_config=self.elastic_config)
@@ -365,8 +366,10 @@ class ElasticExecutor:
         Reserve trainer GPUs and restore validation replicas through their coordinator.
         """
         async with self._trainer_pool_transition_lock:
+            self._raise_if_runtime_failed()
             await self._reclaim_trainer_pool()
             await self._sleep_trainer()
+            self._raise_if_runtime_failed()
             self._validation_active = True
             await self._await_elastic_coordinator_command(
                 self._rollout_coordinator(),
@@ -449,8 +452,10 @@ class ElasticExecutor:
         Reclaim inference borrowers and restore trainer storage, connections and weights.
         """
         async with self._trainer_pool_transition_lock:
+            self._raise_if_runtime_failed()
             await self._reclaim_trainer_pool()
             await self._sleep_validation_workers()
+            self._raise_if_runtime_failed()
             if self._trainer_state == TrainerState.AWAKE:
                 return
             self._trainer_state = TrainerState.RESTORING
@@ -480,6 +485,7 @@ class ElasticExecutor:
         self._trainer_pool_transition = True
         try:
             await self._decision_settled.wait()
+            self._raise_if_runtime_failed()
             for role, model in self.roles:
                 ids = [
                     iid
@@ -511,8 +517,10 @@ class ElasticExecutor:
             await self._release_trainer_pool()
 
     async def _release_trainer_pool(self) -> None:
+        self._raise_if_runtime_failed()
         await self._sleep_validation_workers()
         await self._sleep_trainer()
+        self._raise_if_runtime_failed()
         self._trainer_pool_available = True
         self._trainer_pool_epoch += 1
         psrl_logger.debug("Trainer pool released for elastic inference.")
@@ -533,6 +541,7 @@ class ElasticExecutor:
             buffer_id (int): Training buffer this step is about to wait on.
         """
         async with self._trainer_pool_transition_lock:
+            self._raise_if_runtime_failed()
             if self._trainer_state == TrainerState.AWAKE:
                 grace_s = float(self.elastic_config.get("trainer_ready_grace_s", 0.0))
                 if await self.agent_loop_manager.wait_for_training_readiness.remote(buffer_id, grace_s):
@@ -587,6 +596,7 @@ class ElasticExecutor:
         self._current_training_step = int(step)
 
     async def start_busy_loop(self):
+        self._raise_if_runtime_failed()
         if self.monitor_task is not None and not self.monitor_task.done():
             return
 
@@ -628,6 +638,41 @@ class ElasticExecutor:
         psrl_logger.debug("Elastic executor loops stopped.")
         monitor_logger.info("Elastic monitor loop stopped.")
 
+    def _raise_if_runtime_failed(self) -> None:
+        """
+        Reject GPU ownership changes once inference state becomes unusable.
+        """
+        if self._runtime_failure is not None:
+            raise RuntimeError(self._runtime_failure)
+
+    async def _fail_runtime(
+        self,
+        error: Exception,
+        *,
+        context: str,
+    ) -> None:
+        """
+        Stop new scaling actions and deliver the first failure to trainer consumers.
+
+        Inflight transitions still settle before decision waiters resume. Queued
+        transitions are cancelled because GPU ownership is no longer trustworthy.
+        """
+        if self._runtime_failure is not None:
+            return
+        self._runtime_failure = f"{context}: {error!r}."
+        self.stop_monitor = True
+        self.stop_scale_up = True
+        self.stop_scale_down = True
+        self._trainer_pool_available = False
+        self._instance_state_epoch += 1
+        for queue in (self.scale_up_task_queue, self.scale_down_task_queue):
+            while not queue.empty():
+                task = queue.get_nowait()
+                self._mark_decision_action_finished(task.get("decision_id"))
+        psrl_logger.error(self._runtime_failure)
+        if self.agent_loop_manager is not None:
+            await self.agent_loop_manager.fail_pipeline.remote(self._runtime_failure)
+
     async def _monitor_loop(self):
         while not self.stop_monitor:
             try:
@@ -645,6 +690,7 @@ class ElasticExecutor:
                     await asyncio.sleep(max(self.scaling_policy.monitor_interval_ms / 1000, 0.01))
                     continue
                 await self._sync_trainer_waiting_hint()
+                self._raise_if_runtime_failed()
                 if (
                     self._trainer_pool_transition
                     or self._trainer_pool_epoch != pool_epoch
@@ -672,6 +718,7 @@ class ElasticExecutor:
                     or self._instance_state_epoch != instance_epoch
                 ):
                     continue
+                self._raise_if_runtime_failed()
                 policy_kwargs = {}
                 if request_snapshots is not None:
                     policy_kwargs["request_level_snapshots_by_role"] = request_snapshots
@@ -754,9 +801,10 @@ class ElasticExecutor:
                                 decision_id,
                             )
                             self._mark_decision_action_finished(decision_id)
-            except Exception:
-                # Keep transient sync and policy failures from terminating the monitor task.
-                psrl_logger.exception("elastic_rm _monitor_loop iteration failed. Retrying after sleep.")
+            except Exception as error:
+                psrl_logger.exception("Elastic monitor failed.")
+                await self._fail_runtime(error, context="Elastic monitor failed")
+                return
             await asyncio.sleep(max(self.scaling_policy.monitor_interval_ms / 1000, 0.01))
 
     async def _fetch_request_level_snapshots(self, signals):
@@ -883,8 +931,9 @@ class ElasticExecutor:
                             model_name=role_need_to_scale_up["model_name"],
                         )
                 psrl_logger.debug("elastic_rm scale_up_handler decision_id=%s post_scale_up_abort done", decision_id)
-            except Exception:
+            except Exception as error:
                 psrl_logger.exception(f"Elastic scale up action failed: decision_id={decision_id!r}.")
+                await self._fail_runtime(error, context=f"Elastic scale up failed for decision {decision_id!r}")
             finally:
                 self._mark_decision_action_finished(decision_id)
 
@@ -913,8 +962,9 @@ class ElasticExecutor:
                 )
                 await self._apply_instance_actions(self._scale_down_instances, instances_to_scaled_down)
                 psrl_logger.debug("elastic_rm scale_down_handler decision_id=%s sleep_targets done", decision_id)
-            except Exception:
+            except Exception as error:
                 psrl_logger.exception(f"Elastic scale down action failed: decision_id={decision_id!r}.")
+                await self._fail_runtime(error, context=f"Elastic scale down failed for decision {decision_id!r}")
             finally:
                 self._mark_decision_action_finished(decision_id)
 
@@ -1071,6 +1121,7 @@ class ElasticExecutor:
         """
         Wake one role and model with a single coordinator command.
         """
+        self._raise_if_runtime_failed()
         if not self._trainer_pool_available and any(
             self.instance_pool_ids.get((item["role_name"], item["model_name"], item["instance_id"])) == "train_pool"
             for item in instances
@@ -1096,12 +1147,7 @@ class ElasticExecutor:
         return normalized_waiting_uids[:k]
 
     async def _interrupt_waiting_after_scale_up(self, role_name: PSRL_Role, model_name: str):
-        if role_name == PSRL_Role.RewardModel:
-            psrl_logger.warning(
-                "Reward request migration requires router loopback support. Keeping active reward requests running."
-            )
-            return
-        if not self.config.psrl.rollout_coordination.partial_rollout.enable:
+        if role_name != PSRL_Role.RewardModel and not self.config.psrl.rollout_coordination.partial_rollout.enable:
             return
         role_status = self.instances_status_flags.get(role_name, {}).get(model_name, {})
         awaken_instance_ids = [
@@ -1407,6 +1453,11 @@ class ElasticExecutor:
         results = await self._await_coordinator_refs_with_per_ref_timeout(
             task_refs, task_keys, op_label="get_instance_runtime_snapshot"
         )
+        for (role_name, model_name), result in zip(task_keys, results, strict=True):
+            if isinstance(result, Exception) and not isinstance(result, TimeoutError):
+                raise RuntimeError(
+                    f"Engine status RPC failed for role={role_name!r}, model={model_name!r}: {result!r}."
+                ) from result
         staged_stats = {}
         staged_statuses = {}
         staged_versions = {}

@@ -29,6 +29,30 @@ def test_reward_yaml_merges_psrl_fields():
     assert naive_cfg.reward_manager.source == "register"
 
 
+def test_validation_reward_pool_can_be_configured_independently():
+    from pathlib import Path
+
+    from hydra import compose, initialize_config_dir
+
+    config_dir = str(Path(__file__).resolve().parents[2] / "psrl/trainer/config")
+    with initialize_config_dir(config_dir=config_dir, version_base=None):
+        cfg = compose(
+            config_name="ppo_trainer",
+            overrides=[
+                "reward.validation_reward_loop_worker.num_workers=3",
+                "reward.validation_reward_loop_worker.max_concurrency_per_worker=17",
+                "reward.validation_reward_loop_worker.queue_size_per_worker=64",
+            ],
+        )
+
+    validation = cfg.reward.validation_reward_loop_worker
+    assert validation.num_workers == 3, "Validation worker count must support Hydra overrides."
+    assert validation.max_concurrency_per_worker == 17, "Validation concurrency must support Hydra overrides."
+    assert validation.queue_size_per_worker == 64, "Validation queue size must support Hydra overrides."
+    assert cfg.reward.reward_loop_worker.num_workers == 8, "Training worker count must remain independently set."
+    assert cfg.reward.reward_loop_worker.max_concurrency_per_worker == 256, "Training must retain its own capacity."
+
+
 def test_gen_reward_model_uses_hf_model_schema():
     """Gen reward `model` is a HuggingFace config with `_target_`."""
     import os

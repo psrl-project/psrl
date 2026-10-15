@@ -42,7 +42,7 @@ from psrl.workers.agent_loop.loops.utils import (
 )
 from psrl.workers.gen.utils import TokenOutput
 from psrl.workers.ps.request_status_tracker import PSRL_RequestStatus
-from psrl.workers.reward.client import RewardManagerClient, reward_producer_concurrency
+from psrl.workers.reward.client import RewardManagerClient, RewardSubmissionClient, reward_producer_concurrency
 
 psrl_logger = logging.getLogger(__file__)
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
@@ -118,6 +118,11 @@ class PSRL_AgentLoopWorker:
         self.reward_manager = None
         self.reward_rpc_capacity = reward_producer_concurrency(
             config.reward.reward_loop_worker,
+            producer_count=worker_num,
+            producer_index=worker_id,
+        )
+        self.validation_reward_rpc_capacity = reward_producer_concurrency(
+            config.reward.validation_reward_loop_worker,
             producer_count=worker_num,
             producer_index=worker_id,
         )
@@ -213,13 +218,18 @@ class PSRL_AgentLoopWorker:
         """
         self.agent_loop_manager = agent_loop_manager
 
-    def set_reward_manager(self, reward_manager: ray.actor.ActorHandle):
-        """Set the reward manager handle for sending processed data.
-
-        Args:
-            reward_manager: Handle to the reward manager actor.
+    def set_reward_managers(
+        self,
+        reward_manager: ray.actor.ActorHandle,
+        validation_reward_manager: ray.actor.ActorHandle,
+    ):
         """
-        self.reward_manager = RewardManagerClient(reward_manager, self.reward_rpc_capacity)
+        Install reward clients with separate capacity for training and validation.
+        """
+        self.reward_manager = RewardSubmissionClient(
+            training=RewardManagerClient(reward_manager, self.reward_rpc_capacity),
+            validation=RewardManagerClient(validation_reward_manager, self.validation_reward_rpc_capacity),
+        )
 
     def set_distributed_post_actors(
         self,

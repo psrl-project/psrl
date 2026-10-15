@@ -6,7 +6,7 @@ launch_reward_fn_async: True
 # way to normalize the reward, choices: group, batch, none
 reward_normalization: null
 
-# reward loop worker pool for request-granularity reward computation
+# Training reward worker pool.
 reward_loop_worker:
   num_workers: 8
   max_concurrency_per_worker: 256
@@ -16,6 +16,15 @@ reward_loop_worker:
   result_drain_batch_size: 1024
   heartbeat_interval_s: 30
   shutdown_timeout_s: 10
+
+# Validation owns separate workers, submission capacity, and result queues.
+validation_reward_loop_worker:
+  num_workers: 2
+  max_concurrency_per_worker: 256
+  queue_size_per_worker: 4096
+  placement: reward_service_ip
+  result_queue_size: 65536
+  result_drain_batch_size: 1024
 
 # Only listed managers are active at runtime.
 active_managers:

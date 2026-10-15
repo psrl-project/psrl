@@ -14,7 +14,7 @@ from psrl.environments.base import ConversationType, Environment
 from psrl.utils.dataset.utils import as_object_sample
 from psrl.workers.agent_loop.agent_data.base import AgentData, SessionData, Trajectory
 from psrl.workers.gen.utils import TokenOutput
-from psrl.workers.reward.client import RewardManagerClient
+from psrl.workers.reward.client import RewardSubmissionClient
 
 
 def normalize_openai_messages(openai_messages: list[dict]) -> ConversationType:
@@ -44,7 +44,7 @@ class ConversationAgentData(AgentData[ConversationType, object]):
     def __init__(
         self,
         config: DictConfig,
-        reward_manager: RewardManagerClient,
+        reward_manager: RewardSubmissionClient,
         env: Environment,
         **kwargs,
     ):

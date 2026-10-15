@@ -5,7 +5,6 @@ from dataclasses import dataclass, field
 
 from verl.base_config import BaseConfig
 from verl.utils.profiler import ProfilerConfig
-from verl.workers.config.model import HFModelConfig
 
 from .model import HFModelConfig
 from .rollout import PoolingConfig, RolloutConfig, SamplingConfig, ServerConfig
@@ -170,6 +169,9 @@ class MultiRewardModelConfig(BaseConfig):
     active_managers: list[str] = field(default_factory=list)
     managers: dict[str, SingleRewardModelConfig] = field(default_factory=dict)
     reward_loop_worker: RewardLoopWorkerConfig = field(default_factory=RewardLoopWorkerConfig)
+    validation_reward_loop_worker: RewardLoopWorkerConfig = field(
+        default_factory=lambda: RewardLoopWorkerConfig(num_workers=2)
+    )
     profiler: ProfilerConfig = field(default_factory=ProfilerConfig)
 
 

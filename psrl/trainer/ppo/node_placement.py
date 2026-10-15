@@ -9,6 +9,14 @@ from verl.single_controller.ray.base import (
 )
 
 
+def get_alive_node_ids_by_ip() -> dict[str, str]:
+    """
+    Resolve node IPs to live Ray node IDs for actor scheduling.
+    """
+    # Ray retains dead node records after restarts, including records that share an IP with a live node.
+    return {node["NodeManagerAddress"]: node["NodeID"] for node in ray.nodes() if node["Alive"]}
+
+
 def get_resource_pool_for_wg_name(
     resource_pool_to_cls: dict[RayResourcePool, dict],
     wg_name: str,

@@ -28,13 +28,16 @@ class RewardLoopManager(CommandExtension):
     def __init__(
         self,
         config,
-        ps_manager_handle=None,
-        reward_loop_workers: list[ray.actor.ActorHandle] | None = None,
+        ps_manager_handle,
+        reward_loop_workers: list[ray.actor.ActorHandle],
+        *,
+        is_validate: bool,
     ):
         """Initialize reward processing state and worker coordination."""
         super().__init__()
 
         self.config = config
+        self.is_validate = is_validate
 
         if self.config.psrl.rollout_coordination.redundant_rollout.enable:
             self.rollout_n = self.config.psrl.rollout_coordination.redundant_rollout.redundant_rollout_n
@@ -66,7 +69,11 @@ class RewardLoopManager(CommandExtension):
         self.stop_collect_task = False
         self.stop_dispatch_task = False
 
-        worker_cfg = self.config.reward.reward_loop_worker
+        worker_cfg = (
+            self.config.reward.validation_reward_loop_worker if is_validate else self.config.reward.reward_loop_worker
+        )
+        if worker_cfg.result_queue_size <= 0 or worker_cfg.result_drain_batch_size <= 0:
+            raise ValueError("Reward result queue size and drain batch size must be positive.")
         self.result_queue = asyncio.Queue(maxsize=worker_cfg.result_queue_size)
         self.result_drain_batch_size = worker_cfg.result_drain_batch_size
         assert reward_loop_workers, "Reward loop workers are required."
@@ -77,9 +84,9 @@ class RewardLoopManager(CommandExtension):
 
         self.ps_manager_handle = ps_manager_handle
 
-        self.log_prefix = "RewardLoopManager"
+        self.log_prefix = "ValidationRewardLoopManager" if is_validate else "RewardLoopManager"
         psrl_logger.addHandler(DualOutputHandler(self.config.psrl.logging_path, self.log_prefix))
-        psrl_logger.info("Initialized RewardLoopManager.")
+        psrl_logger.info(f"Initialized {self.log_prefix}.")
 
     def set_sleep_wake_orchestrator(self, orchestrator):
         """Inject the SleepWakeOrchestrator (colocated modes 2/3)."""
@@ -145,7 +152,7 @@ class RewardLoopManager(CommandExtension):
                     uids = command_args.get("uids", None)
                     is_validate = command_args.get("is_validate", False)
 
-                    assert not is_validate, "Eval data should not be aborted in reward manager."
+                    assert not is_validate and not self.is_validate, "Validation rewards must not be aborted."
 
                     if parent_ids is None and uids is None:
                         raise ValueError("Abort command must contain either 'parent_ids' or 'uids' in args.")
@@ -373,12 +380,14 @@ class RewardLoopManager(CommandExtension):
         await asyncio.gather(*tasks)
 
     async def put_reward_result(self, result: dict):
+        if bool(result["is_validate"]) != self.is_validate:
+            raise ValueError("Reward result does not belong to this manager's worker pool.")
         await self.result_queue.put(result)
 
     async def _collect_results(self):
         while not self.stop_collect_task:
             results: list[dict] = []
-            while not self.result_queue.empty():
+            while len(results) < self.result_drain_batch_size and not self.result_queue.empty():
                 results.append(self.result_queue.get_nowait())
 
             if not results:
@@ -409,26 +418,21 @@ class RewardLoopManager(CommandExtension):
         if not valid_results:
             return
 
-        for is_validate in (False, True):
-            group = [r for r in valid_results if r["is_validate"] == is_validate]
-            if not group:
-                continue
-            uids = [r["uid"] for r in group]
-            await self.ps_manager_handle.update_request_status.remote(
-                uids,
-                PSRL_RequestStatus.REWARD_COMPLETED,
-                is_validate=is_validate,
-            )
-            for result in group:
-                reward = result["result"] if result.get("error") is None else None
-                if result.get("error") is not None:
-                    psrl_logger.error(
-                        f"Reward worker {result['worker_id']} failed for uid={result['uid']!r}, "
-                        f"keys={result['request_keys']!r}. Error: {result['error']!r}."
-                    )
-                if reward is not None:
-                    reward["response_len"] = result["response_len"]
-                await self._set_reward_for_request_keys(result["request_keys"], reward)
+        await self.ps_manager_handle.update_request_status.remote(
+            [result["uid"] for result in valid_results],
+            PSRL_RequestStatus.REWARD_COMPLETED,
+            is_validate=self.is_validate,
+        )
+        for result in valid_results:
+            reward = result["result"] if result.get("error") is None else None
+            if result.get("error") is not None:
+                psrl_logger.error(
+                    f"Reward worker {result['worker_id']} failed for uid={result['uid']!r}, "
+                    f"keys={result['request_keys']!r}. Error: {result['error']!r}."
+                )
+            if reward is not None:
+                reward["response_len"] = result["response_len"]
+            await self._set_reward_for_request_keys(result["request_keys"], reward)
 
     async def _set_reward_for_request_keys(self, request_keys: list[str], reward: dict[str, Any] | None):
         for request_key in request_keys:
@@ -448,6 +452,8 @@ class RewardLoopManager(CommandExtension):
     ) -> dict[str, Any] | None:
         """Dispatch reward computation to reward loop workers."""
         is_validate = tu.get(reward_inputs, "validate", False)
+        if bool(is_validate) != self.is_validate:
+            raise ValueError("Reward request does not belong to this manager's worker pool.")
         request_ids = tu.get(reward_inputs, "uid")
         n_trajectories = tu.get(reward_inputs, "n_trajectory")
 
@@ -540,6 +546,8 @@ class RewardLoopManager(CommandExtension):
         """Wait for all requested rewards and write them to the transfer queue."""
         request_keys = requests.keys
         is_validate = requests.partition_id == "val"
+        if is_validate != self.is_validate:
+            raise ValueError("Reward batch does not belong to this manager's worker pool.")
         partition_id = "val" if is_validate else "train"
         # Padding from `_balance_batch` in `ray_trainer.py`
         padding_keys: set[str] = {

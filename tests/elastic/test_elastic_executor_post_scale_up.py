@@ -211,9 +211,10 @@ def test_non_request_level_policy_uses_coordinator_rebalance(modules):
     asyncio.run(scenario())
 
 
-def test_failed_migration_does_not_strand_next_decision(modules):
+def test_failed_migration_reports_failure_and_cancels_next_decision(modules):
     async def scenario():
         executor, events = _scenario_executor(modules)
+        executor.agent_loop_manager = SimpleNamespace(fail_pipeline=SimpleNamespace(remote=AsyncMock()))
         coordinator = executor.coordinators[modules.role.RewardModel]["rm"]
         coordinator.execute_request_migrations.remote.side_effect = RuntimeError("Migration failed.")
         second_task = _scale_up_task(
@@ -226,7 +227,11 @@ def test_failed_migration_does_not_strand_next_decision(modules):
             planned_request_migrations=[],
         )
         await _run_tasks(executor, _scale_up_task(modules), second_task)
-        assert events[-1] == (modules.role.Rollout, modules.command.CommandType.WAKE_UP, [("rollout-spare", 0)])
+        assert events[-1] == (modules.role.RewardModel, modules.command.CommandType.WAKE_UP, [("reward-0", 0)]), (
+            "Failed migration must prevent the queued wake from changing GPU ownership."
+        )
+        diagnosis = executor.agent_loop_manager.fail_pipeline.remote.call_args.args[0]
+        assert "Migration failed" in diagnosis, "Migration failure must reach the trainer."
         assert executor.instances_status_flags[modules.role.RewardModel]["rm"][("reward-0", 0)] is (
             modules.topology.InstanceStatus.AWAKEN
         )

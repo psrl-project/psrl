@@ -232,9 +232,7 @@ def build_reward_router_args(config: Any, host: str, port: int, prometheus_port:
         request_budget=int(cfg_get(rm_config, "routing_strategy.request_budget", 1024)),
         enable_routing_loop=True,
         routing_loop_check_interval_ms=int(cfg_get(rm_config, "routing_strategy.check_interval_in_ms", 10)),
-        routing_loop_request_sort_key=str(
-            cfg_get(rm_config, "routing_strategy.request_sort_indicator", "short_length")
-        ),
+        routing_loop_request_sort_key=str(cfg_get(rm_config, "routing_strategy.request_sort_indicator", "small_id")),
         routing_loop_multi_priority_queue=bool(
             cfg_get(rm_config, "routing_strategy.enable_multi_priority_queue", False)
         ),

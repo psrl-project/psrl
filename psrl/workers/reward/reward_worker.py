@@ -61,6 +61,8 @@ class RewardLoopWorker:
         reward_model_runtime_infos: dict[str, Any] | None = None,
         worker_id: int = 0,
         worker_num: int = 1,
+        *,
+        is_validate: bool,
     ):
         self.config = config
         self.tokenizer = tokenizer
@@ -69,10 +71,13 @@ class RewardLoopWorker:
         self.reward_model_to_manager = reward_model_runtime_infos or {}
         self.worker_id = worker_id
         self.worker_num = worker_num
+        self.is_validate = is_validate
 
         tq.init()
 
-        worker_cfg = self.config.reward.reward_loop_worker
+        worker_cfg = (
+            self.config.reward.validation_reward_loop_worker if is_validate else self.config.reward.reward_loop_worker
+        )
         self.max_concurrency = worker_cfg.max_concurrency_per_worker
         self.queue_size = worker_cfg.queue_size_per_worker
 
@@ -93,7 +98,8 @@ class RewardLoopWorker:
         self.reward_spec_to_manager: dict[RewardSpec, RewardLoopBase] = {}
         self._init_reward_fn()
 
-        self.log_prefix = f"RewardLoopWorker_I{worker_id}"
+        pool_name = "ValidationRewardLoopWorker" if is_validate else "RewardLoopWorker"
+        self.log_prefix = f"{pool_name}_I{worker_id}"
         handler = DualOutputHandler(self.config.psrl.logging_path, self.log_prefix)
         logging.getLogger("psrl").addHandler(handler)
         psrl_logger.addHandler(handler)
@@ -102,6 +108,8 @@ class RewardLoopWorker:
         self.reward_manager_client = RewardManagerClient(reward_manager_handle, self.max_concurrency)
 
     async def add_reward_requests(self, requests: list[TensorDict]):
+        if any(bool(tu.get(request, "validate", False)) != self.is_validate for request in requests):
+            raise ValueError("Reward request does not belong to this worker's pool.")
         while len(self.pending_reward_queue) + len(requests) > self.queue_size and not self.stop_busy_loop_task:
             await asyncio.sleep(0.001)
         for request in requests:

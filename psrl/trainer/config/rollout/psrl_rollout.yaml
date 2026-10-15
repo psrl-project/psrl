@@ -108,9 +108,8 @@ agent:
   # Node IPs allowed to host agent loop workers. Empty uses every alive node.
   node_ips: []
 
-  # DAPO Overlong Filtering: drop budget-truncated trajectories from the loss while
-  # keeping their reward in the GRPO group baseline. Distinct from the reward manager's
-  # `overlong_buffer_cfg`, which is a soft length penalty on the score.
+  # Drop budget-truncated trajectories from the loss but keep rewards in the GRPO group baseline.
+  # The reward manager's `overlong_buffer_cfg` instead applies a soft score penalty.
   overlong_filtering: False
 
   # Custom agent loop config path (list of AgentLoop configs to instantiate).

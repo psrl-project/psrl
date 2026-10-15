@@ -68,6 +68,7 @@ from psrl.trainer.ppo.batch_schedule import (
     resolve_sample_keys,
 )
 from psrl.trainer.ppo.node_placement import (
+    get_alive_node_ids_by_ip,
     get_node_ids_from_resource_pool,
     get_resource_pool_for_wg_name,
 )
@@ -312,6 +313,8 @@ class PSRL_RayPPOTrainer(RayPPOTrainer):
         self.rollout_coordinator = None
         self.reward_manager = None
         self.reward_loop_workers = []
+        self.validation_reward_manager = None
+        self.validation_reward_loop_workers = []
         self.env_worker_manager = None
 
         self.reward_gateways: dict[str, ray.actor.ActorHandle] = {}
@@ -401,7 +404,7 @@ class PSRL_RayPPOTrainer(RayPPOTrainer):
         psrl_logger.info("Initialized major ray trainer (single controller).")
 
         # Cache IP-to-Ray-node-ID mapping for scheduling actors to specific nodes.
-        self.ip_to_node_id: dict[str, str] = {node["NodeManagerAddress"]: node["NodeID"] for node in ray.nodes()}
+        self.ip_to_node_id = get_alive_node_ids_by_ip()
 
         # Pin each port scanner to its node so availability checks use the correct network namespace.
         from psrl.utils.nixl.port_scanner import create_port_scanners
@@ -911,51 +914,56 @@ class PSRL_RayPPOTrainer(RayPPOTrainer):
         return runtime_infos
 
     def init_reward_loop_workers(self):
-        worker_cfg = self.config.reward.reward_loop_worker
-        num_workers = worker_cfg.num_workers
-        placement = worker_cfg.get("placement", "reward_service_ip")
         ip_to_node_id = self.ip_to_node_id
         cpu_node_ids = [
             node["NodeID"] for node in ray.nodes() if node["Alive"] and node["Resources"].get("CPU", 0) > 0
         ]
         assert cpu_node_ids, "No alive CPU Ray nodes available for reward loop workers."
         reward_model_runtime_infos = self._build_reward_model_runtime_infos()
-        max_concurrency = worker_cfg.max_concurrency_per_worker
 
         self.reward_loop_workers = []
-        for i in range(num_workers):
-            if placement == "all_cpu_nodes":
-                node_id = cpu_node_ids[i % len(cpu_node_ids)]
-                soft = True
-            elif placement == "ps_manager_ip":
-                node_id = ip_to_node_id[self.config.psrl.ps_manager_ip]
-                soft = False
-            else:
-                node_id = ip_to_node_id[self.config.psrl.reward_service_ip]
-                soft = False
+        self.validation_reward_loop_workers = []
+        for worker_cfg, is_validate, workers in (
+            (self.config.reward.reward_loop_worker, False, self.reward_loop_workers),
+            (self.config.reward.validation_reward_loop_worker, True, self.validation_reward_loop_workers),
+        ):
+            pool_name = "validation_reward_loop_worker" if is_validate else "reward_loop_worker"
+            for i in range(worker_cfg.num_workers):
+                if worker_cfg.placement == "all_cpu_nodes":
+                    node_id = cpu_node_ids[i % len(cpu_node_ids)]
+                    soft = True
+                elif worker_cfg.placement == "ps_manager_ip":
+                    node_id = ip_to_node_id[self.config.psrl.ps_manager_ip]
+                    soft = False
+                else:
+                    node_id = ip_to_node_id[self.config.psrl.reward_service_ip]
+                    soft = False
 
-            self.reward_loop_workers.append(
-                RewardLoopWorker.options(
-                    name=f"reward_loop_worker_{i}",
-                    max_concurrency=max_concurrency,
-                    num_cpus=0.001,
-                    scheduling_strategy=NodeAffinitySchedulingStrategy(
-                        node_id=node_id,
-                        soft=soft,
-                    ),
-                ).remote(
-                    self.config,
-                    self.tokenizer,
-                    self.processor,
-                    resolve_active_managers(self.config.reward),
-                    reward_model_runtime_infos,
-                    worker_id=i,
-                    worker_num=num_workers,
+                workers.append(
+                    RewardLoopWorker.options(
+                        name=f"{pool_name}_{i}",
+                        max_concurrency=worker_cfg.max_concurrency_per_worker,
+                        num_cpus=0.001,
+                        scheduling_strategy=NodeAffinitySchedulingStrategy(
+                            node_id=node_id,
+                            soft=soft,
+                        ),
+                    ).remote(
+                        self.config,
+                        self.tokenizer,
+                        self.processor,
+                        resolve_active_managers(self.config.reward),
+                        reward_model_runtime_infos,
+                        worker_id=i,
+                        worker_num=worker_cfg.num_workers,
+                        is_validate=is_validate,
+                    )
                 )
-            )
 
     def init_reward_manager(self):
-        """Initialize a single reward manager for both training and validation reward computation."""
+        """
+        Initialize independent reward managers and workers for training and validation.
+        """
         ip_to_node_id = self.ip_to_node_id
         assert self.data_processor is not None, (
             "Data processor must be initialized before starting reward computation."
@@ -965,49 +973,66 @@ class PSRL_RayPPOTrainer(RayPPOTrainer):
         )
 
         self.init_reward_loop_workers()
-        self.reward_manager = (
-            ray.remote(RewardLoopManager)
-            .options(
-                max_concurrency=reward_manager_concurrency(self.config.reward.reward_loop_worker),
+        manager_class = ray.remote(RewardLoopManager)
+        for worker_cfg, is_validate, workers in (
+            (self.config.reward.reward_loop_worker, False, self.reward_loop_workers),
+            (self.config.reward.validation_reward_loop_worker, True, self.validation_reward_loop_workers),
+        ):
+            manager = manager_class.options(
+                max_concurrency=reward_manager_concurrency(worker_cfg),
                 scheduling_strategy=NodeAffinitySchedulingStrategy(
-                    node_id=ip_to_node_id[self.config.psrl.reward_service_ip],
-                    soft=False,
+                    node_id=ip_to_node_id[self.config.psrl.reward_service_ip], soft=False
                 ),
             )
-            .remote(
+            handle = manager.remote(
                 config=self.config,
                 ps_manager_handle=self.ps_manager_handle,
-                reward_loop_workers=self.reward_loop_workers,
+                reward_loop_workers=workers,
+                is_validate=is_validate,
             )
-        )
+            if is_validate:
+                self.validation_reward_manager = handle
+            else:
+                self.reward_manager = handle
 
     def start_reward_manager(self):
-        """Start the reward manager to handle reward computation requests in the background."""
+        """
+        Start both reward pools in the background.
+        """
         assert self.reward_manager is not None, "Reward manager must be initialized before starting it."
+        assert self.validation_reward_manager is not None, "Validation reward manager must be initialized."
 
-        ray.get(self.reward_manager.start_busy_loop.remote())
+        ray.get(
+            [self.reward_manager.start_busy_loop.remote(), self.validation_reward_manager.start_busy_loop.remote()]
+        )
 
     def stop_reward_manager(self):
-        """Stop the reward manager."""
-        if self.reward_manager is not None:
-            psrl_logger.debug("Stopping reward manager...")
-            try:
-                ray.get(self.reward_manager.stop_busy_loop.remote(), timeout=60)
-                self.reward_manager = None
-                self.reward_loop_workers = []
-                psrl_logger.debug("Reward manager stopped successfully.")
-            except ray.exceptions.GetTimeoutError:
-                psrl_logger.error("Timeout stopping reward manager (60s), force killing.")
-                ray.kill(self.reward_manager, no_restart=True)
-                self.reward_manager = None
-                self.reward_loop_workers = []
-            except Exception as e:
-                psrl_logger.error(f"Error stopping reward manager: {e}", exc_info=True)
-                ray.kill(self.reward_manager, no_restart=True)
-                self.reward_manager = None
-                self.reward_loop_workers = []
-        else:
-            psrl_logger.warning("Reward manager is not initialized, skipping stop operation.")
+        """
+        Stop both reward pools and release their actors even when shutdown fails.
+        """
+        managers = [
+            manager for manager in (self.reward_manager, self.validation_reward_manager) if manager is not None
+        ]
+        workers = self.reward_loop_workers + self.validation_reward_loop_workers
+        if not managers and not workers:
+            return
+        try:
+            ray.get([manager.stop_busy_loop.remote() for manager in managers], timeout=60)
+            psrl_logger.debug("Reward managers stopped successfully.")
+        except ray.exceptions.GetTimeoutError:
+            psrl_logger.error("Timeout stopping reward managers (60s). Releasing reward actors.")
+        except Exception as e:
+            psrl_logger.error(f"Error stopping reward managers: {e!r}.", exc_info=True)
+        finally:
+            for actor in managers + workers:
+                try:
+                    ray.kill(actor, no_restart=True)
+                except Exception as e:
+                    psrl_logger.debug(f"Failed to release reward actor: {e!r}.")
+            self.reward_manager = None
+            self.validation_reward_manager = None
+            self.reward_loop_workers = []
+            self.validation_reward_loop_workers = []
 
     def _log_rollout_data(self, batch: KVBatchMeta, timing_raw: dict, rollout_data_dir: str):
         """Fetch rollout data from TransferQueue and dump sorted by uid."""
@@ -1125,7 +1150,7 @@ class PSRL_RayPPOTrainer(RayPPOTrainer):
 
         val_rollout_n = self.config.train_actor_rollout_ref.rollout.val_kwargs.n
         val_batch_num = ray.get(self.data_processor.get_val_batch_num.remote())
-        assert self.reward_manager is not None, "Reward manager must be initialized before validation."
+        assert self.validation_reward_manager is not None, "Validation reward manager must be initialized."
 
         for _ in range(val_batch_num):
             with log_dual_events("launch validation sequences generation", psrl_logger, event_type=EventType.WAIT):
@@ -1147,7 +1172,7 @@ class PSRL_RayPPOTrainer(RayPPOTrainer):
 
             if self.config.reward.launch_reward_fn_async:
                 with log_dual_events("Wait for reward of validate", psrl_logger, event_type=EventType.WAIT):
-                    ray.get(self.reward_manager.wait_for_reward_of_requests.remote(test_result))
+                    ray.get(self.validation_reward_manager.wait_for_reward_of_requests.remote(test_result))
 
             # Use only the highest-indexed output in each session for metrics.
             session_max: dict[str, tuple[int, int]] = {}  # session_key -> (max_index, position)
@@ -3288,9 +3313,13 @@ class PSRL_RayPPOTrainer(RayPPOTrainer):
         futures.append(self.ps_manager_handle.set_reward_manager.remote(self.reward_manager))
         futures.append(self.agent_loop_manager.set_reward_manager.remote(self.reward_manager))
         for agent_loop_worker in self.agent_loop_workers:
-            futures.append(agent_loop_worker.set_reward_manager.remote(self.reward_manager))
+            futures.append(
+                agent_loop_worker.set_reward_managers.remote(self.reward_manager, self.validation_reward_manager)
+            )
         for reward_loop_worker in self.reward_loop_workers:
             futures.append(reward_loop_worker.set_reward_manager.remote(self.reward_manager))
+        for reward_loop_worker in self.validation_reward_loop_workers:
+            futures.append(reward_loop_worker.set_reward_manager.remote(self.validation_reward_manager))
         ray.get(futures)
 
         # Start data pipeline

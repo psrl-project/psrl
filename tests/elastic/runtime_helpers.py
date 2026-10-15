@@ -147,6 +147,10 @@ def _executor(modules, coord):
     executor._coordinator_command_timeout_s = 0.001
     executor._coordinator_sync_timeout_s = 0.1
     executor._decision_execution_in_progress = False
+    executor._runtime_failure = None
+    executor.agent_loop_manager = None
+    executor.scale_up_task_queue = asyncio.Queue()
+    executor.scale_down_task_queue = asyncio.Queue()
     executor._instance_state_epoch = 0
     executor._decision_settled = asyncio.Event()
     executor._decision_settled.set()
