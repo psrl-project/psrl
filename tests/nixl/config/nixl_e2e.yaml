@@ -4,19 +4,19 @@ defaults:
 
 # Test configuration
 test:
-  num_train: 64
-  num_gen: 32
-  train_engine_type: megatron  # fsdp, fsdp_hybrid, megatron
+  num_train: 2
+  num_gen: 2
+  train_engine_type: fsdp  # fsdp, fsdp_hybrid, megatron
   
   # FSDP Hybrid configuration
   fsdp_hybrid:
-    ddp_size: 2
-    fsdp_size: 4
+    ddp_size: 1
+    fsdp_size: 2
   
   # Megatron configuration
   megatron:
-    tensor_model_parallel_size: 4
-    pipeline_model_parallel_size: 2
+    tensor_model_parallel_size: 2
+    pipeline_model_parallel_size: 1
     virtual_pipeline_model_parallel_size: 1
     context_parallel_size: 1
     expert_model_parallel_size: 1
@@ -31,19 +31,21 @@ test:
 
 # Model configuration
 model:
-  path: ${oc.env:PSRL_WORKSPACE}/models/Qwen2.5-Math-7B
+  path: models/Qwen2.5-0.5B-Instruct
   trust_remote_code: false
   train_dtype: bfloat16
   gen_dtype: bfloat16
 
 # Logging configuration
 logging:
-  path: ${oc.env:PSRL_WORKSPACE}/psrl/unit_tests/nixl/log
+  path: logs/test_nixl_e2e
   level: INFO
 
 # Network configuration
 network:
-  listen_ip: ${oc.env:LOCAL_IP}
+  ray_address: auto
+  ray_namespace: psrl-nixl-integration
+  listen_ip: null
   listen_port: 23459
   torch_port_train: 29502
   torch_port_gen: 29503

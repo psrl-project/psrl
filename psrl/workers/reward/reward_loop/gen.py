@@ -22,62 +22,54 @@ from verl.utils import tensordict_utils as tu
 from psrl.utils.dataset.utils import _pre_process_inputs
 from psrl.utils.logger import DualOutputHandler
 from psrl.workers.reward.gen_reward_function import DefaultGenRewardFunction, GenRewardFunctionBase
-from psrl.workers.reward.reward_loop.base import RewardManagerBase
+from psrl.workers.reward.reward_loop.base import RewardLoopBase
 from psrl.workers.reward.reward_loop.registry import register
-from psrl.workers.reward.reward_model.manager import RewardModelManager
+from psrl.workers.reward.reward_protocol import RewardModelRuntimeInfo
 
 psrl_logger = logging.getLogger(__name__)
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
 
 
 @register("gen")
-class GenRewardManager(RewardManagerBase):
+class GenRewardLoop(RewardLoopBase):
     """Access generative or pooling reward models through the SMG gateway."""
 
     def __init__(
         self,
         config,
         tokenizer,
-        reward_model_manager: RewardModelManager | None = None,
+        reward_model_manager: RewardModelRuntimeInfo | None = None,
         reward_function: GenRewardFunctionBase | None = None,
         **reward_kwargs,
     ):
-        super().__init__(config, tokenizer)
+        super().__init__(config, tokenizer, compute_score=None)
 
         if reward_function is None:
             reward_function = DefaultGenRewardFunction()
         self.reward_function = reward_function
         self.is_async_reward_score = inspect.iscoroutinefunction(self.reward_function.compute_score)
 
-        assert reward_model_manager is not None, "GenRewardManager requires a reward_model_manager"
+        assert reward_model_manager is not None, "GenRewardLoop requires a reward_model_manager."
         self.reward_model_manager = reward_model_manager
         self.reward_model_tokenizer = reward_model_manager.get_reward_model_tokenizer()
 
-        rm_cfg = getattr(reward_model_manager, "reward_model_config", None)
-        runner = "generate"
-        task = "generate"
-        self._sampling_config: dict = {}
-        if rm_cfg is not None:
-            rollout_cfg = getattr(rm_cfg, "rollout", None)
-            if rollout_cfg is not None:
-                runner = getattr(rollout_cfg, "runner", "generate")
-                task = getattr(rollout_cfg, "task", "generate")
-            sampling_cfg = getattr(rm_cfg, "sampling_config", None)
-            if sampling_cfg is not None:
-                self._sampling_config = dict(sampling_cfg)
+        rm_cfg = reward_model_manager.reward_model_config
+        self._model_name = rm_cfg.reward_model_name
+        runner = rm_cfg.rollout.runner
+        task = rm_cfg.rollout.task
+        self._sampling_config = dict(rm_cfg.get("sampling_config", {}))
 
         self.gateway_url: str = reward_model_manager.get_gateway_url()
         self._smg_endpoint, self._parse_response = self._resolve_endpoint_and_parser(runner, task)
-        self._rm_response_length: int = (
-            getattr(getattr(rm_cfg, "rollout", None), "response_length", 512) if rm_cfg is not None else 512
-        )
+        self._rm_response_length = int(rm_cfg.rollout.response_length)
+        self._rm_max_model_len = int(rm_cfg.rollout.max_model_len)
 
         self._http_client: aiohttp.ClientSession | None = None
         self.reward_kwargs = reward_kwargs
 
         psrl_logger.addHandler(DualOutputHandler(self.config.psrl.logging_path, "gen_reward_loop"))
         psrl_logger.info(
-            "GenRewardManager initialized. gateway=%s endpoint=%s",
+            "GenRewardLoop initialized. gateway=%s endpoint=%s",
             self.gateway_url,
             self._smg_endpoint,
         )
@@ -109,12 +101,14 @@ class GenRewardManager(RewardManagerBase):
         if self._smg_endpoint == "/v1/completions":
             top_p = self._sampling_config.get("top_p", -1)
             return {
+                "model": self._model_name,
                 "prompt": prompt_ids,
                 "max_tokens": self._sampling_config.get("max_tokens", self._rm_response_length),
                 "temperature": self._sampling_config.get("temperature", 1.0),
                 "top_p": float(top_p) if isinstance(top_p, (int, float)) and top_p > 0 else 1.0,
+                "top_k": self._sampling_config.get("top_k", -1),
             }
-        return {"input": prompt_ids}
+        return {"model": self._model_name, "input": prompt_ids}
 
     # --- Response Parsers ---
 
@@ -171,43 +165,74 @@ class GenRewardManager(RewardManagerBase):
 
     # --- HTTP Query ---
 
-    async def _query_reward_model(self, rm_data_proto: DataProto, request_uid: str) -> dict:
+    async def _query_reward_model(
+        self,
+        rm_data_proto: DataProto,
+        request_uid: str,
+        *,
+        is_validate: bool = False,
+    ) -> dict:
         """
         Send one request to the smg gateway and return the parsed result dict.
 
         Keys returned: rm_output_str, rm_output_value, rm_output_len (optional),
                        reward_metrics.
         """
-        if self._http_client is None or self._http_client.closed:
-            self._http_client = aiohttp.ClientSession(
-                connector=aiohttp.TCPConnector(limit=256, enable_cleanup_closed=True),
-                timeout=aiohttp.ClientTimeout(total=None),  # reward gen can be slow
-            )
-
         raw_prompt_ids = rm_data_proto.non_tensor_batch["raw_prompt_ids"][0]
         if hasattr(raw_prompt_ids, "tolist"):
             raw_prompt_ids = raw_prompt_ids.tolist()
 
         payload = self._build_request_payload(raw_prompt_ids)
+        output_budget = int(payload["max_tokens"]) if self._smg_endpoint == "/v1/completions" else 0
+        prompt_budget = self._rm_max_model_len - output_budget
+        if prompt_budget <= 0:
+            raise ValueError(
+                f"Reward output budget leaves no prompt capacity: max_model_len={self._rm_max_model_len}, "
+                f"max_tokens={output_budget}."
+            )
+        truncated_tokens = max(0, len(raw_prompt_ids) - prompt_budget)
+        if truncated_tokens:
+            # Keep the response tail and scoring instruction in the RM tokenizer's token space.
+            raw_prompt_ids = raw_prompt_ids[-prompt_budget:]
+            payload = self._build_request_payload(raw_prompt_ids)
+            psrl_logger.warning(
+                f"Truncated reward prompt: uid={request_uid!r}, removed_tokens={truncated_tokens}, "
+                f"prompt_tokens={len(raw_prompt_ids)}, max_model_len={self._rm_max_model_len}."
+            )
         url = f"{self.gateway_url.rstrip('/')}{self._smg_endpoint}"
+        if self._http_client is None or self._http_client.closed:
+            self._http_client = aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(limit=256, enable_cleanup_closed=True),
+                timeout=aiohttp.ClientTimeout(total=None),
+            )
 
         psrl_logger.info(
-            "Querying reward model uid=%s endpoint=%s payload_tokens=%d",
-            request_uid,
-            self._smg_endpoint,
-            len(raw_prompt_ids),
+            f"Querying reward model: uid={request_uid!r}, endpoint={self._smg_endpoint!r}, "
+            f"payload_tokens={len(raw_prompt_ids)}."
         )
 
-        async with self._http_client.post(url, json=payload) as resp:
+        routing_id = str(int(request_uid))
+        headers = {
+            "x-request-id": routing_id,
+            "x-prompt-id": routing_id,
+            "x-version-tag": "0",
+            "x-is-validate": str(is_validate).lower(),
+        }
+        async with self._http_client.post(url, json=payload, headers=headers) as resp:
             resp.raise_for_status()
             data = await resp.json(content_type=None)
+            interrupted_count = int(resp.headers.get("x-smg-partial-rollout-count", "0"))
+        if self._smg_endpoint == "/v1/completions" and any(
+            choice.get("finish_reason") == "abort" for choice in data.get("choices", [])
+        ):
+            raise RuntimeError(f"Reward gateway returned an unfinished request: uid={request_uid!r}.")
 
         result = self._parse_response(data, request_uid)
+        result["reward_metrics"]["rm_prompt_truncated_tokens"] = truncated_tokens
+        result["reward_metrics"]["rm_request_interruptions"] = interrupted_count
         psrl_logger.info(
-            "Reward model response uid=%s str_len=%d value=%s",
-            request_uid,
-            len(result.get("rm_output_str", "")),
-            result.get("rm_output_value"),
+            f"Reward model response: uid={request_uid!r}, str_len={len(result.get('rm_output_str', ''))}, "
+            f"value={result.get('rm_output_value')!r}."
         )
         return result
 
@@ -266,7 +291,11 @@ class GenRewardManager(RewardManagerBase):
 
         rm_data_proto = self._build_rm_data_proto(rm_inputs, request_uid)
 
-        rm_output_dict = await self._query_reward_model(rm_data_proto, request_uid)
+        rm_output_dict = await self._query_reward_model(
+            rm_data_proto,
+            request_uid,
+            is_validate=bool(tu.get(data_item, "validate", False)),
+        )
         rm_output_str = rm_output_dict.get("rm_output_str", "")
         rm_output_value = rm_output_dict.get("rm_output_value")
         reward_metrics = rm_output_dict.get("reward_metrics", {})
@@ -369,7 +398,7 @@ class GenRewardManager(RewardManagerBase):
 
     def _get_next_replica_handle(self):
         raise RuntimeError(
-            "Direct replica handle access is not available in server-based GenRewardManager. "
+            "Direct replica handle access is not available in server-based GenRewardLoop. "
             "All requests go through the smg gateway."
         )
 

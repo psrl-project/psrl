@@ -54,7 +54,6 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo \
     psrl.rollout_coordination.redundant_rollout.redundant_global_batch_size=${REDUNDANT_BATCH_SIZE} \
     psrl.rollout_coordination.redundant_rollout.redundant_rollout_n=${REDUNDANT_ROLLOUT_N} \
     \
-    gen_actor_rollout_ref.model.path="$MODEL_PATH" \
     gen_actor_rollout_ref.rollout.mode=psrl_async \
     gen_actor_rollout_ref.rollout.tensor_model_parallel_size=${GEN_TP} \
     gen_actor_rollout_ref.rollout.pipeline_model_parallel_size=${GEN_PP} \

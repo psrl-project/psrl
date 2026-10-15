@@ -17,6 +17,13 @@ PPO_RAY_RUNTIME_ENV = {
     },
 }
 
+_RAY_ENVIRONMENT_KEYS = (
+    "PYTHONPATH",
+    "PYTHONPYCACHEPREFIX",
+    "LD_LIBRARY_PATH",
+    "NIXL_PLUGIN_DIR",
+)
+
 
 def get_ppo_ray_runtime_env():
     """
@@ -35,9 +42,8 @@ def get_ppo_ray_runtime_env():
         if os.environ.get(key) is not None:
             runtime_env["env_vars"].pop(key, None)
 
-    for key in ("PYTHONPATH", "PYTHONPYCACHEPREFIX"):
-        val = os.environ.get(key)
-        if val:
+    for key, val in os.environ.items():
+        if val and (key in _RAY_ENVIRONMENT_KEYS or key.startswith("UCX_")):
             runtime_env["env_vars"][key] = val
 
     return runtime_env

@@ -16,7 +16,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-from examples.sciaccel_rl.config import SciAccelRuntimeConfig
 from harbor.job import Job
 from harbor.models.job.config import AgentConfig, JobConfig, SourceJobConfig
 from harbor.models.trial.config import TaskConfig
@@ -27,6 +26,8 @@ from psrl.utils.common.docker_utils import (
     force_remove_compose_project,
     prune_dangling_images,
 )
+
+from examples.sciaccel_rl.config import SciAccelRuntimeConfig
 
 psrl_logger = logging.getLogger("psrl.sciaccel_rl.runner")
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))

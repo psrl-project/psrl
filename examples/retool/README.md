@@ -156,7 +156,7 @@ Download one of the following to `${PSRL_WORKSPACE}/models/`:
 
 > **Important**: after downloading, edit `config.json` and set
 > `max_position_embeddings=32768`. The launch scripts assume this (see the
-> `gen_actor_rollout_ref.model.override_config.max_position_embeddings=32768`
+> `train_actor_rollout_ref.model.override_config.max_position_embeddings=32768`
 > flag). Without it, long multi-turn rollouts will crash vLLM.
 
 The Megatron paths additionally convert the HF checkpoint to a distributed
@@ -410,11 +410,11 @@ the same algorithm / reward / tool wiring as Path A but differ in:
 | Checkpoint | Requires a distributed Megatron checkpoint; `convert_hf_to_mcore.py` is invoked at the top of the script |
 | Parallelism | `TRAIN_TP`, `TRAIN_PP`, `TRAIN_CP` (plus `TRAIN_EP` / `TRAIN_ETP` for MoE) replace `TRAIN_FSDP` / `TRAIN_SP` |
 | Offload | `offload=True` is supported (param / optimizer / grad offload) |
-| Reward manager | Uses `reward_model.reward_manager=dapo` with the built-in overlong-buffer config, in addition to `custom_reward_function` |
+| Reward manager | Uses `reward.active_managers='[dapo]'` with the named DAPO overlong-buffer config, in addition to `custom_reward_function` |
 | Sequence lengths | `max_turns=16`, `max_response_length=30720`; longer responses but fewer turns than Path A |
 | Generation | `GEN_TP` raised to `4` (32B) to fit the weights |
 | Sampling | `val_top_p=0.7` instead of `1.0` |
-| Advanced features | `psrl.partial_rollout.enable=True` on Path B; `algorithm.filter_groups.metric=acc` (DAPO dynamic sampling filter) |
+| Advanced features | `psrl.rollout_coordination.partial_rollout.enable=True` on Path B; `algorithm.filter_groups.metric=acc` (DAPO dynamic sampling filter) |
 
 Path C additionally configures MoE-specific parallelism (`TRAIN_EP`,
 `TRAIN_ETP`, `NUM_LAYERS_IN_FIRST_PIPELINE_STAGE`) — see the top of the

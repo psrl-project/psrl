@@ -2,7 +2,7 @@ diff --git a/src/plugins/ucx/ucx_backend.cpp b/src/plugins/ucx/ucx_backend.cpp
 index 57b808f..ba379b6 100644
 --- a/src/plugins/ucx/ucx_backend.cpp
 +++ b/src/plugins/ucx/ucx_backend.cpp
-@@ -1133,7 +1133,7 @@ nixlUcxEngine::nixlUcxEngine(const nixlBackendInitParams &init_params)
+@@ -840,7 +840,7 @@ nixlUcxEngine::nixlUcxEngine(const nixlBackendInitParams &init_params)
      const auto err_handling_mode_it =
          custom_params->find(std::string(nixl_ucx_err_handling_param_name));
      if (err_handling_mode_it == custom_params->end()) {
@@ -11,11 +11,11 @@ index 57b808f..ba379b6 100644
      } else {
          err_handling_mode = ucx_err_mode_from_string(err_handling_mode_it->second);
      }
-diff --git a/src/utils/ucx/ucx_utils.cpp b/src/utils/ucx/ucx_utils.cpp
+diff --git a/src/plugins/ucx/ucx_utils.cpp b/src/plugins/ucx/ucx_utils.cpp
 index 1bbac53..c45d3fb 100644
---- a/src/utils/ucx/ucx_utils.cpp
-+++ b/src/utils/ucx/ucx_utils.cpp
-@@ -44,7 +44,7 @@ get_ucx_backend_common_options() {
+--- a/src/plugins/ucx/ucx_utils.cpp
++++ b/src/plugins/ucx/ucx_utils.cpp
+@@ -44,6 +44,6 @@ get_ucx_backend_common_options() {
      nixl_b_params_t params = {{"ucx_devices", ""}, {"num_workers", "1"}};
  
      params.emplace(nixl_ucx_err_handling_param_name,
@@ -23,4 +23,81 @@ index 1bbac53..c45d3fb 100644
 +                   ucx_err_mode_to_string(UCP_ERR_HANDLING_MODE_NONE));
      return params;
  }
-
+diff --git a/src/utils/stream/metadata_stream.cpp b/src/utils/stream/metadata_stream.cpp
+index 7c80b3d..2182819 100644
+--- a/src/utils/stream/metadata_stream.cpp
++++ b/src/utils/stream/metadata_stream.cpp
+@@ -85,3 +85,3 @@ nixlMDStreamListener::setupListener() {
+-    if (listen(socketFd, 128) < 0) {
++    if (listen(socketFd, 4096) < 0) {
+         NIXL_PERROR << "Listening failed for stream Socket: "
+                     << socketFd;
+diff --git a/src/bindings/python/nixl_bindings.cpp b/src/bindings/python/nixl_bindings.cpp
+index 2da3778..2331761 100644
+--- a/src/bindings/python/nixl_bindings.cpp
++++ b/src/bindings/python/nixl_bindings.cpp
+@@ -152,6 +152,7 @@ PYBIND11_MODULE(_bindings, m) {
+     py::enum_<nixl_thread_sync_t>(m, "nixl_thread_sync_t")
+         .value("NIXL_THREAD_SYNC_NONE", nixl_thread_sync_t::NIXL_THREAD_SYNC_NONE)
+         .value("NIXL_THREAD_SYNC_STRICT", nixl_thread_sync_t::NIXL_THREAD_SYNC_STRICT)
++        .value("NIXL_THREAD_SYNC_RW", nixl_thread_sync_t::NIXL_THREAD_SYNC_RW)
+         .value("NIXL_THREAD_SYNC_DEFAULT", nixl_thread_sync_t::NIXL_THREAD_SYNC_DEFAULT)
+         .export_values();
+ 
+diff --git a/src/api/python/_api.py b/src/api/python/_api.py
+index f1cd7bd..c418997 100644
+--- a/src/api/python/_api.py
++++ b/src/api/python/_api.py
+@@ -126,6 +126,7 @@ nixl_backend_handle = int
+ @param listen_port Specify the port for the listener thread to listen on.
+ @param capture_telemetry Whether to enable telemetry capture.
+ @param num_threads Specify number of threads for the supported multi-threaded backends.
++@param num_workers Specify number of shared workers for each backend.
+ @param backends List of backend names for agent to initialize.
+         Default is UCX, other backends can be added to the list, or after
+         agent creation, can be initialized with create_backend.
+@@ -141,6 +142,7 @@ class nixl_agent_config:
+         capture_telemetry: bool = False,
+         num_threads: int = 0,
+         backends: list[str] = ["UCX"],
++        num_workers: int = 1,
+     ):
+         # TODO: add backend init parameters
+         self.backends = backends
+@@ -149,6 +151,7 @@ class nixl_agent_config:
+         self.port = listen_port
+         self.capture_telemetry = capture_telemetry
+         self.num_threads = num_threads
++        self.num_workers = num_workers
+ 
+ 
+ """
+@@ -178,7 +181,9 @@ class nixl_agent:
+             nixl_conf = nixl_agent_config()  # Using defaults set in nixl_agent_config
+ 
+         thread_config = (
+-            nixlBind.NIXL_THREAD_SYNC_STRICT
++            nixlBind.NIXL_THREAD_SYNC_RW
++            if nixl_conf.num_workers > 1
++            else nixlBind.NIXL_THREAD_SYNC_STRICT
+             if nixl_conf.enable_listen
+             else nixlBind.NIXL_THREAD_SYNC_NONE
+         )
+@@ -189,7 +194,7 @@ class nixl_agent:
+             nixl_conf.enable_listen,
+             nixl_conf.port,
+             thread_config,
+-            1,
++            nixl_conf.num_workers,
+             0,
+             100000,
+             nixl_conf.capture_telemetry,
+@@ -227,6 +232,8 @@ class nixl_agent:
+             else:
+                 # TODO: improve population of init from nixl_conf
+                 init: dict[str, str] = {}
++                if bknd == "UCX":
++                    init["num_workers"] = str(nixl_conf.num_workers)
+                 if nixl_conf.num_threads > 0:
+                     if bknd == "UCX" or bknd == "OBJ":
+                         init["num_threads"] = str(nixl_conf.num_threads)

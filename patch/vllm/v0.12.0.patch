@@ -121,6 +121,7 @@ index a3078eaa7..ff61c7b12 100644
 +    need_to_abort_reqs: list[str] = field(default_factory=list)
 +    req_id_to_prompt_token_num: dict[str, int] | None = None
 +    req_id_to_response_token_num: dict[str, int] | None = None
++    req_id_in_waiting: list[str] = field(default_factory=list)
  
      num_running_reqs: int = 0
      num_waiting_reqs: int = 0

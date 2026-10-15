@@ -4,13 +4,13 @@ import logging
 import os
 from typing import Any
 
-import ray
 from omegaconf import DictConfig
 from transformers import AutoProcessor, AutoTokenizer
 
 from psrl.environments.base import ConversationType, Environment, EnvStepOutput
 from psrl.tools.base import ToolGroup, ToolResponse, load_all_tools
 from psrl.utils.logger import FileOnlyHandler
+from psrl.workers.reward.client import RewardManagerClient
 
 ToolAction = list[dict] | dict
 
@@ -73,7 +73,7 @@ class ToolEnvironment(Environment[ConversationType, ToolAction]):
     def __init__(
         self,
         config: DictConfig,
-        reward_manager: ray.actor.ActorHandle,
+        reward_manager: RewardManagerClient,
         max_turns: int,
         tokenizer: AutoTokenizer,
         processor: AutoProcessor | None = None,
@@ -85,7 +85,7 @@ class ToolEnvironment(Environment[ConversationType, ToolAction]):
 
         Args:
             config: Configuration object containing training settings
-            reward_manager: Ray actor handle for computing rewards
+            reward_manager: Shared client for submitting reward requests.
             max_turns: Maximum number of turns allowed in an episode
             tokenizer: Tokenizer for converting between text and tokens
             processor: Optional multimodal processor (e.g. Qwen2VLProcessor).

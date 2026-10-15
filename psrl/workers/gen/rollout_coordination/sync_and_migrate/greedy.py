@@ -15,9 +15,9 @@ class GreedySyncMixin:
 
     Expects ``self`` to carry: ``stop_sync_and_migrate``, ``config``,
     ``instance_ids``, ``tag_to_replica_ids``, ``instance_to_model_version``,
-    ``instance_to_latest_stale_model_version``, ``ps_model_version``,
-    ``ready_buffers``, and the ``sync_with_ps`` / ``check_no_activate_tasks`` /
-    ``check_and_migrate`` methods from ``SyncAndMigrateMixin``.
+    ``ps_model_version``,
+    ``ready_buffers``, ``replica_sync_tasks``, and the ``_get_awake_instance_ids`` /
+    ``sync_with_ps`` / ``check_no_activate_tasks`` / ``check_and_migrate`` helpers.
     """
 
     async def _greedy_sync_and_migrate_loop(self):
@@ -29,7 +29,7 @@ class GreedySyncMixin:
         2. Check whether the instance has no active tasks if forbid partial rollout.
         3. Check if any instance is starving and do migration if necessary.
         """
-        psrl_logger.info("Starting greedy model synchronization and rollout migration loop")
+        psrl_logger.info("Starting greedy model synchronization and rollout migration loop.")
 
         while not self.stop_sync_and_migrate:
             # Sleep for a period of time
@@ -37,21 +37,21 @@ class GreedySyncMixin:
                 self.config.psrl.rollout_coordination.sync_and_mig_strategy.check_interval_in_ms / 1000
             )
 
-            have_syncing_instance = False
+            awake_instance_ids = await self._get_awake_instance_ids(
+                [
+                    instance_id
+                    for instance_id in self.instance_ids
+                    if instance_id[0] in self.tag_to_replica_ids["rollout"]
+                ]
+            )
+            have_syncing_instance = bool(self.replica_sync_tasks)
             sync_instance_ids = []
-            for instance_id in self.instance_ids:
-                # Ignore validate instances for weight synchronization
-                replica_id, _ = instance_id
-                if replica_id not in self.tag_to_replica_ids["rollout"]:
-                    continue
-                # Check whether engine status is stale (the instance is currently being synchronized with PS)
-                if self.instance_to_model_version.get(
-                    instance_id, 0
-                ) <= self.instance_to_latest_stale_model_version.get(instance_id, -1):
+            for instance_id in awake_instance_ids:
+                if instance_id[0] in self.replica_sync_tasks:
                     have_syncing_instance = True
                     continue
                 # Check whether instance version lags behind PS version
-                if self.instance_to_model_version.get(instance_id, 0) == self.ps_model_version:
+                if self.instance_to_model_version.get(instance_id, 0) >= self.ps_model_version:
                     continue
                 # Check whether current instance workload is empty if forbid partial rollout
                 if not self.config.psrl.rollout_coordination.partial_rollout.enable:
@@ -68,7 +68,6 @@ class GreedySyncMixin:
                 sync_instance_ids.append(instance_id)
 
             if sync_instance_ids:
-                psrl_logger.info(f"Sync with ps: {sync_instance_ids}")
                 await self.sync_with_ps(sync_instance_ids)
             elif not have_syncing_instance and self.config.psrl.rollout_coordination.sync_and_mig_strategy.mig.enable:
                 # No instance is syncing with PS, check if migration is needed

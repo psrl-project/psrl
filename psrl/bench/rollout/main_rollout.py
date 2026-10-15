@@ -49,9 +49,12 @@ class SimpleRolloutTester:
 
         # Build logger
         mode_prefix = "Real" if self.config.rollout_test.get("mode", "synthetic") == "real_data" else "Syn"
+        expert_parallel_size = int(self.config.rollout.get("expert_parallel_size", 1))
         self.log_prefix = (
             f"{mode_prefix}_TP{self.config.rollout.tensor_parallel_size}"
-            f"_PP{self.config.rollout.pipeline_parallel_size}_B{self.config.rollout_test.batch_size}"
+            f"_PP{self.config.rollout.pipeline_parallel_size}"
+            f"_EP{expert_parallel_size}"
+            f"_B{self.config.rollout_test.batch_size}"
             f"_P{self.config.data.max_prompt_length}_R{self.config.data.max_response_length}"
         )
         psrl_logger.addHandler(DualOutputHandler(self.config.psrl.logging_path, self.log_prefix))
@@ -86,18 +89,34 @@ class SimpleRolloutTester:
 
         # Configure vLLM engine args
         rollout_config = self.config.rollout
+
+        max_num_batched_tokens = rollout_config.max_num_batched_tokens
+        max_model_len = rollout_config.get(
+            "max_model_len",
+            self.config.data.max_prompt_length + self.config.data.max_response_length,
+        )
+        if max_num_batched_tokens < max_model_len:
+            max_num_batched_tokens = max_model_len
+
+        expert_parallel_size = int(rollout_config.get("expert_parallel_size", 1))
+        # NOTE(claude): Match psrl.workers.gen.vllm_rollout: EP>1 enables vLLM expert parallel.
+        enable_expert_parallel = expert_parallel_size > 1
+        if enable_expert_parallel and expert_parallel_size != int(rollout_config.tensor_parallel_size):
+            raise ValueError(
+                "Bench rollout currently requires expert_parallel_size == tensor_parallel_size "
+                f"when EP>1, got EP={expert_parallel_size}, TP={rollout_config.tensor_parallel_size}."
+            )
+
         engine_kwargs = {
             "model": local_path,
             "tensor_parallel_size": rollout_config.tensor_parallel_size,
             "pipeline_parallel_size": rollout_config.pipeline_parallel_size,
+            "enable_expert_parallel": enable_expert_parallel,
             "dtype": rollout_config.dtype,
             "gpu_memory_utilization": rollout_config.gpu_memory_utilization,
-            "max_model_len": rollout_config.get(
-                "max_model_len",
-                self.config.data.max_prompt_length + self.config.data.max_response_length,
-            ),
+            "max_model_len": max_model_len,
             "max_num_seqs": rollout_config.max_num_seqs,
-            "max_num_batched_tokens": rollout_config.max_num_batched_tokens,
+            "max_num_batched_tokens": max_num_batched_tokens,
             "enable_chunked_prefill": rollout_config.enable_chunked_prefill,
             "enable_prefix_caching": rollout_config.enable_prefix_caching,
             "trust_remote_code": self.config.model.get("trust_remote_code", False),

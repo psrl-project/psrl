@@ -6,6 +6,7 @@ from omegaconf import open_dict
 from verl.utils.dataset.rl_dataset import RLHFDataset
 
 from psrl.tools.base import load_all_tools
+from psrl.utils.dataset.utils import normalize_reward_model_dicts
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
@@ -25,6 +26,7 @@ class PSRLRLHFDataset(RLHFDataset):
 
         super().__init__(*args, config=dataset_config, **kwargs)
         self.config = config
+        self.reward_model_dicts = normalize_reward_model_dicts(self.reward_model_dicts)
 
     def maybe_filter_out_long_prompts(self, dataframe=None):
         if self._psrl_tool_schemas is not None:

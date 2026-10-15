@@ -14,14 +14,14 @@ from verl.utils.fs import copy_to_local
 from psrl.utils.common.nixl_names import NIXL_META_SERVER_NAME
 from psrl.utils.common.worker_naming import ps_agent_name, ps_client_pull_name, ps_client_push_name
 from psrl.utils.converter import create_parameter_mapping
-from psrl.utils.converter.hf_converter import (
-    convert_hf_inplace,
-    maybe_convert_to_smaller_parts,
-)
+from psrl.utils.converter.hf_converter import convert_hf_inplace, maybe_convert_to_smaller_parts
+from psrl.utils.converter.model_dtypes import fix_meta_model_dtypes
 from psrl.utils.logger import get_ps_logger, get_worker_info, setup_ps_logger
 from psrl.utils.nixl import (
     NIXLClientType,
     NIXLMultiStorageClients,
+    fingerprint_log_record,
+    resolve_weight_fingerprint_options,
 )
 
 psrl_logger = get_ps_logger()
@@ -261,7 +261,7 @@ class PSStorageWorker:
             local_path,
             trust_remote_code=self.model_config.get("trust_remote_code", False),
         )
-        if type(model_config) in AutoModelForImageTextToText._model_mapping.keys():
+        if type(model_config) in AutoModelForImageTextToText._model_mapping:
             model_class = AutoModelForImageTextToText
         else:
             model_class = AutoModelForCausalLM
@@ -296,6 +296,13 @@ class PSStorageWorker:
         self.model_info = create_parameter_mapping("HuggingFace", self.train_meta_hf_model.config).get_model_info()
 
         psrl_logger.info(f"init_model (meta-only) done on {get_worker_info()}.")
+
+    @staticmethod
+    def _fix_meta_model_dtypes(meta_model: torch.nn.Module) -> None:
+        """Restore architecture-constrained fp32 parameters on a meta model."""
+        fixed_count = fix_meta_model_dtypes(meta_model)
+        if fixed_count:
+            psrl_logger.info("_fix_meta_model_dtypes: corrected %s tensor(s) to float32.", fixed_count)
 
     @staticmethod
     def _build_tied_weights_alias_map(
@@ -729,3 +736,38 @@ class PSStorageWorker:
         pull_client = self.nixl_multi_storage_clients.get_client_by_name(self.client_for_pull_name)
         push_client.log_shard_info(label=label)
         pull_client.log_shard_info(label=label)
+
+    def log_weight_fingerprints(self, model_version: int) -> list[dict]:
+        """Log PS receive-side and rollout-side fingerprints before publishing a version."""
+        options = resolve_weight_fingerprint_options(
+            self.psrl_config,
+            flow="transfer_chain",
+            model_version=model_version,
+        )
+        if options is None:
+            return []
+
+        records = []
+        for role, stage, client_name in (
+            ("ps_train", "ps_after_receive", self.client_for_push_name),
+            ("ps_rollout", "ps_after_layout_copy", self.client_for_pull_name),
+        ):
+            client = self.nixl_multi_storage_clients.get_client_by_name(client_name)
+            fingerprint = client.get_weight_fingerprint(
+                mode=options["mode"],
+                sample_count=options["sample_count"],
+                chunk_bytes=options["chunk_bytes"],
+            )
+            record = fingerprint_log_record(
+                fingerprint,
+                flow="transfer_chain",
+                stage=stage,
+                role=role,
+                model_version=model_version,
+                rank=self.rank,
+                client_name=client_name,
+                include_tensor_digests=options["include_tensor_digests"],
+            )
+            psrl_logger.warning("[WEIGHT_FINGERPRINT] %s", json.dumps(record, sort_keys=True))
+            records.append({**record, "tensor_digests": fingerprint["tensor_digests"]})
+        return records

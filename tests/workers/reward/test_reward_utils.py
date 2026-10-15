@@ -1,6 +1,9 @@
+import pytest
 import torch
 from psrl.workers.reward.utils import ensure_reward_attention_mask
 from tensordict import TensorDict
+
+pytestmark = pytest.mark.cpu_test
 
 
 def test_ensure_reward_attention_mask_adds_all_valid_mask():

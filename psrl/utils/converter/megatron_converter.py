@@ -168,15 +168,21 @@ class MegatronConverter(BaseConverter):
                     shard_indices=list(sharding_dict[embedding_hf_name].shard_indices),
                 )
 
-        # Expose architecturally-constrained parameters in the dtype expected by PS/vLLM.
-        # The sync action keeps this detached copy synchronized in both directions.
+        self._register_param_sync_actions(converted_state_dict)
+        return converted_state_dict, sharding_dict
+
+    def _register_param_sync_actions(self, converted_state_dict: dict[str, torch.Tensor]) -> None:
+        """Register Megatron-only representation transforms at the PS boundary."""
+        registered_gamma = {
+            action.key for action in self.sync_plan.actions if isinstance(action, ZeroCenteredGammaSync)
+        }
         fp32_patterns = self.parameter_mapping.get_external_fp32_param_patterns()
         for key, tensor in converted_state_dict.items():
-            if tensor.dtype != torch.float32 and any(p in key for p in fp32_patterns):
+            if key.endswith("linear_attn.norm.weight") and key not in registered_gamma:
+                self.sync_plan.add(ZeroCenteredGammaSync(key=key))
+            if tensor.dtype != torch.float32 and any(pattern in key for pattern in fp32_patterns):
                 self.sync_plan.add(DTypeCastSync(key=key, source_param=tensor))
                 converted_state_dict[key] = tensor.float()
-
-        return converted_state_dict, sharding_dict
 
     def convert_parameter(self, full_name: str, param: Parameter, mapping: MegatronParamMapping) -> dict:
         """
@@ -512,15 +518,12 @@ class MegatronConverter(BaseConverter):
                 tp_rank=self.mpu.tp_rank,
             )
         elif is_tp_param:
+            assert hasattr(param, "partition_dim"), "Tensor parallel parameters must expose partition_dim."
             shard_size = self.mpu.tp_size
-            assert hasattr(param, "partition_dim"), (
-                f"Tensor parallel partition dim must be set, but got {param.partition_dim}"
-            )
             shard_indices = [(self.mpu.tp_rank,)]
             shard_dim = param.partition_dim
             if shard_dim == -1:
-                # For dt_bias, A_log, and conv1d.weight, shard_dim should be 0,
-                # but their partition_dim is -1
+                # `dt_bias`, `A_log`, and `conv1d.weight` use the leading dimension.
                 shard_dim = 0
         else:
             shard_size = 1

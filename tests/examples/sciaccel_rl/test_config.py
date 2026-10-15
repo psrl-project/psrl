@@ -1,5 +1,9 @@
 """Tests for sciaccel_rl config dataclass and factory."""
 
+import pytest
+
+pytestmark = pytest.mark.cpu_test
+
 
 class TestSciAccelRuntimeConfig:
     """Test config construction and merging."""

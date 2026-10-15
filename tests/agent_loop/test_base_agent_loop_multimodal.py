@@ -2,12 +2,14 @@ from types import SimpleNamespace
 
 import pytest
 from psrl.utils.rollout.gateway_multimodal import GatewayMultimodalPayloadBuilder
-from psrl.workers.agent_loop.loops.base_agent_loop import AgentLoopBase
+from psrl.workers.agent_loop.loops.generate_agent_loop import GenerateAgentLoop
 from psrl.workers.gen.utils import TokenInput
+
+pytestmark = pytest.mark.cpu_test
 
 
 def _bare_loop():
-    loop = AgentLoopBase.__new__(AgentLoopBase)
+    loop = GenerateAgentLoop.__new__(GenerateAgentLoop)
     loop.rollout_gateway_url = "http://gateway"
     loop.model_config = SimpleNamespace(path="model")
     loop.rollout_config = SimpleNamespace(

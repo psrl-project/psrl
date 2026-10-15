@@ -1,0 +1,14 @@
+# Scale on `kv_cache`, `running_request_num`, `waiting_request_num`, or `total_request_num` from scheduler stats.
+load_threshold_metric: kv_cache
+
+# Low-load threshold under `load_threshold_metric` below which an instance can cede resources
+scale_down_threshold: 0.1
+
+# Full-load threshold under `load_threshold_metric` above which an instance is considered full-load
+scale_up_threshold: 0.8
+
+# Do not scale down a candidate with more waiting requests than this limit. Zero requires an empty waiting queue.
+max_waiting_queue_for_scale_down: 64
+
+# `all` requires every instance to be full before scale-up. `any` requires one full instance.
+full_load_mode: any

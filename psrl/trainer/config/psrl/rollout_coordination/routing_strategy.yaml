@@ -69,7 +69,7 @@ enable_trajectory_sticky: False
 # Logging interval in milliseconds
 logging_interval_in_ms: 2000
 
-# Path to the cost model (a json file)
+# JSON file, or a directory of {model_stem}.json files. Stem is derived from the model name.
 cost_model_path: null
 
 # Delta throughput threshold to stop request routing to an instance

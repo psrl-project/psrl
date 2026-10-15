@@ -105,6 +105,29 @@ def resolve_fine_grain_chunk_size(config, dp_size: int) -> tuple[str, int]:
     return granularity, chunk_groups
 
 
+def validate_fine_grain_elastic(config) -> None:
+    """
+    Reject chunked training overlap with executor owned trainer storage.
+
+    Args:
+        config: OmegaConf tree with `psrl.fine_grain_overlap` and
+            `psrl.deployment.elastic`.
+    """
+    fgo = config.psrl.get("fine_grain_overlap", None)
+    if fgo is None or str(fgo.get("granularity", "none")) == "none":
+        return
+    deployment = config.psrl.get("deployment", None)
+    elastic = None if deployment is None else deployment.get("elastic", None)
+    if elastic is None or not bool(elastic.get("enable", False)):
+        return
+    raise ValueError(
+        "psrl.fine_grain_overlap.granularity cannot be combined with "
+        "psrl.deployment.elastic.enable=True. "
+        f"Got granularity={str(fgo.get('granularity', 'none'))!r}."
+    )
+
+
+# TODO(zyf): After refactoring, elastic rl's configuration check should be considered.
 def validate_config(
     config: DictConfig,
     use_reference_policy: bool,
@@ -244,10 +267,7 @@ def validate_config(
             "into one trajectory per turn."
         )
     if wants_thinking_disabled(thinking_template) and chat_template:
-        # Reject only templates that actually prefill an unclosed `<think>` on history.
-        # An accumulating template that emits a bare `content` stays balanced with
-        # thinking off, which is what SkyRL runs in
-        # `examples/train/thunder_agent/scripts/r2egym_32b/run_trainer.sh`.
+        # Reject templates that prefill an unclosed `<think>`. Balanced content-only templates remain valid.
         template_source = resolve_chat_template_value(chat_template)
         if template_source and template_prefills_assistant_think(template_source):
             raise ValueError(
@@ -388,6 +408,7 @@ def validate_config(
         )
 
     # ---- fine_grain_overlap validation ----
+    validate_fine_grain_elastic(config)
     fgo = config.psrl.get("fine_grain_overlap", None)
     if fgo is not None and str(fgo.get("granularity", "none")) != "none":
         train_n_gpus_fgo = config.psrl.deployment.train_ngpus_per_node * config.psrl.deployment.train_nnodes

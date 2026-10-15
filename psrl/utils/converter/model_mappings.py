@@ -861,6 +861,19 @@ class ParameterMapping(ABC):
             if _is_int(vision_head_size):
                 info["vision_head_size"] = vision_head_size
 
+        vision_cfg = _get_attr(cfg, "vision_config", None)
+        if vision_cfg is not None:
+            vision_num_heads = _get_attr(vision_cfg, "num_heads", None)
+            vision_hidden_size = _get_attr(vision_cfg, "hidden_size", None)
+            vision_head_size = _get_attr(vision_cfg, "head_dim", None)
+            if vision_head_size is None and _is_int(vision_num_heads) and _is_int(vision_hidden_size):
+                vision_head_size = vision_hidden_size // vision_num_heads
+            if _is_int(vision_num_heads):
+                info["vision_num_heads"] = vision_num_heads
+                info["vision_num_kv_heads"] = _get_attr(vision_cfg, "num_key_value_heads", vision_num_heads)
+            if _is_int(vision_head_size):
+                info["vision_head_size"] = vision_head_size
+
         return info
 
     def get_external_fp32_param_patterns(self) -> tuple[str, ...]:

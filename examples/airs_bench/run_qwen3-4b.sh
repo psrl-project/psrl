@@ -10,7 +10,7 @@ export RAY_prestart_worker_first_driver=false
 export RAY_num_workers_soft_limit=0
 export RAY_memory_monitor_refresh_ms=0
 
-source /apdcephfs_zwfy10/share_303541817/lhy/env/psrl.sh
+source ${PSRL_WORKSPACE}/env/psrl.sh
 
 PSRL_PATH="${PSRL_PATH:-$(python3 -c "import os, psrl; print(os.path.dirname(os.path.dirname(psrl.__file__)))")}"
 cd "${PSRL_PATH}"
@@ -93,8 +93,8 @@ PYTHONUNBUFFERED=1 python3 -m psrl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
     algorithm.use_kl_in_reward=False \
     algorithm.norm_adv_by_std_in_grpo=True \
-    data.train_files="${TRAIN_FILE}" \
-    data.val_files="${TEST_FILE}" \
+    +data.train_files="${TRAIN_FILE}" \
+    +data.val_files="${TEST_FILE}" \
     data.train_batch_size=${TRAIN_BATCH_SIZE} \
     data.max_prompt_length=${MAX_PROMPT_LENGTH} \
     data.max_response_length=${MAX_RESPONSE_LENGTH} \
@@ -104,7 +104,6 @@ PYTHONUNBUFFERED=1 python3 -m psrl.trainer.main_ppo \
     data.reward_model_dicts.0.reward_loop_type=dapo \
     data.reward_model_dicts.0.reward_fn=compute_score \
     train_actor_rollout_ref.nccl_timeout=6000 \
-    train_actor_rollout_ref.model.path="${HF_MODEL_PATH}" \
     train_actor_rollout_ref.actor.optim.lr=${actor_lr} \
     train_actor_rollout_ref.actor.optim.lr_decay_style=constant \
     train_actor_rollout_ref.actor.optim.weight_decay=0.1 \
@@ -144,7 +143,7 @@ PYTHONUNBUFFERED=1 python3 -m psrl.trainer.main_ppo \
     train_actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
     train_actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${max_tokens_per_gpu} \
     train_actor_rollout_ref.ref.megatron.param_offload=False \
-    gen_actor_rollout_ref.model.path="${HF_MODEL_PATH}" \
+    train_actor_rollout_ref.model.path="${HF_MODEL_PATH}" \
     gen_actor_rollout_ref.rollout.tensor_model_parallel_size=${GEN_TP} \
     gen_actor_rollout_ref.rollout.pipeline_model_parallel_size=${GEN_PP} \
     gen_actor_rollout_ref.rollout.gpu_memory_utilization=0.9 \
@@ -188,7 +187,6 @@ PYTHONUNBUFFERED=1 python3 -m psrl.trainer.main_ppo \
     psrl.env_worker.sandbox_cpus=8.0 \
     psrl.env_worker.sandbox_memory=32g \
     psrl.env_worker.routing.method=least_loaded \
-    psrl.group_post_process.processors="['dynamic_sampling_filter']" \
     psrl.rollout_gateway.trajectory_id_strategy=auto \
     psrl.rollout_coordination.routing_strategy.method=cache_aware \
     psrl.rollout_coordination.routing_strategy.enable_group_sticky=True \
@@ -200,6 +198,7 @@ PYTHONUNBUFFERED=1 python3 -m psrl.trainer.main_ppo \
     psrl.rollout_coordination.sync_and_mig_strategy.mig.stop_threshold=1000 \
     psrl.rollout_coordination.partial_rollout.enable=True \
     psrl.colocate_validate_and_train=False \
+    psrl.fuse_rollout_with_validate=True \
     reward.launch_reward_fn_async=True \
     reward.active_managers='[dapo]' \
     reward.managers.dapo.reward_fn.0.path="${REWARD_PATH}" \

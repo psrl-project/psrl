@@ -87,8 +87,6 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo \
     psrl.buffer_post_process.enable=True \
     psrl.buffer_post_process.name=dynamic_sampling_filter \
     \
-    gen_actor_rollout_ref.model.path="$MODEL_PATH" \
-    +gen_actor_rollout_ref.model.override_config.max_position_embeddings=32768 \
     gen_actor_rollout_ref.rollout.n=${n_resp_per_prompt} \
     gen_actor_rollout_ref.rollout.mode=sync \
     gen_actor_rollout_ref.rollout.enable_chunked_prefill=False \

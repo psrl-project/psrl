@@ -1,0 +1,93 @@
+{
+  "TP4_PP1": {
+    "other_threshold": 0.0074048,
+    "other_latency_b": 0.0063326,
+    "other_latency_k": 8.96e-05,
+    "other_r_squared": 0.9878528065184993,
+    "attn_latency_k": 4.25e-08,
+    "attn_latency_b": 0.0010925822,
+    "attn_r_squared": 0.9899517597462387,
+    "attn_points_total": 57301,
+    "attn_points_used": 55460,
+    "other_fit_points": [
+      {
+        "batch": 16,
+        "path": "/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/examples/bench/rollout/exp/deepseek_r1_distill_qwen_32b_tp4_p1024_r8192/details/DeepSeek-R1-Distill-Qwen-32B_Syn_TP4_PP1_B16_P1024_R8192_disable_attn_true.jsonl",
+        "summary": {
+          "mean_latency": 0.0079659558391325,
+          "median_latency": 0.00798850879073143,
+          "p95_latency": 0.008035478182137012,
+          "count": 8188
+        },
+        "representative_latency": 0.00798850879073143
+      },
+      {
+        "batch": 1,
+        "path": "/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/examples/bench/rollout/exp/deepseek_r1_distill_qwen_32b_tp4_p1024_r8192/details/DeepSeek-R1-Distill-Qwen-32B_Syn_TP4_PP1_B1_P1024_R8192_disable_attn_true.jsonl",
+        "summary": {
+          "mean_latency": 0.00730430652206634,
+          "median_latency": 0.007304273545742035,
+          "p95_latency": 0.0073530908674001695,
+          "count": 8190
+        },
+        "representative_latency": 0.007304273545742035
+      },
+      {
+        "batch": 2,
+        "path": "/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/examples/bench/rollout/exp/deepseek_r1_distill_qwen_32b_tp4_p1024_r8192/details/DeepSeek-R1-Distill-Qwen-32B_Syn_TP4_PP1_B2_P1024_R8192_disable_attn_true.jsonl",
+        "summary": {
+          "mean_latency": 0.007330465427225567,
+          "median_latency": 0.00733015313744545,
+          "p95_latency": 0.007381076365709305,
+          "count": 8189
+        },
+        "representative_latency": 0.00733015313744545
+      },
+      {
+        "batch": 32,
+        "path": "/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/examples/bench/rollout/exp/deepseek_r1_distill_qwen_32b_tp4_p1024_r8192/details/DeepSeek-R1-Distill-Qwen-32B_Syn_TP4_PP1_B32_P1024_R8192_disable_attn_true.jsonl",
+        "summary": {
+          "mean_latency": 0.008864489528675835,
+          "median_latency": 0.008864156901836395,
+          "p95_latency": 0.00891215167939663,
+          "count": 8188
+        },
+        "representative_latency": 0.008864156901836395
+      },
+      {
+        "batch": 4,
+        "path": "/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/examples/bench/rollout/exp/deepseek_r1_distill_qwen_32b_tp4_p1024_r8192/details/DeepSeek-R1-Distill-Qwen-32B_Syn_TP4_PP1_B4_P1024_R8192_disable_attn_true.jsonl",
+        "summary": {
+          "mean_latency": 0.007388708219659926,
+          "median_latency": 0.007388293743133545,
+          "p95_latency": 0.007420005835592746,
+          "count": 8190
+        },
+        "representative_latency": 0.007388293743133545
+      },
+      {
+        "batch": 64,
+        "path": "/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/examples/bench/rollout/exp/deepseek_r1_distill_qwen_32b_tp4_p1024_r8192/details/DeepSeek-R1-Distill-Qwen-32B_Syn_TP4_PP1_B64_P1024_R8192_disable_attn_true.jsonl",
+        "summary": {
+          "mean_latency": 0.012177112227024599,
+          "median_latency": 0.012176081538200378,
+          "p95_latency": 0.0122354157269001,
+          "count": 8188
+        },
+        "representative_latency": 0.012176081538200378
+      },
+      {
+        "batch": 8,
+        "path": "/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/examples/bench/rollout/exp/deepseek_r1_distill_qwen_32b_tp4_p1024_r8192/details/DeepSeek-R1-Distill-Qwen-32B_Syn_TP4_PP1_B8_P1024_R8192_disable_attn_true.jsonl",
+        "summary": {
+          "mean_latency": 0.007597370548642404,
+          "median_latency": 0.0075963344424963,
+          "p95_latency": 0.007652013748884201,
+          "count": 8188
+        },
+        "representative_latency": 0.0075963344424963
+      }
+    ],
+    "attn_fit_point_count": 57320
+  }
+}

@@ -25,13 +25,14 @@ class FullBatchStepStrategy(StepStrategy):
 
     def run_step(self, buffer_id: int, metrics: dict, timing_raw: dict):
         t = self.trainer
-
         with marked_timer("wait_for_gen", timing_raw, color="gray"):
             with log_dual_events(
                 f"Wait for training batch {buffer_id}",
                 psrl_logger,
                 event_type=EventType.WAIT,
             ):
+                if t.elastic_mode:
+                    ray.get(t.elastic_executor.release_trainer_pool_for_wait.remote(buffer_id))
                 batch = ray.get(t.agent_loop_manager.wait_for_training_batch.remote(buffer_id))
                 t.replay_buffer.sample(batch.keys, batch.partition_id)
             with log_dual_events(

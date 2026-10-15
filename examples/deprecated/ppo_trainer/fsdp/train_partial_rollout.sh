@@ -50,7 +50,6 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo \
     psrl.rollout_coordination.partial_rollout.threshold=96 \
     psrl.rollout_coordination.partial_rollout.interrupt_as_prompt=False \
     \
-    gen_actor_rollout_ref.model.path="$MODEL_PATH" \
     gen_actor_rollout_ref.rollout.mode=psrl_async \
     gen_actor_rollout_ref.rollout.tensor_model_parallel_size=${GEN_TP} \
     gen_actor_rollout_ref.rollout.pipeline_model_parallel_size=${GEN_PP} \

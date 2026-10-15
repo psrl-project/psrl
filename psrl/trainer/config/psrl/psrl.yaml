@@ -5,7 +5,7 @@ defaults:
   - rollout_coordination/redundant_rollout@rollout_coordination.redundant_rollout
   - rollout_coordination/proactive_filter_strategy@rollout_coordination.proactive_filter_strategy
   - rollout_coordination/session_strategy@rollout_coordination.session_strategy
-  - deployment@deployment
+  - deployment/deployment@deployment
   - fine_grain_overlap@fine_grain_overlap
   - agentic_rl@agentic_rl
   - server_rollout@server_rollout
@@ -55,4 +55,4 @@ retry_ratio: 1.0
 colocate_validate_and_train: True
 
 # Whether to dispatch requests to both rollout and validate instances
-fuse_rollout_with_validate: True
+fuse_rollout_with_validate: False

@@ -6,9 +6,8 @@ launch_reward_fn_async: True
 # way to normalize the reward, choices: group, batch, none
 reward_normalization: null
 
-# reward loop worker pool for request-granularity reward computation
+# Training reward worker pool.
 reward_loop_worker:
-  enable: False
   num_workers: 8
   max_concurrency_per_worker: 256
   queue_size_per_worker: 4096
@@ -17,6 +16,15 @@ reward_loop_worker:
   result_drain_batch_size: 1024
   heartbeat_interval_s: 30
   shutdown_timeout_s: 10
+
+# Validation owns separate workers, submission capacity, and result queues.
+validation_reward_loop_worker:
+  num_workers: 2
+  max_concurrency_per_worker: 256
+  queue_size_per_worker: 4096
+  placement: reward_service_ip
+  result_queue_size: 65536
+  result_drain_batch_size: 1024
 
 # Only listed managers are active at runtime.
 active_managers:
@@ -71,7 +79,7 @@ managers:
     reward_loop_type: gen
     reward_fn:
       - path: null
-        name: compute_score
+        name: default
     reward_model_name: Qwen3-8B
   
     enable_resource_pool: True
@@ -80,43 +88,31 @@ managers:
     nnodes: 1
     rollout_ngpus_per_instance_per_node: 1
     rollout_nnodes_per_instance: 1
+    # null leaves concurrent requests on one reward instance uncapped.
+    max_concurrent_requests_per_instance: null
   
     model:
       path: ${oc.env:PSRL_WORKSPACE,/tmp}/models/Qwen3-8B
       external_lib: ${oc.select:train_actor_rollout_ref.model.external_lib,null}
       trust_remote_code: False
   
+    # RM-specific overlays on the composed `psrl_rollout` schema.
     rollout:
-      _target_: psrl.workers.config.RolloutConfig
-      name: vllm
-      mode: psrl_async
-      disable_attn: False
-      dtype: bfloat16
       gpu_memory_utilization: 0.7
       enforce_eager: true
-      cudagraph_capture_sizes: null
-      free_cache_engine: true
-      data_parallel_size: 1
-      expert_parallel_size: 1
       tensor_model_parallel_size: 1
-      pipeline_model_parallel_size: 1
       max_num_batched_tokens: 204800
       max_num_seqs: 1024
       load_format: auto
-      engine_kwargs: {}
-      limit_images: null
       enable_chunked_prefill: false
       enable_prefix_caching: false
-      disable_log_stats: false
+      # One-shot teacher scoring does not reuse KV cache.
+      disable_kv_cache: true
       skip_tokenizer_init: false
-  
+      n: 1
       prompt_length: 16384
       response_length: 16384
       max_model_len: 32768
-  
-      runner: generate
-      task: generate
-  
       enable_weights_cpu_backup: True
   
     sampling_config:
@@ -125,9 +121,18 @@ managers:
       top_k: 1
 
   gen_skywork:
+    reward_manager:
+      _target_: verl.workers.config.reward_model.RewardManagerConfig
+      source: register
+      name: gen
+      module:
+        _target_: verl.trainer.config.config.ModuleConfig
+        path: null
+        name: custom_reward_manager
     reward_loop_type: gen
     reward_fn:
-      - skywork
+      - path: null
+        name: skywork
     reward_model_name: Skywork-Reward-V2-Qwen3-8B
   
     enable_resource_pool: True
@@ -136,40 +141,32 @@ managers:
     nnodes: 1
     rollout_ngpus_per_instance_per_node: 1
     rollout_nnodes_per_instance: 1
+    # null leaves concurrent requests on one reward instance uncapped.
+    max_concurrent_requests_per_instance: null
   
     model:
       path: ${oc.env:PSRL_WORKSPACE,/tmp}/models/Skywork-Reward-V2-Qwen3-8B
       external_lib: ${oc.select:train_actor_rollout_ref.model.external_lib,null}
       trust_remote_code: False
   
+    # RM-specific overlays on the composed `psrl_rollout` schema.
     rollout:
-      _target_: psrl.workers.config.RolloutConfig
-      name: vllm
-      mode: psrl_async
-      disable_attn: False
-      dtype: bfloat16
       gpu_memory_utilization: 0.5
       enforce_eager: true
-      cudagraph_capture_sizes: null
-      free_cache_engine: true
-      data_parallel_size: 1
-      expert_parallel_size: 1
       tensor_model_parallel_size: 1
-      pipeline_model_parallel_size: 1
       max_num_batched_tokens: 20480
       max_num_seqs: 1024
       load_format: auto
-      engine_kwargs: {}
-      limit_images: null
       enable_chunked_prefill: false
       enable_prefix_caching: false
+      # One-shot teacher scoring does not reuse KV cache.
+      disable_kv_cache: true
       disable_log_stats: true
       skip_tokenizer_init: false
-  
+      n: 1
       prompt_length: 8192
       response_length: 8192
       max_model_len: 16384
-  
       runner: pooling
       task: classify
   

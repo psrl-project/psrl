@@ -3,9 +3,6 @@ set -e
 set -o pipefail
 trap 'echo "[ERROR] Failed at line $LINENO: $BASH_COMMAND" >&2; exit 1' ERR
 
-VLLM_PATH=${VLLM_PATH:-}
-VERL_PATH=${VERL_PATH:-}
-TQ_PATH=${TQ_PATH:-}
 MAX_JOBS=${MAX_JOBS:-64}
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,7 +25,7 @@ echo "2. Install basic packages"
 python -m uv pip install "transformers==5.10.1" accelerate datasets peft hf-transfer matplotlib flask click==8.2.1 \
     "numpy<2.0.0" "pyarrow>=19.0.1" pandas paramiko sortedcontainers \
     ray[default]==2.49.1 codetiming hydra-core pylatexenc qwen-vl-utils wandb dill pybind11 liger-kernel mathruler blobfile xgrammar \
-    pytest py-spy pre-commit ruff meson ninja pynvml requests einops trl maturin puccinialin protoc-wheel-0 nvidia-modelopt[torch]
+    pytest py-spy pre-commit ruff meson ninja pynvml requests einops "trl==1.14.1" maturin puccinialin protoc-wheel-0 nvidia-modelopt[torch]
 
 python -m uv pip uninstall -y pynvml nvidia-ml-py
 python -m uv pip install --no-cache-dir "nvidia-ml-py>=12.560.30" "fastapi[standard]>=0.115.0" "optree>=0.13.0" "pydantic>=2.9" "grpcio>=1.62.1" "nvidia-cudnn-frontend>=1.13.0"
@@ -73,8 +70,9 @@ fi
 
 echo "Building SMG from source..."
 pushd $THIRD_PARTY_PATH
-git clone https://github.com/psrl-project/smg.git -b psrl-dev
+# git clone https://github.com/psrl-project/smg.git -b psrl-dev
 cd smg
+SMG_DIR="${PWD}" bash "${SCRIPT_DIR}/apply_smg_patch.sh"
 # Comment out the smg-tui workspace dependency (not needed for PSRL build)
 sed -i 's|^smg-tui = { version = "0.1.0", path = "tui" }|# smg-tui = { version = "0.1.0", path = "tui" }|' Cargo.toml
 # Build release binary with PSRL policies
@@ -100,7 +98,7 @@ python -c "from smg.router import Router; print('  ✓ smg.router binding instal
 echo "7. Install vllm and verl"
 if [ -z "$VLLM_PATH" ]; then
     pushd $THIRD_PARTY_PATH
-    git clone -b releases/v0.22.0 https://github.com/vllm-project/vllm.git
+    # git clone -b releases/v0.22.0 https://github.com/vllm-project/vllm.git
     VLLM_PATH=$THIRD_PARTY_PATH/vllm
     popd
 fi
@@ -110,9 +108,12 @@ python -m uv pip install -r requirements/build/cuda.txt
 python -m uv pip install --no-build-isolation -e .
 popd
 
+# Qwen3.5 model configs require Transformers 5.x. reinstall after vLLM dependencies.
+python -m uv pip install "transformers[hf_xet]==5.5.0"
+
 if [ -z "$VERL_PATH" ]; then
     pushd $THIRD_PARTY_PATH
-    git clone https://github.com/volcengine/verl.git
+    # git clone https://github.com/volcengine/verl.git
     VERL_PATH=$THIRD_PARTY_PATH/verl
     cd $VERL_PATH
     git checkout e5ca4acb
@@ -124,10 +125,10 @@ popd
 
 if [ -z "$TQ_PATH" ]; then
     pushd $THIRD_PARTY_PATH
-    git clone https://github.com/Ascend/TransferQueue.git
+    # git clone https://github.com/Ascend/TransferQueue.git
     TQ_PATH=$THIRD_PARTY_PATH/TransferQueue
     cd $TQ_PATH
-    git checkout 434f8c4
+    # git checkout 434f8c4
     popd
 fi
 pushd $TQ_PATH
@@ -136,9 +137,6 @@ popd
 
 echo "8. Apply patch for dependencies..."
 
-bash "$PSRL_PATH/patch/apply_patch.sh" vllm
-bash "$PSRL_PATH/patch/apply_patch.sh" verl
-bash "$PSRL_PATH/patch/apply_patch.sh" transfer_queue
 
 echo "9. Install torch_memory_saver"
 python -m uv pip install git+https://github.com/fzyzcjy/torch_memory_saver.git@d64a6394d1e09c613fab90260054cecc2684586d --no-cache-dir --force-reinstall

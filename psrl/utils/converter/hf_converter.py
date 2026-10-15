@@ -85,7 +85,6 @@ def maybe_convert_to_smaller_parts(model_info, param_name, param):
         return dict(zip(new_param_names, new_params))
     if "visual.blocks" in param_name and "qkv" in param_name:
         param = reshape_visual_block_qkv(param, vision_head_size=model_info.get("vision_head_size"))
-
     gate_up_prefix = get_fused_moe_expert_prefix(param_name, "gate_up_proj")
     if gate_up_prefix is not None:
         param_dict = {}
@@ -108,7 +107,6 @@ def maybe_convert_to_smaller_parts(model_info, param_name, param):
             param_dict[gate_name] = gate_param
             param_dict[up_name] = up_param
         return param_dict
-
     down_prefix = get_fused_moe_expert_prefix(param_name, "down_proj")
     if down_prefix is not None:
         param_dict = {}

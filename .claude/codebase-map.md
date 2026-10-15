@@ -3,9 +3,9 @@
 > **Purpose**: Fast-lookup reference for the entire PSRL project. Read this file first to orient yourself in any module.
 > **Last updated**: 2026-07-26 | **Total**: 213 Python files in `psrl/`, ~100 test files in `tests/`, config-as-code via veRL re-export
 >
-> **Major shifts since 2026-05**: rollout now runs through the vendored **SMG** gateway (Rust router) with **SessionRouter + TITO** session capture; sample data moves over **TransferQueue** instead of Ray-serialized batches; KV cache offload/reuse via **LMCache**; **RolloutCoordinator** (mixin-composed) replaces the old `rollout_coordinator.py`; a unified **engine train worker** supersedes the separate FSDP/Megatron workers; a standalone **reward-model service** and **gen reward functions** were added; **resource elasticity** (`elastic_rm`) and a **gRPC PSManager** service landed. See §15 for the terminology glossary.
+> **Major shifts since 2026-05**: rollout now runs through the vendored **SMG** gateway (Rust router) with **SessionRouter + TITO** session capture; sample data moves over **TransferQueue** instead of Ray-serialized batches; KV cache offload/reuse via **LMCache**; **RolloutCoordinator** (mixin-composed) replaces the old `rollout_coordinator.py`; a unified **engine train worker** supersedes the separate FSDP/Megatron workers; a standalone **reward-model service** and **gen reward functions** were added; **resource elasticity** (`elastic`) and a **gRPC PSManager** service landed. See §15 for the terminology glossary.
 >
-> **Latest changes (2026-07-25/26, commit `11b6d65`)**: the monolithic `psrl.yaml` was **split into 16 per-topic group files** plus the 6 existing `rollout_coordination/` ones (§4) — note `elastic_rm` moved under `psrl.deployment.elastic_rm`; **fine-grained rollout/train overlap** landed as a `StepStrategy` (`psrl.fine_grain_overlap`); pre-SMG dead code (gen worker, FSDP/Megatron train workers, Python router/route-strategy/request-queue, mini-SWE loop v0) moved to top-level `deprecated/`; the real test suite is `tests/` (pytest `testpaths`), not `unit_tests/`.
+> **Latest changes (2026-07-25/26, commit `11b6d65`)**: the monolithic `psrl.yaml` was **split into 16 per-topic group files** plus the 6 existing `rollout_coordination/` ones (§4). Elastic keys live under `psrl.deployment.elastic`. **Fine-grained rollout/train overlap** landed as a `StepStrategy` (`psrl.fine_grain_overlap`); pre-SMG dead code (gen worker, FSDP/Megatron train workers, Python router/route-strategy/request-queue, mini-SWE loop v0) moved to top-level `deprecated/`; the real test suite is `tests/` (pytest `testpaths`), not `unit_tests/`.
 
 ---
 
@@ -78,7 +78,7 @@ psrl/
 │       ├── hydra_plugins/psrl_searchpath.py  # Hydra search-path plugin (adds veRL + PSRL config dirs)
 │       ├── psrl/                 # ★ RESTRUCTURED: psrl.yaml split into per-topic group files
 │       │   ├── psrl.yaml         # Thin root: `defaults:` list + a few scalars (staleness, ps_mode, ...)
-│       │   ├── deployment.yaml   # Node/GPU layout per role + heterogeneous_rollout + elastic_rm.*
+│       │   ├── deployment.yaml   # Node/GPU layout per role + heterogeneous_rollout + elastic.*
 │       │   ├── rollout_gateway.yaml   # SMG gateway process knobs (concurrency, RUST_LOG, post actors)
 │       │   ├── server_rollout.yaml    # HTTP rollout service entrypoint for agent loops
 │       │   ├── status_collection.yaml # Engine→coordinator→router status sync + stats_recorder
@@ -135,9 +135,9 @@ psrl/
 │   │   ├── reward_worker.py      # ★ NEW: Ray reward worker (TransferQueue producer/consumer)
 │   │   ├── reward_protocol.py    # RewardModelRuntimeInfo dataclass (gateway URL + tokenizer)
 │   │   ├── reward_loop/          # Rule/score reward algorithms
-│   │   │   ├── base.py           # RewardManagerBase
+│   │   │   ├── base.py           # RewardLoopBase
 │   │   │   ├── naive.py, dapo.py, prime.py, gdpo.py  # algorithm variants
-│   │   │   ├── gen.py            # GenRewardManager (routes to SMG reward-model gateway)
+│   │   │   ├── gen.py            # GenRewardLoop (routes to SMG reward-model gateway)
 │   │   │   └── registry.py       # RewardLoop factory registry
 │   │   ├── gen_reward_function/  # ★ NEW: pluggable generative-RM scoring fns
 │   │   │   ├── base.py, registry.py  # GenRewardFunctionBase + @gen_reward_func decorator
@@ -164,6 +164,12 @@ psrl/
 │   │       ├── session_agent_loop.py    # ★ NEW: SMG SessionRouter + TITO-backed loop
 │   │       ├── mini_swe_agent_loop_v1.py# ★ CURRENT active SWE-bench agent loop (Docker + async PSRL rollout)
 │   │       └── utils.py
+│   │
+│   ├── elastic/                  # Resource elasticity runtime
+│   │   ├── executor.py, cluster_topology.py, pool_layout.py
+│   │   ├── policy_runtime.py, request_snapshot.py, candidate_routing.py
+│   │   ├── sleep_wake_orchestrator.py
+│   │   └── scaling_policy/       # Base, dummy, rule-based, throughput-optimal and evaluation
 │   │
 │   └── config/                   # Worker-level config dataclasses (trimmed)
 │       ├── model.py              # ModelConfig
@@ -196,11 +202,9 @@ psrl/
 │   │   ├── config.py             # LMCacheConfig
 │   │   └── types.py              # KVCacheBackend (CPU/DISK/REMOTE)
 │   │
-│   ├── elastic_rm/               # ★ NEW: resource elasticity
-│   │   ├── elastic_executor.py   # ElasticExecutor: pause/resume workloads via TMS
-│   │   ├── scaling_policy.py     # ScalingPolicy + InstanceSignal
-│   │   ├── cluster_topology.py   # ClusterTopology / GPUSlot / InstanceStatus
-│   │   └── diagnostics.py        # Backlog diagnostics logging
+│   ├── elastic/                  # Shared elasticity utilities
+│   │   ├── cost_model.py
+│   │   └── diagnostics.py, logging.py, overhead.py
 │   │
 │   ├── concurrency/              # ★ NEW: cross-process limiters
 │   │   ├── slot.py               # fcntl file-lock slot limiter
@@ -274,9 +278,6 @@ docs/                # ★ Sphinx/MyST docs — read design/ for authoritative s
 
 tests/               # ★ THE test suite (pyproject `testpaths = ["tests"]`) — ~100 files, see §10
 
-unit_tests/          # Legacy remnant, NOT on testpaths; only kv_cache/ + workers/ps/ survive
-                     # (agent_loop suite moved to deprecated/unit_tests/ with the router code)
-
 deprecated/          # ★ Top-level graveyard: pre-SMG code, not imported by anything active
 ├── workers/gen/gen_worker.py               # PSRL_GenWorker (superseded by PSRL_vLLMReplica)
 ├── workers/train/fsdp_train_worker.py      # PSRL_FSDPTrainWorker (superseded by EngineTrainWorker)
@@ -313,7 +314,7 @@ Scalars still in `psrl.yaml`: `ps_manager_ip`, `reward_service_ip`, `staleness`,
 
 | Group file → key | Controls |
 |-----------|----------|
-| `deployment.yaml` → `psrl.deployment` | Node/GPU counts per role (`train_nnodes`, `n_rollout_instances`, `rollout_ngpus_per_node_per_instance`, `total_nnodes`), `heterogeneous_rollout.*`, and **`elastic_rm.*`** (★ moved here from `psrl.elastic_rm`) |
+| `deployment.yaml` → `psrl.deployment` | Node/GPU counts per role (`train_nnodes`, `n_rollout_instances`, `rollout_ngpus_per_node_per_instance`, `total_nnodes`), `heterogeneous_rollout.*`, and **`elastic.*`** (`rule_based`, `throughput_optimal`) |
 | `rollout_gateway.yaml` → `psrl.rollout_gateway` | SMG gateway process: `server_max_concurrency`, `rust_log_filter`, health-check waits, `use_distributed_post` + `post_actor_num_per_node` (Ray HTTP POST actor pool) |
 | `server_rollout.yaml` → `psrl.server_rollout` | HTTP rollout service entrypoint used by agent loops (`gateway.router_ip/port`, `server_concurrency`) |
 | `status_collection.yaml` → `psrl.status_collection` | Engine→coordinator→router status sync intervals, file-dump level, `stats_recorder.*` |
@@ -356,7 +357,7 @@ Templates: `ppo_trainer.yaml` (FSDP) / `ppo_megatron_trainer.yaml` (Megatron).
 |-------|------|------|
 | `PSRL_RayPPOTrainer` | `trainer/ppo/ray_trainer.py` | Main training loop orchestrator |
 | `StepStrategy` | `trainer/ppo/strategies/base.py` | ABC for training step; `FullBatchStepStrategy` (default) and `FineGrainOverlapStrategy` (chunk-pipelined) are the concrete implementations |
-| `TaskRunner` | `trainer/main_ppo.py` | Ray driver: builds worker groups, inits TransferQueue, elastic_rm/reward pools |
+| `TaskRunner` | `trainer/main_ppo.py` | Ray driver: builds worker groups, inits TransferQueue, elastic/reward pools |
 | `DataProcessor` | `utils/dataset/data_processor.py` | Ray actor: dataset loading, batching, TransferQueue producer |
 
 ### Worker Layer
@@ -373,9 +374,9 @@ Templates: `ppo_trainer.yaml` (FSDP) / `ppo_megatron_trainer.yaml` (Megatron).
 | `PSStorageWorker` | `workers/ps/ps_storage_worker.py` | Holds model shards on GPU |
 | `RewardManager` | `workers/reward/reward_manager.py` | Reward scoring pipeline over TransferQueue |
 | `RewardModelManager` | `workers/reward/reward_model/manager.py` | Owns RM replicas + coordinator (RM inference service) |
-| `GenRewardManager` | `workers/reward/reward_loop/gen.py` | Routes reward requests to SMG reward-model gateway |
+| `GenRewardLoop` | `workers/reward/reward_loop/gen.py` | Routes reward requests to SMG reward-model gateway |
 | `KVCacheManager` | `utils/kv_cache/manager.py` | LMCache offload / prefix retrieval / cross-instance transfer |
-| `ElasticExecutor` | `utils/elastic_rm/elastic_executor.py` | Pause/resume workloads for GPU re-sharing |
+| `ElasticExecutor` | `workers/elastic/executor.py` | Pause/resume workloads for GPU re-sharing |
 | `PSRL_AgentLoopManager` | `workers/agent_loop/manager.py` | Multi-turn / session tool-use orchestration; also yields training chunks (`wait_for_training_chunk`) for fine-grain overlap and owns the distributed POST actor pool |
 
 ### mini-SWE Agent Layer
@@ -418,7 +419,7 @@ main_ppo.py::main()
     → tq.init(config.transfer_queue)          # TransferQueue data plane
     → TaskRunner (Ray actor on head node)
       → build worker groups (Gen, EngineTrain, Critic, Reward, RewardModel, ...)
-      → if elastic_rm.enable: set up shared GPU pools
+      → if elastic.enable: set up shared GPU pools
       → PSManager + gRPC service, DataProcessor, RolloutGateway (SMG + SessionRouter)
       → PSRL_RayPPOTrainer(config) → trainer.fit()
 ```
@@ -505,7 +506,7 @@ MiniSWEAgentLoopV1.run(request)
 | `DAPORewardLoop` | `reward_loop/dapo.py` | DAPO dynamic reward |
 | `PRIMERewardLoop` | `reward_loop/prime.py` | PRIME process reward model |
 | `GDPORewardLoop` | `reward_loop/gdpo.py` | GDPO variant |
-| `GenRewardManager` | `reward_loop/gen.py` | Generative/pooling RM via SMG reward gateway |
+| `GenRewardLoop` | `reward_loop/gen.py` | Generative/pooling RM via SMG reward gateway |
 
 - **Registry**: `reward_loop/registry.py` (rule/score) + `gen_reward_function/registry.py` (`@gen_reward_func` generative RMs: `default_gen_rm`, `skywork_rm`).
 - **Reward-model service**: `reward/reward_model/` (manager → coordinator → replicas → gateway) serves RM inference; `RewardWorker` produces/consumes reward fields over TransferQueue.
@@ -554,7 +555,7 @@ Supports newer arches (DeepSeek-V2, Qwen3.5). Per-format loading in `converter/m
 
 ## 10. Testing Map
 
-**`tests/` is the real suite** — `pyproject.toml` sets `testpaths = ["tests"]`. (`unit_tests/` is a legacy leftover holding only `kv_cache/test_lmcache_config.py` and `workers/ps/test_ps_manager_broadcast.py`; it is not collected by default.)
+`tests/` contains the active test suite. `pyproject.toml` sets `testpaths = ["tests"]`. CPU unit tests are marked `cpu_test`. Ray integration tests use a separate session namespace. GPU tests require `--run-gpu` and a local checkpoint supplied with `--gpu-model-path`. See `tests/README.md` for execution commands.
 
 ```
 tests/
@@ -570,7 +571,7 @@ tests/
 ├── workers/train/    → EngineTrainWorker init, load-weight flag
 ├── gen_dplb/         → SMG adapter cache-aware routing, stats recorder
 ├── tito/, e2e/tito/  → SessionRouter + TITO training-data build (+ test_tito_e2e.sh)
-├── elastic_rm/       → elastic executor + scaling policy instance IDs
+├── elastic/       → elastic executor + scaling policy instance IDs
 ├── ray_utils/        → lazy primitives, lock context, GPU sharing, version waiter, ...
 ├── fsdp/, megatron/, torch_dist/, checkpoint/  → GPU/dist smoke tests (mostly .sh-driven)
 ├── dataset/, environments/, tools/, unit/      → DataProcessor, env registry, LMCache snapshot
@@ -619,7 +620,7 @@ main_ppo.py (TaskRunner, TransferQueue init)
     → workers/gen/vllm_async_server.py (PSRL_vLLMReplica) → utils/nixl/client.py, vllm_rollout.py
     → workers/gen/rollout_gateway.py (RolloutGateway) → smg_adapter.py → third_party/smg
     → workers/gen/rollout_coordination/coordinator.py (RolloutCoordinator)
-        → session/thunder_agent.py, sync_and_migrate/*, smg_adapter.py, elastic_rm/diagnostics
+        → session/thunder_agent.py, sync_and_migrate/*, smg_adapter.py, utils/elastic/diagnostics
     → workers/train/engine_train_worker.py → base_train_worker.py → nixl/client.py, converter/*
     → workers/ps/ps_manager.py → staleness_controller.py, request_status_tracker.py
         → grpc/ps_manager_service.py (gRPC surface)
@@ -627,7 +628,7 @@ main_ppo.py (TaskRunner, TransferQueue init)
     → workers/agent_loop/manager.py → loops/* (incl. session_agent_loop, mini_swe_*)
         → tools/*, environments/*
     → utils/dataset/data_processor.py, utils/transferqueue_utils.py
-    → utils/kv_cache/manager.py, utils/elastic_rm/elastic_executor.py
+    → utils/kv_cache/manager.py, workers/elastic/executor.py
 ```
 
 ---
@@ -649,7 +650,7 @@ main_ppo.py (TaskRunner, TransferQueue init)
 | Debug model transfer failures | `utils/nixl/client.py`, `workers/train/base_train_worker.py` |
 | Work with sample data plane | `utils/transferqueue_utils.py`, `docs/design/transfer_queue.md` |
 | Tune KV cache / LMCache | `utils/kv_cache/`, `psrl.lmcache.*` (`lmcache.yaml`), `docs/design/kv_cache.md` |
-| Configure resource elasticity | `utils/elastic_rm/`, **`psrl.deployment.elastic_rm.*`** (`deployment.yaml`), `docs/design/resource_elasticity.md` |
+| Configure resource elasticity | `workers/elastic/`, **`psrl.deployment.elastic.*`** (`deployment/elastic/*.yaml`), `docs/design/resource_elasticity.md` |
 | Add/modify training backend | `workers/train/engine_train_worker.py` (unified FSDP/Megatron) |
 | Add a rule/score reward | `workers/reward/reward_loop/` + `registry.py` |
 | Add a generative reward model | `workers/reward/gen_reward_function/` (`@gen_reward_func`) + `reward_model/` service |
@@ -663,7 +664,7 @@ main_ppo.py (TaskRunner, TransferQueue init)
 | Debug SWE agent rollouts | `workers/agent_loop/loops/mini_swe_agent_loop_v1.py` |
 | Change SWE grading | `examples/mini_swe/swebench_grader.py` |
 | Run benchmarks | `psrl/bench/`, `examples/bench/` |
-| Run / add tests | `tests/` (pytest `testpaths`); `unit_tests/` is a legacy remnant |
+| Run / add tests | `tests/` (pytest `testpaths`) |
 | Find pre-SMG legacy code | top-level `deprecated/` (gen worker, FSDP/Megatron train workers, Python router, mini-SWE loop v0) |
 | Plot rollout routing / trajectories | `examples/anaylsis/plot_request_route_timeline.py`, `plot_trajectory_record.py` |
 | Install from scratch | `scripts/install_basic.sh` → `install_nixl.sh` → `install_lmcache.sh` → `install_megatron.sh` → `reinstall_smg.sh` |
@@ -684,7 +685,7 @@ main_ppo.py (TaskRunner, TransferQueue init)
 | **LMCache** | KV cache offload / prefix reuse / cross-instance transfer backend |
 | **NIXL** | GPU-direct RDMA transport for GPU→GPU weight movement |
 | **TMS** | torch_memory_saver — GPU memory pause/resume primitive underpinning resource elasticity |
-| **elastic_rm** | Resource elasticity subsystem re-sharing GPUs across train/gen/eval/reward |
+| **elastic** | Resource elasticity subsystem re-sharing GPUs across train/gen/eval/reward |
 | **partial rollout** | On weight-sync abort, SMG preserves the generated prefix and continues the request after re-selection instead of restarting |
 | **RolloutInstanceId** | `(base_worker_id, dp_rank)` — identifies one data-parallel vLLM instance for routing/affinity |
 | **fine-grain overlap** | Starting training stages on mini/micro-batch chunks before the full rollout batch is collected; implemented as `FineGrainOverlapStrategy` and configured by `psrl.fine_grain_overlap` |

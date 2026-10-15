@@ -1,5 +1,9 @@
 """Tests for the sciaccel_rl reward function."""
 
+import pytest
+
+pytestmark = pytest.mark.cpu_test
+
 
 class TestComputeScore:
     """Test compute_score extracts verifier reward correctly."""

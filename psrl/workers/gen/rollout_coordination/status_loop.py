@@ -88,6 +88,91 @@ class StatusMixin:
             snapshot[instance_id] = engine_status.snapshot
         return snapshot
 
+    async def get_instance_runtime_snapshot(self) -> dict[RolloutInstanceId, dict]:
+        """
+        Collect live scheduler and memory state from every replica in parallel.
+        """
+        replica_ids = sorted(self.server_handles)
+        observations = await asyncio.gather(
+            *(self.server_handles[replica_id].get_engine_runtime_snapshots.remote() for replica_id in replica_ids)
+        )
+        result = {}
+        for replica_id, engines in zip(replica_ids, observations, strict=True):
+            for dp_rank, observation in engines.items():
+                instance_id = (replica_id, dp_rank)
+                engine_status = self.instance_to_engine_status[instance_id]
+                snapshot = {
+                    **engine_status.snapshot,
+                    "timestamp": observation["timestamp"],
+                    "scheduler_stats": observation["scheduler_stats"],
+                }
+                is_sleeping = observation["is_sleeping"] or replica_id in self.sleeping_replica_ids
+                if is_sleeping:
+                    snapshot = EngineStats.get_default_snapshot()
+                stats = snapshot["scheduler_stats"]
+                if stats["num_running_reqs"] + stats["num_waiting_reqs"] == 0:
+                    snapshot["generation_throughput"] = 0.0
+                self.instance_to_engine_status[instance_id] = EngineStats(
+                    replica_idx=engine_status.replica_idx,
+                    data_parallel_rank=dp_rank,
+                    model_version=engine_status.model_version,
+                    snapshot=snapshot,
+                )
+                result[instance_id] = {
+                    "is_sleeping": is_sleeping,
+                    "engine_stats": snapshot,
+                    "model_version": (
+                        self.ps_model_version if is_sleeping else self.instance_to_model_version.get(instance_id, 0)
+                    ),
+                    "wake_model_version": self.ps_model_version,
+                }
+        return result
+
+    async def _get_training_request_snapshot(self) -> list[dict]:
+        """
+        Exclude dedicated validation demand from elastic rollout planning.
+        """
+        requests = await self._gateway_get_json("/routing_loop/snapshot")
+        if not isinstance(requests, list):
+            raise TypeError("Router request snapshot must be a list.")
+        return [request for request in requests if not request["is_validate"]]
+
+    async def get_router_request_snapshot(self, candidate_versions: list[int]) -> list[dict]:
+        """
+        Preserve queued training demand and its admission inventory in native dispatch order.
+        """
+        requests = await self._get_training_request_snapshot()
+        if self.ps_manager is not None:
+            versions = sorted(set(candidate_versions))
+            new_requests = [request for request in requests if request["version_tag"] < 0]
+            reservations = (
+                await self.ps_manager.can_reserve_request.remote(
+                    [int(request["request_id"]) for request in new_requests],
+                    versions,
+                    False,
+                    [request["is_validate"] for request in new_requests],
+                )
+                if new_requests
+                else []
+            )
+            for request, reservation in zip(new_requests, reservations, strict=True):
+                request["reservable_versions"] = [
+                    version for version, ok in zip(versions, reservation, strict=True) if ok
+                ]
+            for request in requests:
+                request["reserve_indicators"] = dict(
+                    zip(
+                        versions,
+                        await self.ps_manager.get_reserve_indicator.remote(
+                            int(request["request_id"]),
+                            versions,
+                            request["is_validate"],
+                        ),
+                        strict=True,
+                    )
+                )
+        return requests
+
     async def _sync_status_to_router(self):
         """Broadcast the engine status to the router."""
         while not self.stop_sync_status_to_router:
@@ -97,9 +182,19 @@ class StatusMixin:
                 continue
             updates = []
             for instance_id, engine_status in self.instance_to_engine_status.items():
+                if not engine_status.snapshot.get("timestamp"):
+                    continue
                 replica_id, dp_rank = instance_id
                 updates.append(build_worker_stats_update(replica_id, dp_rank, engine_status.snapshot))
-            await self._gateway_post_json(WORKERS_UPDATE_STATS_PATH, payload=updates)
+            if not updates:
+                continue
+            try:
+                result = await self._gateway_post_json(WORKERS_UPDATE_STATS_PATH, payload=updates)
+                accepted = int(result.get("updated", 0)) + int(result.get("stale_ignored", 0))
+                if int(result.get("rejected", 0)) or accepted != len(updates):
+                    raise RuntimeError(f"Router rejected engine status updates: result={result!r}.")
+            except Exception:
+                psrl_logger.exception("Failed to sync engine status to the router. Retrying on the next interval.")
         psrl_logger.info("Stopped syncing engine status to router.")
 
     async def _stats_recorder_loop(self):

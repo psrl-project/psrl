@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 from vllm.config import VllmConfig
 from vllm.v1.metrics.loggers import StatLoggerBase
-from vllm.v1.metrics.stats import IterationStats, SchedulerStats
+from vllm.v1.metrics.stats import IterationStats, MultiModalCacheStats, SchedulerStats
 
 psrl_logger = logging.getLogger(__file__)
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
@@ -124,6 +124,7 @@ class StatCollector(StatLoggerBase):
         self,
         scheduler_stats: SchedulerStats | None,
         iteration_stats: IterationStats | None,
+        mm_cache_stats: MultiModalCacheStats | None = None,
         engine_idx: int = 0,
     ):
         """
@@ -132,6 +133,7 @@ class StatCollector(StatLoggerBase):
         Args:
             scheduler_stats: Statistics from vLLM scheduler
             iteration_stats: Statistics from vLLM iteration
+            mm_cache_stats: Multi-modal cache statistics (not currently used)
             engine_idx: Engine index
         """
         if not self._warmup_completed:

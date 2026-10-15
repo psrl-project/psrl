@@ -19,6 +19,27 @@ Subject: [PATCH] v0.22.0 patch
  12 files changed, 486 insertions(+), 9 deletions(-)
  create mode 100644 vllm/distributed/device_communicators/nccl_suspend.py
 
+diff --git a/vllm/compilation/cuda_graph.py b/vllm/compilation/cuda_graph.py
+index b63d861997..cd9678e199 100644
+--- a/vllm/compilation/cuda_graph.py
++++ b/vllm/compilation/cuda_graph.py
+@@ -285,13 +285,9 @@ class CUDAGraphWrapper:
+             with ExitStack() as stack:
+                 if self.cudagraph_options.gc_disable:
+-                    # during every model forward for piecewise cudagraph
+-                    # mode, we will capture many pieces of cudagraphs
+-                    # (roughly one per layer). running gc again and again
+-                    # across layers will make the cudagraph capture very slow.
+-                    # therefore, we only run gc for the first graph,
+-                    # and disable gc for the rest of the graphs.
++                    # Skip repeated collections during piecewise capture. Background
++                    # callers still require the integer count returned by `gc.collect`.
+                     stack.enter_context(
+-                        patch("gc.collect", lambda *args, **kwargs: None)
++                        patch("gc.collect", lambda *args, **kwargs: 0)
+                     )
+                     stack.enter_context(
+                         patch(
 diff --git a/vllm/config/scheduler.py b/vllm/config/scheduler.py
 index fb6951ea7..893a242bc 100644
 --- a/vllm/config/scheduler.py
@@ -455,13 +476,14 @@ diff --git a/vllm/v1/metrics/stats.py b/vllm/v1/metrics/stats.py
 index a7a5fb7a2..c3a40dd95 100644
 --- a/vllm/v1/metrics/stats.py
 +++ b/vllm/v1/metrics/stats.py
-@@ -170,6 +170,10 @@ class KVCacheEvictionEvent:
+@@ -170,6 +170,11 @@ class KVCacheEvictionEvent:
  @dataclass
  class SchedulerStats:
      """Stats associated with the scheduler."""
 +    # NOTE(lhy): we need to add this field to the scheduler stats for PSRL.
 +    req_id_to_prompt_token_num: dict[str, int] | None = None
 +    req_id_to_response_token_num: dict[str, int] | None = None
++    req_id_in_waiting: list[str] = field(default_factory=list)
 +    preemption_req_ids: list[str] = field(default_factory=list)
 
      num_running_reqs: int = 0
@@ -751,6 +773,67 @@ index 582c6a17c..0bfa32120 100644
      def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
          if not self.vllm_config.model_config.enable_cumem_allocator:
              return nullcontext()
+diff --git a/vllm/model_executor/layers/fused_moe/all2all_utils.py b/vllm/model_executor/layers/fused_moe/all2all_utils.py
+index 6d48221464..17d037481e 100644
+--- a/vllm/model_executor/layers/fused_moe/all2all_utils.py
++++ b/vllm/model_executor/layers/fused_moe/all2all_utils.py
+@@ -42,11 +42,6 @@ if current_platform.is_cuda_alike():
+         )
+     if has_mori():
+         from .prepare_finalize.mori import MoriPrepareAndFinalize
+-    if has_nixl_ep():
+-        from .prepare_finalize.nixl_ep import (
+-            NIXL_EP_QUANT_BLOCK_SHAPE,
+-            NixlEPPrepareAndFinalize,
+-        )
+ 
+ 
+ def _get_ep_all2all_manager(eep_stage: bool = False) -> Any:
+@@ -95,6 +90,8 @@ def maybe_roundup_layer_hidden_size(
+         )
+ 
+     if moe_parallel_config.use_nixl_ep_kernels:
++        from .prepare_finalize.nixl_ep import NixlEPPrepareAndFinalize
++
+         hidden_size = NixlEPPrepareAndFinalize.maybe_roundup_layer_hidden_size(
+             hidden_size
+         )
+@@ -281,6 +278,11 @@ def maybe_make_prepare_finalize(
+         )
+ 
+     elif moe.use_nixl_ep_kernels:
++        from .prepare_finalize.nixl_ep import (
++            NIXL_EP_QUANT_BLOCK_SHAPE,
++            NixlEPPrepareAndFinalize,
++        )
++
+         assert quant_config is not None
+         global_to_physical = physical_to_global = local_expert_global_ids = None
+         if routing_tables is not None:
+diff --git a/vllm/utils/import_utils.py b/vllm/utils/import_utils.py
+index e97228bfa6..2379315365 100644
+--- a/vllm/utils/import_utils.py
++++ b/vllm/utils/import_utils.py
+@@ -415,9 +415,17 @@ def has_deep_gemm() -> bool:
+     return _has_module("deep_gemm") or _has_module("vllm.third_party.deep_gemm")
+ 
+ 
++@cache
+ def has_nixl_ep() -> bool:
+-    """Whether the optional `nixl_ep` package is available."""
+-    return _has_module("nixl_ep")
++    """Whether the optional `nixl_ep` package can be imported."""
++    if not _has_module("nixl_ep"):
++        return False
++    try:
++        importlib.import_module("nixl_ep")
++    except (ImportError, OSError) as error:
++        logger.warning_once("Disabling the unavailable NIXL EP backend: %s.", error)
++        return False
++    return True
+ 
+ 
+ def has_triton_kernels() -> bool:
 --
 2.43.0
 

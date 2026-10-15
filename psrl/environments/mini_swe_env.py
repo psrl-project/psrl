@@ -20,7 +20,6 @@ import time
 import uuid
 
 import numpy as np
-import ray
 from examples.mini_swe.config import (
     MiniSWEAgentRuntimeConfig,
     apply_data_overrides,
@@ -31,6 +30,7 @@ from transformers import AutoProcessor, AutoTokenizer
 
 from psrl.environments.base import Environment, EnvStepOutput
 from psrl.utils.common.docker_utils import force_remove_containers_by_label
+from psrl.workers.reward.client import RewardManagerClient
 
 psrl_logger = logging.getLogger(__file__)
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
@@ -49,7 +49,7 @@ class MiniSWEEnvironment(Environment[dict, None]):
     def __init__(
         self,
         config: DictConfig,
-        reward_manager: ray.actor.ActorHandle,
+        reward_manager: RewardManagerClient,
         tokenizer: AutoTokenizer,
         processor: AutoProcessor | None = None,
         dataset_cls=None,
@@ -60,7 +60,7 @@ class MiniSWEEnvironment(Environment[dict, None]):
 
         Args:
             config (DictConfig): PSRL trainer configuration.
-            reward_manager (ray.actor.ActorHandle): Ray actor handle for computing rewards.
+            reward_manager (RewardManagerClient): Shared client for submitting reward requests.
             runtime_config (MiniSWEAgentRuntimeConfig | None): Pre-built runtime config
                 from the agent loop. If None, a default config is built from scratch.
         """

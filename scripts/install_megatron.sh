@@ -63,9 +63,9 @@ python -m pip install git+https://github.com/NVIDIA/Megatron-LM.git@c049020 --no
 
 echo "4. Install Megatron-Bridge"
 pushd $THIRD_PARTY_PATH
-git clone https://github.com/NVIDIA-NeMo/Megatron-Bridge.git
+# git clone https://github.com/NVIDIA-NeMo/Megatron-Bridge.git
 cd Megatron-Bridge
-git checkout 94d1870
+# git checkout 94d1870
 # Comment out the local megatron-core source (we install Megatron-LM separately above)
 sed -i 's|^megatron-core = { path = "3rdparty/Megatron-LM/", editable = true }|# megatron-core = { path = "3rdparty/Megatron-LM/", editable = true }|' pyproject.toml
 python -m uv pip install -e . --no-build-isolation --no-cache-dir --no-deps

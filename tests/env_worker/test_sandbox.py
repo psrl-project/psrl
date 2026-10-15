@@ -1,3 +1,6 @@
+import os
+from unittest.mock import patch
+
 import pytest
 from psrl.workers.env_worker.sandbox import (
     NVIDIA_CONTROL_DEVICES,
@@ -44,7 +47,8 @@ def test_resource_limits_and_mounts_are_translated():
 @pytest.mark.cpu_test
 def test_gpu_sandbox_uses_device_passthrough_not_gpus_flag():
     spec = SandboxSpec(image="mlgym:latest", gpus=2)
-    argv = build_docker_run_argv(spec, container_name="c1", gpu_device_indices=(3, 5))
+    with patch.object(os.path, "exists", return_value=True):
+        argv = build_docker_run_argv(spec, container_name="c1", gpu_device_indices=(3, 5))
 
     assert "--gpus" not in argv, "Must use device passthrough, not the broken --gpus flag."
     assert "/dev/nvidia3" in argv, "Requested physical device must be passed through."

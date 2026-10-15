@@ -7,7 +7,6 @@ from omegaconf import DictConfig
 from verl.single_controller.ray import RayWorkerGroup
 from verl.utils import hf_tokenizer, omega_conf_to_dataclass
 from verl.utils.fs import copy_to_local
-from verl.workers.config import HFModelConfig
 
 from psrl.workers.config import RolloutConfig
 from psrl.workers.gen.vllm_async_server import GenInterface
@@ -35,16 +34,13 @@ class RewardModelManager:
         self.gateway_url = gateway_url
 
         model_cfg = reward_model_config.model
-        local_path = copy_to_local(model_cfg.path, use_shm=model_cfg.get("use_shm", False))
+        tokenizer_path = model_cfg.get("tokenizer_path") or model_cfg.path
+        local_path = copy_to_local(tokenizer_path, use_shm=model_cfg.get("use_shm", False))
         self.reward_model_tokenizer = hf_tokenizer(
             local_path,
             trust_remote_code=model_cfg.get("trust_remote_code", False),
         )
-        self.hf_model_config = HFModelConfig(
-            path=model_cfg.path,
-            external_lib=model_cfg.get("external_lib"),
-            trust_remote_code=model_cfg.get("trust_remote_code", False),
-        )
+        self.hf_model_config = model_cfg
         self.rollout_config: RolloutConfig = omega_conf_to_dataclass(reward_model_config.rollout)
 
         self.reward_model_coordinator = ray.remote(RewardModelCoordinator).remote(
@@ -69,32 +65,62 @@ class RewardModelManager:
 
     def _initialize_reward_replicas(self):
         status_endpoint: str = ray.get(self.reward_model_coordinator.get_status_sink_endpoint.remote())
+        replica_world_size = (
+            self.rollout_config.tensor_model_parallel_size
+            * self.rollout_config.data_parallel_size
+            * self.rollout_config.pipeline_model_parallel_size
+        )
 
         init_tasks = []
-        for i, wg in enumerate(self.reward_model_wg_list):
-            gen_interface = GenInterface(
-                role=f"reward_model_{self.reward_model_name}",
-                rollout_replica_idx=i,
-                status_endpoint=status_endpoint,
-                ps_manager_handle=None,  # reward model: no PS sync
-            )
-            replica = RewardModelReplica(
-                replica_rank=i,
-                local_replica_rank=i,
-                psrl_config=self.config.psrl,
-                config=self.rollout_config,
-                model_config=self.hf_model_config,
-                gen_interface=gen_interface,
-                reward_model_name=self.reward_model_name,
-                gpus_per_node=self.reward_model_config.rollout_ngpus_per_instance_per_node,
-            )
-            init_tasks.append(replica.init_model(wg))
-            self.replicas.append(replica)
+        replica_rank = 0
+        for wg in self.reward_model_wg_list:
+            wg_world_size = wg.world_size
+            if replica_world_size <= 0 or wg_world_size % replica_world_size != 0:
+                raise ValueError(
+                    f"Reward worker group world_size={wg_world_size} is not divisible by "
+                    f"replica world_size={replica_world_size}."
+                )
+            num_local_replicas = wg_world_size // replica_world_size
+            if num_local_replicas < 1:
+                raise ValueError(
+                    f"Reward worker group has world_size={wg_world_size} but each replica needs "
+                    f"{replica_world_size} workers."
+                )
+            for local_replica_rank in range(num_local_replicas):
+                gen_interface = GenInterface(
+                    role=f"reward_model_{self.reward_model_name}",
+                    rollout_replica_idx=replica_rank,
+                    status_endpoint=status_endpoint,
+                    ps_manager_handle=None,
+                )
+                replica = RewardModelReplica(
+                    replica_rank=replica_rank,
+                    local_replica_rank=local_replica_rank,
+                    psrl_config=self.config.psrl,
+                    config=self.rollout_config,
+                    model_config=self.hf_model_config,
+                    gen_interface=gen_interface,
+                    reward_model_name=self.reward_model_name,
+                    gpus_per_node=self.reward_model_config.rollout_ngpus_per_instance_per_node,
+                )
+                init_tasks.append(replica.init_model(wg))
+                self.replicas.append(replica)
+                replica_rank += 1
         self._run_all(init_tasks)
+        if self.config.psrl.deployment.elastic.enable:
+            ray.get([replica.servers[0].sleep.remote(level=2) for replica in self.replicas])
 
     def _register_reward_servers(self, replicas: list[RewardModelReplica]):
-        reg_futures = [replica.servers[0].register_server_to_gateway.remote(self.gateway_url) for replica in replicas]
+        reg_futures = [
+            replica.servers[0].register_server_to_gateway.remote(
+                self.gateway_url,
+                model_id=self.reward_model_name,
+            )
+            for replica in replicas
+        ]
         worker_ids: list[str] = ray.get(reg_futures)
+        for replica, worker_id in zip(replicas, worker_ids, strict=True):
+            replica.gateway_replica_id = worker_id
 
         coord_futures = [
             self.reward_model_coordinator.add_worker.remote(
@@ -114,7 +140,7 @@ class RewardModelManager:
         return self.gateway_url
 
     def get_reward_model_tokenizer(self):
-        """Return the reward model tokenizer (for prompt construction in GenRewardManager)."""
+        """Return the reward model tokenizer (for prompt construction in GenRewardLoop)."""
         return self.reward_model_tokenizer
 
     def _run_all(self, tasks: list[asyncio.Task]):

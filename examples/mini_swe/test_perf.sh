@@ -150,7 +150,7 @@ rollout_is_threshold=2.0
 use_dynamic_bsz=True
 offload=True
 
-PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config --config-name='ppo_megatron_trainer' \
+PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path="${PSRL_PATH}/psrl/trainer/config" --config-name='ppo_megatron_trainer' \
     psrl.ps_manager_ip=${LOCAL_IP} \
     psrl.rollout_n=${n_resp_per_prompt} \
     psrl.staleness=${staleness} \
@@ -268,11 +268,11 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config --conf
     reward.managers.dapo.reward_fn.0.name=compute_score \
     +reward.managers.dapo.reward_fn.0.reward_kwargs.reward_mode=${reward_mode} \
     \
-    data.train_files="$train_files" \
+    +data.train_files="$train_files" \
     data.reward_model_dicts.0.reward_loop_type=dapo \
     data.reward_model_dicts.0.reward_fn=compute_score \
-    data.val_files="$test_files" \
-    data.prompt_key=prompt \
+    +data.val_files="$test_files" \
+    +data.prompt_key=prompt \
     data.truncation='error' \
     data.max_prompt_length=${max_prompt_length} \
     data.max_response_length=${max_response_length} \

@@ -69,7 +69,7 @@ val_top_k=-1
 val_do_sample=False
 
 
-python3 -m psrl.trainer.main_ppo --config-path=./config \
+python3 -m psrl.trainer.main_ppo --config-path="${PSRL_PATH}/psrl/trainer/config" \
     --config-name='ppo_megatron_trainer' \
     psrl.ps_manager_ip=${LOCAL_IP} \
     psrl.rollout_n=${rollout_N} \
@@ -91,8 +91,8 @@ python3 -m psrl.trainer.main_ppo --config-path=./config \
     psrl.group_post_process.name=dynamic_sampling_filter \
     \
     algorithm.adv_estimator=gae \
-    data.train_files="$train_files" \
-    data.val_files="$test_files" \
+    +data.train_files="$train_files" \
+    +data.val_files="$test_files" \
     data.train_batch_size=$train_batch_size \
     data.max_prompt_length=${max_prompt_length} \
     data.max_response_length=${max_response_length} \

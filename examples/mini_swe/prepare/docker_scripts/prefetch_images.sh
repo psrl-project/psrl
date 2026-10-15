@@ -53,7 +53,7 @@ if [[ "$SOURCES" -ne 1 ]]; then
 fi
 
 # Load proxy settings when the shared environment exists.
-source "${PSRL_WORKSPACE:-$HOME}/env/psrl.sh" 2>/dev/null || true
+source "${PSRL_WORKSPACE:-$HOME}/env/env_311.sh" 2>/dev/null || true
 
 # Prefer `skopeo` because it supports user space proxying.
 if [[ -z "$METHOD" ]]; then

@@ -1,9 +1,14 @@
 import asyncio
 import math
 import os
+import subprocess
+import sys
 import time
+from pathlib import Path
+from uuid import uuid4
 
 import hydra
+import pytest
 import ray
 import torch
 import torch.distributed as dist
@@ -20,12 +25,12 @@ from psrl.utils.nixl import (
     NIXLMetaServer,
     NIXLStorageClient,
 )
-from psrl.workers.ps import (
+from psrl.utils.nixl.port_scanner import create_port_scanners
+from psrl.workers.ps.ps_storage_worker import PSStoragePlan, PSStorageWorker
+from psrl.workers.ps.ps_worker_group import (
     PSClassWithInitArgs,
     PSResourcePool,
     PSResourceSpec,
-    PSStoragePlan,
-    PSStorageWorker,
     PSWorkerGroup,
 )
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
@@ -33,7 +38,6 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.api import ShardingStrategy
 from transformers import AutoConfig, AutoModelForCausalLM
-from verl.models.mcore import hf_to_mcore_config
 from verl.utils.fs import copy_to_local
 from verl.utils.torch_dtypes import PrecisionType
 from verl.workers.engine.megatron.utils import set_random_seed
@@ -324,46 +328,31 @@ class TrainClientActor:
         dtype = PrecisionType.to_dtype(self.train_dtype)
         self.print(f"[Rank {self.rank}] Config loaded: {hf_config.model_type}")
 
-        use_mbridge = True
-
-        if use_mbridge:
-            from megatron.bridge import AutoBridge
-
-            bridge = AutoBridge.from_hf_config(hf_config)
-            provider = bridge.to_megatron_provider(load_weights=False)
-            virtual_pipeline_model_parallel_size = self.megatron_config.get("virtual_pipeline_model_parallel_size", 1)
-            if virtual_pipeline_model_parallel_size == 1:
-                virtual_pipeline_model_parallel_size = None
-            provider_overrides = {
-                "tensor_model_parallel_size": self.megatron_config.get("tensor_model_parallel_size", 4),
-                "pipeline_model_parallel_size": self.megatron_config.get("pipeline_model_parallel_size", 2),
-                "expert_model_parallel_size": self.megatron_config.get("expert_model_parallel_size", 1),
-                "expert_tensor_parallel_size": self.megatron_config.get("expert_tensor_parallel_size", 1),
-                "virtual_pipeline_model_parallel_size": virtual_pipeline_model_parallel_size,
-                "context_parallel_size": self.megatron_config.get("context_parallel_size", 1),
-                "sequence_parallel": self.megatron_config.get("sequence_parallel", False),
-            }
-            provider.apply_overrides_and_finalize(
-                dtype=dtype,
-                overrides=provider_overrides,
-            )
-            tf_config = None
-        else:
-            tf_config = hf_to_mcore_config(hf_config, dtype)
-
+        from megatron.bridge import AutoBridge
         from verl.utils.megatron_utils import McoreModuleWrapperConfig, make_megatron_module
 
-        wrap_config = McoreModuleWrapperConfig()
-        actor_module, updated_tf_config = make_megatron_module(
-            wrap_config,
-            tf_config,
+        bridge = AutoBridge.from_hf_config(hf_config)
+        provider = bridge.to_megatron_provider(load_weights=False)
+        virtual_pipeline_size = self.megatron_config.get("virtual_pipeline_model_parallel_size", 1)
+        provider.apply_overrides_and_finalize(
+            dtype=dtype,
+            overrides={
+                "tensor_model_parallel_size": self.megatron_config.tensor_model_parallel_size,
+                "pipeline_model_parallel_size": self.megatron_config.pipeline_model_parallel_size,
+                "expert_model_parallel_size": self.megatron_config.expert_model_parallel_size,
+                "expert_tensor_parallel_size": self.megatron_config.expert_tensor_parallel_size,
+                "virtual_pipeline_model_parallel_size": None if virtual_pipeline_size == 1 else virtual_pipeline_size,
+                "context_parallel_size": self.megatron_config.context_parallel_size,
+                "sequence_parallel": False,
+            },
+        )
+        self.model, _ = make_megatron_module(
+            McoreModuleWrapperConfig(),
+            None,
             hf_config,
-            bridge=bridge if use_mbridge else None,
+            bridge=bridge,
             provider=provider,
         )
-        if use_mbridge:
-            tf_config = updated_tf_config
-        self.model = actor_module
 
         for name, param in self.model[0].named_parameters():
             param.data.fill_(1)
@@ -681,15 +670,19 @@ def create_ps_worker_group(train_engine_type, num_ps, psrl_config, model_config)
     return ps_wg
 
 
-@hydra.main(config_path="config", config_name="nixl_e2e", version_base=None)
-def test_nixl_e2e(cfg: DictConfig):
+def _run_nixl_e2e(cfg: DictConfig):
     validate_parallel_config(cfg)
     log_dir = cfg.logging.path
     os.makedirs(log_dir, exist_ok=True)
     ray.init(
+        address=cfg.network.ray_address,
+        namespace=cfg.network.ray_namespace,
         ignore_reinit_error=True,
         runtime_env={"env_vars": {"PSRL_LOGGING_PATH": log_dir}},
     )
+    if cfg.network.listen_ip is None:
+        node_id = ray.get_runtime_context().get_node_id()
+        cfg.network.listen_ip = next(node["NodeManagerAddress"] for node in ray.nodes() if node["NodeID"] == node_id)
     listen_ip = cfg.network.listen_ip
     print(f"meta server listen_ip: {listen_ip}")
     server_name = NIXL_META_SERVER_NAME
@@ -736,9 +729,11 @@ def test_nixl_e2e(cfg: DictConfig):
     global_store = GlobalStore.remote()
 
     start_time = time.time()
-    ip_to_node_id = {node["NodeManagerAddress"]: node["NodeID"] for node in ray.nodes()}
+    ip_to_node_id = {node["NodeManagerAddress"]: node["NodeID"] for node in ray.nodes() if node["Alive"]}
 
     # Create per-node PortScanner actors (required by NIXLStorageClient).
+    port_scanners = create_port_scanners(ip_to_node_id)
+    ray.get([scanner.find_free_port.remote() for scanner in port_scanners.values()])
     assert listen_ip in ip_to_node_id, f"listen_ip is absent from Ray nodes: {listen_ip!r}."
     server = MetaServerActor.options(
         scheduling_strategy=NodeAffinitySchedulingStrategy(node_id=ip_to_node_id[listen_ip], soft=False)
@@ -884,8 +879,45 @@ def test_nixl_e2e(cfg: DictConfig):
         ray.get(g.shutdown.remote())
     ray.get(ps_wg.execute_all_async("shutdown"))
     ray.get(server.shutdown.remote())
+    for scanner in port_scanners.values():
+        ray.kill(scanner)
     ray.shutdown()
 
 
+@pytest.mark.gpu
+@pytest.mark.integration
+@pytest.mark.parametrize("train_engine_type", ["fsdp", "megatron"])
+def test_nixl_e2e(ray_cluster, gpu_model_path, gpu_tensor_parallel_size, tmp_path, train_engine_type):
+    from psrl.utils.common.http_utils import find_available_port
+
+    size = gpu_tensor_parallel_size
+    if ray.cluster_resources().get("GPU", 0) < size * 2:
+        pytest.fail("NIXL integration requires separate training and generation GPUs.")
+    node_id = ray.get_runtime_context().get_node_id()
+    listen_ip = next(node["NodeManagerAddress"] for node in ray.nodes() if node["NodeID"] == node_id)
+    server_port = find_available_port(24000)
+    train_port = find_available_port(server_port + 1)
+    gen_port = find_available_port(train_port + 1)
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        f"model.path={gpu_model_path}",
+        f"logging.path={tmp_path}",
+        f"network.ray_address={ray.get_runtime_context().gcs_address}",
+        f"network.ray_namespace=psrl-nixl-{uuid4().hex}",
+        f"network.listen_ip={listen_ip}",
+        f"network.listen_port={server_port}",
+        f"network.torch_port_train={train_port}",
+        f"network.torch_port_gen={gen_port}",
+        f"test.num_train={size}",
+        f"test.num_gen={size}",
+        f"test.train_engine_type={train_engine_type}",
+        f"test.megatron.tensor_model_parallel_size={size}",
+        f"test.gen.tensor_parallel_size={size}",
+    ]
+    result = subprocess.run(command, capture_output=True, text=True, timeout=900)
+    assert result.returncode == 0, f"NIXL model transfer failed. {result.stdout} {result.stderr}"
+
+
 if __name__ == "__main__":
-    test_nixl_e2e()
+    hydra.main(config_path="config", config_name="nixl_e2e", version_base=None)(_run_nixl_e2e)()

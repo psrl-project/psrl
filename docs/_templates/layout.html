@@ -1,5 +1,0 @@
-{% extends "!layout.html" %}
-
-{% block htmltitle %}
-  <title>{% if title and title != docstitle %}{{ title|striptags|e }} | {% endif %}{{ docstitle|striptags|e }}</title>
-{% endblock htmltitle %}

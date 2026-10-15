@@ -15,9 +15,11 @@ from verl.utils import hf_tokenizer
 from verl.utils import tensordict_utils as tu
 from verl.utils.fs import copy_to_local
 
+from psrl.utils.dataset.utils import normalize_reward_model_dicts
 from psrl.utils.logger import DualOutputHandler
-from psrl.workers.reward.reward_loop import load_reward_manager
-from psrl.workers.reward.reward_loop.base import RewardManagerBase
+from psrl.workers.reward.client import RewardManagerClient
+from psrl.workers.reward.reward_loop import load_reward_loop
+from psrl.workers.reward.reward_loop.base import RewardLoopBase
 from psrl.workers.reward.utils import ensure_reward_attention_mask
 
 psrl_logger = logging.getLogger(__name__)
@@ -59,6 +61,8 @@ class RewardLoopWorker:
         reward_model_runtime_infos: dict[str, Any] | None = None,
         worker_id: int = 0,
         worker_num: int = 1,
+        *,
+        is_validate: bool,
     ):
         self.config = config
         self.tokenizer = tokenizer
@@ -67,14 +71,17 @@ class RewardLoopWorker:
         self.reward_model_to_manager = reward_model_runtime_infos or {}
         self.worker_id = worker_id
         self.worker_num = worker_num
+        self.is_validate = is_validate
 
         tq.init()
 
-        worker_cfg = self.config.reward.reward_loop_worker
+        worker_cfg = (
+            self.config.reward.validation_reward_loop_worker if is_validate else self.config.reward.reward_loop_worker
+        )
         self.max_concurrency = worker_cfg.max_concurrency_per_worker
         self.queue_size = worker_cfg.queue_size_per_worker
 
-        self.reward_manager_handle = None
+        self.reward_manager_client: RewardManagerClient | None = None
         self.pending_reward_queue = deque()
         self.reward_tasks: set[asyncio.Task] = set()
         self.request_key_to_task: dict[str, asyncio.Task] = {}
@@ -88,18 +95,21 @@ class RewardLoopWorker:
         self.completed = 0
         self.failed = 0
 
-        self.reward_spec_to_manager: dict[RewardSpec, RewardManagerBase] = {}
+        self.reward_spec_to_manager: dict[RewardSpec, RewardLoopBase] = {}
         self._init_reward_fn()
 
-        self.log_prefix = f"RewardLoopWorker_I{worker_id}"
+        pool_name = "ValidationRewardLoopWorker" if is_validate else "RewardLoopWorker"
+        self.log_prefix = f"{pool_name}_I{worker_id}"
         handler = DualOutputHandler(self.config.psrl.logging_path, self.log_prefix)
         logging.getLogger("psrl").addHandler(handler)
         psrl_logger.addHandler(handler)
 
     def set_reward_manager(self, reward_manager_handle: ray.actor.ActorHandle):
-        self.reward_manager_handle = reward_manager_handle
+        self.reward_manager_client = RewardManagerClient(reward_manager_handle, self.max_concurrency)
 
     async def add_reward_requests(self, requests: list[TensorDict]):
+        if any(bool(tu.get(request, "validate", False)) != self.is_validate for request in requests):
+            raise ValueError("Reward request does not belong to this worker's pool.")
         while len(self.pending_reward_queue) + len(requests) > self.queue_size and not self.stop_busy_loop_task:
             await asyncio.sleep(0.001)
         for request in requests:
@@ -220,8 +230,8 @@ class RewardLoopWorker:
             "worker_id": self.worker_id,
         }
 
-        if self.reward_manager_handle is not None:
-            self.reward_manager_handle.put_reward_result.remote(reward_result)
+        if self.reward_manager_client is not None:
+            await self.reward_manager_client.put_reward_result(reward_result)
 
     def _init_reward_fn(self):
         input_tokenizer_local_path = copy_to_local(self.config.train_actor_rollout_ref.model.path)
@@ -244,16 +254,16 @@ class RewardLoopWorker:
                 if reward_spec in self.reward_spec_to_manager:
                     continue
 
-                if reward_manager_type == "gen" and (
+                if reward_manager_type in ("gen", "opd") and (
                     reward_model_name is None or reward_model_name not in self.reward_model_to_manager
                 ):
                     raise ValueError(f"Reward model runtime info for {reward_model_name} not found")
 
                 reward_model_manager = self.reward_model_to_manager.get(reward_model_name, None)
-                reward_manager = load_reward_manager(
+                reward_manager = load_reward_loop(
                     self.config,
                     self.input_tokenizer,
-                    reward_manager_cfg=reward_manager_cfg,
+                    reward_loop_cfg=reward_manager_cfg,
                     reward_fn_config=reward_fn_config,
                     reward_model_manager=reward_model_manager,
                     **reward_kwargs,
@@ -262,9 +272,9 @@ class RewardLoopWorker:
 
     def _resolve_reward_manager(
         self, reward_model_dicts: list[dict]
-    ) -> tuple[list[str], list[RewardManagerBase], list[float]]:
+    ) -> tuple[list[str], list[RewardLoopBase], list[float]]:
         reward_spec_keys, reward_managers, coefs = [], [], []
-        for reward_model_dict in reward_model_dicts:
+        for reward_model_dict in normalize_reward_model_dicts(reward_model_dicts):
             raw_reward_fn = reward_model_dict.get("reward_fn", "default")
             if isinstance(raw_reward_fn, (list, ListConfig)) and len(raw_reward_fn) > 0:
                 reward_fn_name = (
@@ -306,6 +316,9 @@ class RewardLoopWorker:
                         candidates = [all_managers[0]]
                 if candidates:
                     reward_spec, manager = candidates[0]
+
+            if manager is None:
+                raise ValueError(f"No reward manager registered for spec {reward_spec.key()!r}.")
 
             reward_spec_keys.append(reward_spec.key())
             reward_managers.append(manager)

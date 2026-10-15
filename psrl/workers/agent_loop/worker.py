@@ -34,9 +34,15 @@ from psrl.utils.common.http_utils import configure_distributed_post, init_http_c
 from psrl.utils.logger import DualOutputHandler, EventType, log_dual_events
 from psrl.utils.rollout.rollout_trace import RolloutTraceConfig, rollout_trace_attr
 from psrl.workers.agent_loop.context import AgentLoopContext
-from psrl.workers.agent_loop.loops.utils import AGENT_LOOP_REGISTRY, DictConfigWrap, TerminateReason
+from psrl.workers.agent_loop.loops.utils import (
+    AGENT_LOOP_REGISTRY,
+    DictConfigWrap,
+    TerminateReason,
+    get_agent_loop_config,
+)
 from psrl.workers.gen.utils import TokenOutput
 from psrl.workers.ps.request_status_tracker import PSRL_RequestStatus
+from psrl.workers.reward.client import RewardManagerClient, RewardSubmissionClient, reward_producer_concurrency
 
 psrl_logger = logging.getLogger(__file__)
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
@@ -110,6 +116,16 @@ class PSRL_AgentLoopWorker:
         self.ps_manager_handle = ps_manager_handle
         self.agent_loop_manager = None
         self.reward_manager = None
+        self.reward_rpc_capacity = reward_producer_concurrency(
+            config.reward.reward_loop_worker,
+            producer_count=worker_num,
+            producer_index=worker_id,
+        )
+        self.validation_reward_rpc_capacity = reward_producer_concurrency(
+            config.reward.validation_reward_loop_worker,
+            producer_count=worker_num,
+            producer_index=worker_id,
+        )
 
         n_rollout_instances = self.config.psrl.deployment.n_rollout_instances
         n_validate_instances = (
@@ -145,6 +161,8 @@ class PSRL_AgentLoopWorker:
             agent_loop_configs = OmegaConf.load(agent_loop_config_path)
             for agent_loop_config in agent_loop_configs:
                 AGENT_LOOP_REGISTRY[agent_loop_config.name] = agent_loop_config
+        # Fail at worker start if the default loop is neither built-in nor listed in YAML.
+        get_agent_loop_config(config.gen_actor_rollout_ref.rollout.agent.default_agent_loop)
         custom_template_value = config.gen_actor_rollout_ref.model.get("custom_chat_template", None)
         resolved_template = resolve_chat_template_value(custom_template_value)
         if resolved_template is not None:
@@ -200,13 +218,18 @@ class PSRL_AgentLoopWorker:
         """
         self.agent_loop_manager = agent_loop_manager
 
-    def set_reward_manager(self, reward_manager: ray.actor.ActorHandle):
-        """Set the reward manager handle for sending processed data.
-
-        Args:
-            reward_manager: Handle to the reward manager actor.
+    def set_reward_managers(
+        self,
+        reward_manager: ray.actor.ActorHandle,
+        validation_reward_manager: ray.actor.ActorHandle,
+    ):
         """
-        self.reward_manager = reward_manager
+        Install reward clients with separate capacity for training and validation.
+        """
+        self.reward_manager = RewardSubmissionClient(
+            training=RewardManagerClient(reward_manager, self.reward_rpc_capacity),
+            validation=RewardManagerClient(validation_reward_manager, self.validation_reward_rpc_capacity),
+        )
 
     def set_distributed_post_actors(
         self,
@@ -359,10 +382,7 @@ class PSRL_AgentLoopWorker:
             name=agent_name,
             validate=validate,
         ):
-            assert agent_name in AGENT_LOOP_REGISTRY, (
-                f"Unregistered agent loop: name={agent_name!r}, available={AGENT_LOOP_REGISTRY.keys()!r}."
-            )
-            agent_loop_config = AGENT_LOOP_REGISTRY[agent_name]
+            agent_loop_config = get_agent_loop_config(agent_name)
 
             context = AgentLoopContext(
                 config=self.config,

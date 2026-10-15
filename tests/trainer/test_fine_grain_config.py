@@ -114,3 +114,33 @@ class TestResolveChunkSize:
         )
         with pytest.raises(ValueError, match="dynamic_bsz"):
             resolve_fine_grain_chunk_size(cfg, dp_size=4)
+
+
+class TestFineGrainElastic:
+    def test_mini_batch_with_elastic_raises(self):
+        from psrl.utils.config import validate_fine_grain_elastic
+
+        cfg, _ = _make_config(granularity="mini_batch")
+        cfg.psrl.deployment = {
+            "elastic": {"enable": True},
+        }
+        with pytest.raises(ValueError, match="elastic.enable"):
+            validate_fine_grain_elastic(cfg)
+
+    def test_none_granularity_allows_elastic(self):
+        from psrl.utils.config import validate_fine_grain_elastic
+
+        cfg, _ = _make_config(granularity="none")
+        cfg.psrl.deployment = {
+            "elastic": {"enable": True},
+        }
+        validate_fine_grain_elastic(cfg)
+
+    def test_mini_batch_without_elastic_is_allowed(self):
+        from psrl.utils.config import validate_fine_grain_elastic
+
+        cfg, _ = _make_config(granularity="mini_batch")
+        cfg.psrl.deployment = {
+            "elastic": {"enable": False},
+        }
+        validate_fine_grain_elastic(cfg)

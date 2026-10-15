@@ -5,5 +5,12 @@
         "other_latency_k": 0.0002446,
         "attn_latency_b": 2e-10,
         "attn_latency_k": 6.3e-08
+    },
+    "TP4_PP1": {
+        "other_threshold": 0.0074048,
+        "other_latency_b": 0.0063326,
+        "other_latency_k": 0.0000896,
+        "attn_latency_b": 0.0010925822,
+        "attn_latency_k": 4.25e-08
     }
 }

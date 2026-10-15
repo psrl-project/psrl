@@ -5,8 +5,8 @@ from dataclasses import dataclass, field
 
 from verl.base_config import BaseConfig
 from verl.utils.profiler import ProfilerConfig
-from verl.workers.config.model import HFModelConfig
 
+from .model import HFModelConfig
 from .rollout import PoolingConfig, RolloutConfig, SamplingConfig, ServerConfig
 
 __all__ = [
@@ -76,6 +76,9 @@ class RewardModelConfig(BaseConfig):
     nnodes: int = 0
     reward_manager: str = "naive"
     launch_reward_fn_async: bool = False
+    # Optional cap for concurrently occupied requests per RM instance.
+    # None means unlimited (backward-compatible behavior).
+    max_concurrent_requests_per_instance: int | None = None
 
     dtype: str = "bfloat16"
     gpu_memory_utilization: float = 0.5
@@ -130,13 +133,16 @@ class SingleRewardModelConfig(BaseConfig):
     sampling_config: SamplingConfig = field(default_factory=SamplingConfig)
     pooling_config: PoolingConfig = field(default_factory=PoolingConfig)
     sandbox_fusion: SandboxFusionConfig = field(default_factory=SandboxFusionConfig)
+    reward_loop_kwargs: dict = field(default_factory=dict)
+    # Optional cap for concurrently occupied requests per RM instance.
+    # None means unlimited (backward-compatible behavior).
+    max_concurrent_requests_per_instance: int | None = None
 
 
 @dataclass
 class RewardLoopWorkerConfig(BaseConfig):
-    """Configuration for reward loop worker pool."""
+    """Configuration for the reward loop worker pool."""
 
-    enable: bool = True
     num_workers: int = 8
     max_concurrency_per_worker: int = 256
     queue_size_per_worker: int = 4096
@@ -151,15 +157,21 @@ class MultiRewardModelConfig(BaseConfig):
 
     Args:
         launch_reward_fn_async (bool): Whether to launch reward function asynchronously.
+        # reward_models (list[SingleRewardModelConfig]): List of reward model configurations.
         active_managers (list[str]): Ordered list of manager names to activate.
         managers (dict[str, SingleRewardModelConfig]): Named reward manager definitions.
         profiler (ProfilerConfig): Profiler configuration.
     """
 
     launch_reward_fn_async: bool = False
+    # reward_models: list[SingleRewardModelConfig] = field(default_factory=list)
+    # profiler: ProfilerConfig = field(default_factory=ProfilerConfig)
     active_managers: list[str] = field(default_factory=list)
     managers: dict[str, SingleRewardModelConfig] = field(default_factory=dict)
     reward_loop_worker: RewardLoopWorkerConfig = field(default_factory=RewardLoopWorkerConfig)
+    validation_reward_loop_worker: RewardLoopWorkerConfig = field(
+        default_factory=lambda: RewardLoopWorkerConfig(num_workers=2)
+    )
     profiler: ProfilerConfig = field(default_factory=ProfilerConfig)
 
 

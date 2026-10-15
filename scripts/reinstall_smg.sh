@@ -11,6 +11,8 @@ if [[ ! -f "${SMG_DIR}/Cargo.toml" ]]; then
     exit 1
 fi
 
+SMG_DIR="${SMG_DIR}" bash "${SCRIPT_DIR}/apply_smg_patch.sh"
+
 python -m uv pip uninstall -y smg smg-grpc-proto smg-grpc-servicer psrl-state-grpc-proto
 
 # Match the protobuf 7 runtime before no-build-isolation generates SMG stubs.
@@ -28,5 +30,5 @@ python -m uv pip install --no-cache-dir "grpcio-tools>=1.81.1" "protobuf>=7.35.1
     python -m uv pip install --no-cache-dir "protobuf>=7.35.1,<8"
 
     cd -- bindings/python
-    maturin develop --features vendored-openssl
+    maturin develop --features vendored-openssl --release
 )

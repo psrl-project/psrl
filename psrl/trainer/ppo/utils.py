@@ -1,5 +1,7 @@
 import enum
 import json
+import logging
+import os
 from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import Enum
@@ -12,10 +14,16 @@ from omegaconf import DictConfig
 from verl import DataProto
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, register
-from verl.single_controller.ray import RayResourcePool
+from verl.single_controller.ray import RayResourcePool, SubRayResourcePool
 from verl.trainer.config import AlgoConfig
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import AdvantageEstimator
+
+from psrl.utils.reward_token_metrics import extract_reward_model_token_counts
+from psrl.workers.elastic.pool_layout import ReplicaPlacement
+
+psrl_logger = logging.getLogger(__file__)
+psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
 
 # from verl.trainer.ppo.ray_trainer import compute_response_mask
 
@@ -57,10 +65,7 @@ def _compute_termination_metrics(
         metrics[f"termination/{reason}/fraction"] = len(reason_scores) / total
         metrics[f"termination/{reason}/score_mean"] = float(np.mean(reason_scores))
 
-    # The share of the batch that reaches the optimiser. Overlong filtering removes the
-    # truncated episodes, so a collapse here means the batch is nearly all truncation
-    # and the step is learning from very little. `token-mean` divides by exactly this
-    # token count, so it also says how much the surviving tokens are being scaled up.
+    # Track surviving response tokens because `token-mean` normalization uses this count after overlong filtering.
     metrics["termination/trained_tokens"] = float(np.sum(trained_tokens))
     metrics["termination/masked_sample_fraction"] = sum(1 for t in trained_tokens if t == 0) / total
 
@@ -114,27 +119,66 @@ class ResourcePoolManager:
     mapping: dict[PSRL_Role, list[str]]
     resource_num_per_bundle: dict[str, int] = field(default_factory=dict)
     resource_pool_dict: dict[str, RayResourcePool] = field(default_factory=dict)
+    elastic_replica_placements: dict[str, ReplicaPlacement] = field(default_factory=dict)
 
-    def create_resource_pool(self):
+    def create_resource_pool(self, device_name: str = "cuda"):
         """Create Ray resource pools for distributed training.
 
         Initializes resource pools based on the resource pool specification,
         with each pool managing GPU resources across multiple nodes.
-        For FSDP backend, uses max_colocate_count=1 to merge WorkerGroups.
+        For FSDP backend, uses max_colocate_count=4 so three colocated roles
+        plus one spare CPU for WorkerGroup init helpers can share a bundle.
         For Megatron backend, uses max_colocate_count>1 for different models.
+        Elastic replica tags in `mapping` are sliced from parent pools after
+        the physical placement groups exist.
         """
         for resource_pool_name, process_on_nodes in self.resource_pool_spec.items():
             # PSRL assigns one worker group to each resource pool.
             resource_pool = RayResourcePool(
                 process_on_nodes=process_on_nodes,
                 use_gpu=True,
-                max_colocate_count=1,
+                max_colocate_count=4,
                 name_prefix=resource_pool_name,
                 resource_num_per_bundle=self.resource_num_per_bundle.get(resource_pool_name, 1),
             )
             self.resource_pool_dict[resource_pool_name] = resource_pool
 
         self._check_resource_available()
+        self._create_elastic_replica_pools(device_name=device_name)
+
+    def _create_elastic_replica_pools(self, device_name: str) -> None:
+        """Slice parent elastic pools into per-replica `SubRayResourcePool` objects."""
+        if not self.elastic_replica_placements:
+            return
+
+        parent_ids = {placement.pool_id for placement in self.elastic_replica_placements.values()}
+        for pool_id in parent_ids:
+            parent = self.resource_pool_dict[pool_id]
+            parent.get_placement_groups(strategy="STRICT_PACK", device_name=device_name)
+
+        for tag, placement in self.elastic_replica_placements.items():
+            if tag in self.resource_pool_spec:
+                raise ValueError(f"Elastic replica tag {tag!r} collides with a physical resource pool name.")
+            parent = self.resource_pool_dict[placement.pool_id]
+            self.resource_pool_dict[tag] = SubRayResourcePool(
+                process_on_nodes=parent.store,
+                use_gpu=parent.use_gpu,
+                name_prefix=f"{parent.name_prefix}_{tag}",
+                max_colocate_count=parent.max_colocate_count,
+                detached=parent.detached,
+                accelerator_type=parent.accelerator_type,
+                resource_num_per_bundle=parent.resource_num_per_bundle,
+                placement_groups=parent.pgs,
+                start_bundle_index=placement.start_bundle_index,
+                subgroup_world_size=placement.world_size,
+            )
+            psrl_logger.info(
+                "Elastic replica placement: tag=%r, pool=%r, start_bundle_index=%s, world_size=%s.",
+                tag,
+                placement.pool_id,
+                placement.start_bundle_index,
+                placement.world_size,
+            )
 
     def get_resource_pool(self, role: PSRL_Role, replica_idx: int = 0) -> RayResourcePool:
         """Get the resource pool of the worker_cls for the given replica_idx."""
@@ -229,14 +273,18 @@ def PSRL_compute_advantage(
                 config.pf_ppo.weight_pow,
             )
     elif adv_estimator == AdvantageEstimator.GRPO:
-        assert "parent_id" in data.non_tensor_batch, "parent_id is required for GRPO"
+        if "parent_id" in data.non_tensor_batch:
+            index = data.non_tensor_batch["parent_id"]
+        else:
+            assert "uid" in data.non_tensor_batch, "Either parent_id or uid is required for GRPO"
+            index = data.non_tensor_batch["uid"]
         # Initialize the mask for GRPO calculation
         grpo_calculation_mask = data.batch["response_mask"]
         # Call compute_grpo_outcome_advantage with parameters matching its definition
         advantages, returns = core_algos.compute_grpo_outcome_advantage(
             token_level_rewards=data.batch["token_level_rewards"],
             response_mask=grpo_calculation_mask,
-            index=data.non_tensor_batch["parent_id"],
+            index=index,
             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
         )
         data.batch["advantages"] = advantages
@@ -393,21 +441,49 @@ def _stats_to_timestamps(stats) -> dict | None:
     }
 
 
-def extract_gen_rm_token_num(extra_info: dict) -> int:
-    rm_generated_token_num = 0
-    stack = [extra_info]
-    while stack:
-        current_info = stack.pop()
-        for key, value in current_info.items():
-            if key == "rm_output_len" and isinstance(value, (int, float, np.integer, np.floating)):
-                rm_generated_token_num += int(value)
-            elif isinstance(value, dict):
-                stack.append(value)
-            elif isinstance(value, list):
-                for item in value:
-                    if isinstance(item, dict):
-                        stack.append(item)
-    return rm_generated_token_num
+def compute_rm_token_metrics(
+    reward_extra_infos,
+    global_token_num,
+    timing_raw: dict[str, float],
+    n_gpus: int,
+) -> dict[str, float]:
+    """
+    Combine policy tokens with reward-model tokens for one training batch.
+
+    `rm_input_length` and `rm_output_length` sum every nested `rm_input_len` and
+    `rm_output_len` in per-sample `reward_extra_info`. `overall_token_num` is
+    `sum(global_token_num)` plus those two totals. `perf/overall_throughput` uses
+    the same GPU-normalized formula as `perf/throughput`.
+
+    Args:
+        reward_extra_infos (list): Per-sample `reward_extra_info` payloads.
+        global_token_num (list): Per-sample policy prompt plus response token counts.
+        timing_raw (dict[str, float]): Stage timings. Must contain `step`.
+        n_gpus (int): GPU count used to normalize throughput.
+
+    Returns:
+        dict[str, float]: `rm_input_length`, `rm_output_length`, `overall_token_num`,
+            and `perf/overall_throughput`.
+    """
+    extra_infos = list(reward_extra_infos)
+    policy_tokens = [int(token_num) for token_num in global_token_num]
+    assert len(extra_infos) == len(policy_tokens), (
+        f"Reward extra info count {len(extra_infos)!r} does not match global_token_num count {len(policy_tokens)!r}."
+    )
+    rm_input_length = 0
+    rm_output_length = 0
+    for extra_info in extra_infos:
+        input_tokens, output_tokens = extract_reward_model_token_counts(extra_info)
+        rm_input_length += input_tokens
+        rm_output_length += output_tokens
+    overall_token_num = float(sum(policy_tokens) + rm_input_length + rm_output_length)
+    step_time = timing_raw["step"]
+    return {
+        "rm_input_length": float(rm_input_length),
+        "rm_output_length": float(rm_output_length),
+        "overall_token_num": overall_token_num,
+        "perf/overall_throughput": overall_token_num / (step_time * n_gpus),
+    }
 
 
 def record_rollout_rm_metrics(data: DataProto, output_path: str | None = None) -> list[dict]:
@@ -461,7 +537,6 @@ def record_rollout_rm_metrics(data: DataProto, output_path: str | None = None) -
                 rec["reward_metrics"] = None
         else:
             rec["reward_metrics"] = None
-
         records.append(rec)
 
     if output_path:

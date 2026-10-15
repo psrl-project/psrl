@@ -45,7 +45,7 @@ VAL_NGPUS_PER_NODE_PER_INSTANCE=$(( ${VAL_TP} * ${VAL_PP} )) # Number of GPUs pe
 
 # Requires vLLM 0.11 or newer, Megatron-LM 0.13 or newer, and the `qwen3vl_cp` MBridge branch.
 
-PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config \
+PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path="${PSRL_PATH}/psrl/trainer/config" \
     --config-name='ppo_megatron_trainer' \
     psrl.ps_manager_ip=${LOCAL_IP} \
     psrl.reward_service_ip=${LOCAL_IP} \
@@ -68,15 +68,14 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config \
     psrl.group_post_process.name=dynamic_sampling_filter \
     \
     algorithm.adv_estimator=grpo \
-    data.train_files="$TRAIN_FILE" \
-    data.val_files="$TEST_FILE" \
+    +data.train_files="$TRAIN_FILE" \
+    +data.val_files="$TEST_FILE" \
     data.train_batch_size=$train_batch_size \
     data.max_prompt_length=1024 \
     data.max_response_length=10240 \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
     \
-    train_actor_rollout_ref.model.path=$HF_MODEL_PATH \
     train_actor_rollout_ref.actor.optim.lr=1e-6 \
     train_actor_rollout_ref.actor.ppo_mini_batch_size=$train_batch_size \
     train_actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
@@ -116,7 +115,7 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config \
     train_actor_rollout_ref.rollout.gpu_memory_utilization=0.4 \
     train_actor_rollout_ref.rollout.max_num_batched_tokens=20480 \
     \
-    gen_actor_rollout_ref.model.path="$HF_MODEL_PATH" \
+    train_actor_rollout_ref.model.path="$HF_MODEL_PATH" \
     gen_actor_rollout_ref.rollout.name=vllm \
     gen_actor_rollout_ref.rollout.tensor_model_parallel_size=${GEN_TP} \
     gen_actor_rollout_ref.rollout.pipeline_model_parallel_size=${GEN_PP} \

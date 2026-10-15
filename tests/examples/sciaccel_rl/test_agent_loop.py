@@ -1,5 +1,9 @@
 """Tests for the SciAccelAgentLoop registration and basic contract."""
 
+import pytest
+
+pytestmark = pytest.mark.cpu_test
+
 
 class TestSciAccelAgentLoopRegistration:
     """Test the agent loop is properly registered."""

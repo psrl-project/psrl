@@ -8,7 +8,7 @@ from tensordict import TensorDict
 from verl.utils import tensordict_utils as tu
 
 from psrl.utils.reward_score import default_compute_score_async
-from psrl.workers.reward.reward_loop.base import RewardManagerBase
+from psrl.workers.reward.reward_loop.base import RewardLoopBase
 from psrl.workers.reward.reward_loop.registry import register
 
 
@@ -37,8 +37,8 @@ async def single_compute_score(
 
 
 @register("prime")
-class PrimeRewardManager(RewardManagerBase):
-    """Reward manager used by https://github.com/PRIME-RL/PRIME."""
+class PrimeRewardLoop(RewardLoopBase):
+    """Reward loop used by https://github.com/PRIME-RL/PRIME."""
 
     def __init__(
         self,
@@ -145,6 +145,7 @@ class PrimeRewardManager(RewardManagerBase):
             score = float(result[0]) if result else 0.0
 
         reward_extra_info["acc"] = score
+        reward_extra_info["score"] = score
         reward = score
 
         if data_source not in self.already_print_data_sources:

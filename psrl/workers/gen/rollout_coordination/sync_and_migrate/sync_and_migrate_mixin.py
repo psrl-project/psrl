@@ -9,6 +9,7 @@ import os
 from psrl.utils.logger import EventType, log_dual_events
 from psrl.utils.server.command import Command, CommandType
 from psrl.workers.gen.smg_adapter import (
+    WORKERS_PAUSE_PATH,
     WORKERS_UPDATE_WEIGHT_VERSION_PATH,
     build_pause_resume_payload,
     build_weight_version_updates,
@@ -23,7 +24,7 @@ class SyncAndMigrateMixin:
     """Sync/migrate helpers shared by greedy and status-based loops.
 
     Expects ``self`` to carry: ``instance_ids``, ``server_handles``,
-    ``instance_to_model_version``, ``instance_to_latest_stale_model_version``,
+    ``instance_to_model_version``,
     ``instance_to_version_after_sync``, ``model_sync_tasks``, ``replica_sync_tasks``,
     ``ps_model_version``, ``ps_manager``,
     ``config``, ``command_queue``, and the ``_gateway_post/get_json``,
@@ -48,7 +49,10 @@ class SyncAndMigrateMixin:
         pull_futures: list,
     ) -> None:
         try:
-            actual_versions = await asyncio.gather(*pull_futures)
+            actual_versions = await asyncio.gather(*pull_futures, return_exceptions=True)
+            failures = [version for version in actual_versions if isinstance(version, BaseException)]
+            if failures:
+                raise RuntimeError(f"Replica weight pulls failed: {failures!r}.") from failures[0]
             actual_updates = []
             for replica_id, actual_version in zip(replica_ids, actual_versions):
                 replica_instance_ids = [instance_id for instance_id in instance_ids if instance_id[0] == replica_id]
@@ -68,8 +72,15 @@ class SyncAndMigrateMixin:
                 *[self.server_handles[replica_id].fail_sync.remote() for replica_id in replica_ids],
                 return_exceptions=True,
             )
-            await self._gateway_post_json("/workers/pause", payload=build_pause_resume_payload(instance_ids))
+            await self._gateway_post_json(WORKERS_PAUSE_PATH, payload=build_pause_resume_payload(instance_ids))
             raise
+
+    async def _finish_reserved_sync(self, completion, operations) -> None:
+        """Release lifecycle reservations after every weight pull has settled."""
+        try:
+            await completion
+        finally:
+            await operations.aclose()
 
     async def _quarantine_failed_replicas(
         self,
@@ -80,8 +91,7 @@ class SyncAndMigrateMixin:
             *[self.server_handles[replica_id].fail_sync.remote() for replica_id in replica_ids],
             return_exceptions=True,
         )
-        await self._gateway_post_json("/workers/pause", payload=build_pause_resume_payload(instance_ids))
-        await self._set_routing_loop_running(True)
+        await self._gateway_post_json(WORKERS_PAUSE_PATH, payload=build_pause_resume_payload(instance_ids))
 
     async def _wait_for_replica_syncs(self, replica_ids: list[str]) -> None:
         pending = {
@@ -123,70 +133,83 @@ class SyncAndMigrateMixin:
         wait_interrupted_partial_requests_loop_back: bool = True,
     ):
         """
-        Synchronize with PS for the given instance IDs.
+        Synchronize awake replicas and leave sleeping replicas for their wake path.
         """
-        # Update stale-version tracking before statistics can race with synchronization.
-        with log_dual_events(
-            f"Synchronize rollout instances {instance_ids} with PS "
-            f"(model pull is {'non-blocking' if not wait_model_sync else 'blocking'} "
-            f"for the coordinator)",
-            psrl_logger,
-            level=logging.INFO,
-            event_type=EventType.OTHER,
-        ):
-            instance_ids = self._expand_replica_instance_ids(instance_ids)
-            replica_ids = sorted({instance_id[0] for instance_id in instance_ids})
-            sleeping = await asyncio.gather(
-                *[self.server_handles[replica_id].is_sleeping.remote() for replica_id in replica_ids]
-            )
-            replica_ids = [replica_id for replica_id, is_sleeping in zip(replica_ids, sleeping) if not is_sleeping]
-            instance_ids = [instance_id for instance_id in instance_ids if instance_id[0] in replica_ids]
-            if not replica_ids:
+        instance_ids = await self._get_awake_instance_ids(self._expand_replica_instance_ids(instance_ids))
+        if not instance_ids:
+            return
+        replica_ids = sorted({instance_id[0] for instance_id in instance_ids})
+        operations = await self._acquire_replica_operations(replica_ids)
+        transferred = False
+        quarantined = False
+        pull_futures = []
+        try:
+            # Recheck after acquiring lifecycle locks because a concurrent sleep may have completed.
+            instance_ids = await self._get_awake_instance_ids(instance_ids)
+            if not instance_ids:
                 return
-            await self._wait_for_replica_syncs(replica_ids)
-            for instance_id in instance_ids:
-                self.instance_to_latest_stale_model_version[instance_id] = self.instance_to_model_version.get(
-                    instance_id, 0
-                )
+            replica_ids = sorted({instance_id[0] for instance_id in instance_ids})
+            target_version = self.ps_model_version
+            with log_dual_events(
+                f"Synchronize rollout instances {instance_ids} with PS "
+                f"(model pull is {'non-blocking' if not wait_model_sync else 'blocking'} "
+                f"for the coordinator).",
+                psrl_logger,
+                level=logging.INFO,
+                event_type=EventType.OTHER,
+            ):
+                async with self.routing_operation_lock:
+                    try:
+                        await self._set_routing_loop_running(False)
+                        await asyncio.gather(
+                            *[self.server_handles[replica_id].pause_for_sync.remote() for replica_id in replica_ids]
+                        )
+                        if (
+                            wait_interrupted_partial_requests_loop_back
+                            and self.config.psrl.rollout_coordination.partial_rollout.enable
+                        ):
+                            await self._wait_interrupted_partial_requests_loop_back(instance_ids)
 
-            await self._set_routing_loop_running(False)
-            try:
-                await asyncio.gather(
-                    *[self.server_handles[replica_id].pause_for_sync.remote() for replica_id in replica_ids]
-                )
-                if (
-                    wait_interrupted_partial_requests_loop_back
-                    and self.config.psrl.rollout_coordination.partial_rollout.enable
-                ):
-                    await self._wait_interrupted_partial_requests_loop_back(instance_ids)
+                        pull_futures = [
+                            self.server_handles[replica_id].pull_model_for_sync.remote(target_version)
+                            for replica_id in replica_ids
+                        ]
+                        updates = build_weight_version_updates(instance_ids, target_version)
+                        await self._publish_weight_version_updates(updates)
+                        for instance_id in instance_ids:
+                            self.instance_to_version_after_sync[instance_id] = target_version
+                        psrl_logger.info(
+                            f"Published model version for routing: version={target_version}, replicas={replica_ids!r}."
+                        )
+                    except Exception:
+                        await asyncio.gather(*pull_futures, return_exceptions=True)
+                        await self._quarantine_failed_replicas(replica_ids, instance_ids)
+                        quarantined = True
+                        raise
+                    finally:
+                        await self._set_routing_loop_running(True)
 
-                pull_futures = [
-                    self.server_handles[replica_id].pull_model_for_sync.remote(self.ps_model_version)
-                    for replica_id in replica_ids
-                ]
-                updates = build_weight_version_updates(instance_ids, self.ps_model_version)
-                await self._publish_weight_version_updates(updates)
-                for instance_id in instance_ids:
-                    self.instance_to_version_after_sync[instance_id] = self.ps_model_version
-                await self._set_routing_loop_running(True)
-                psrl_logger.info(
-                    f"Published model version and resumed routing: version={self.ps_model_version}, "
-                    f"replicas={replica_ids!r}."
+                completion = self._finish_gateway_sync(
+                    replica_ids,
+                    instance_ids,
+                    target_version,
+                    pull_futures,
                 )
-            except Exception:
-                await self._quarantine_failed_replicas(replica_ids, instance_ids)
-                raise
-
-            completion = self._finish_gateway_sync(
-                replica_ids,
-                instance_ids,
-                self.ps_model_version,
-                pull_futures,
-            )
-            if wait_model_sync:
-                await completion
-            else:
-                self._track_model_sync_task(asyncio.create_task(completion), replica_ids)
+                completion = self._finish_reserved_sync(completion, operations)
+                transferred = True
+                if wait_model_sync:
+                    await completion
+                else:
+                    self._track_model_sync_task(asyncio.create_task(completion), replica_ids)
+        except BaseException:
+            if not transferred:
+                await asyncio.gather(*pull_futures, return_exceptions=True)
+                if pull_futures and not quarantined:
+                    await self._quarantine_failed_replicas(replica_ids, instance_ids)
+            raise
+        finally:
+            if not transferred:
+                await operations.aclose()
 
     async def check_no_activate_tasks(self, instance_id: RolloutInstanceId) -> bool:
         """
@@ -326,8 +349,9 @@ class SyncAndMigrateMixin:
 
     async def _check_should_migrate(self) -> list[RolloutInstanceId]:
         filtered_instance_ids = []
+        awake_instance_ids = await self._get_awake_instance_ids(list(self.instance_ids))
         instance_to_status = self.instance_to_engine_status
-        for instance_id in self.instance_ids:
+        for instance_id in awake_instance_ids:
             if instance_to_status[instance_id].get_waiting_queue_size() != 0:
                 continue
             instance_version = self.instance_to_version_after_sync[instance_id]
@@ -355,7 +379,7 @@ class SyncAndMigrateMixin:
 
         candidate_migrate_instance_ids = []  # (instance_id, ratio)
         for starved_instance_id in filtered_instance_ids:
-            for instance_id in self.instance_ids:
+            for instance_id in awake_instance_ids:
                 if instance_id == starved_instance_id:
                     continue
                 if (

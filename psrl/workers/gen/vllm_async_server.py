@@ -52,6 +52,7 @@ from vllm.v1.engine import PauseMode
 from vllm.v1.engine.async_llm import AsyncLLM
 
 import grpc
+from psrl.utils.common.tms_env import prepend_python_library_path
 from psrl.utils.kv_cache import KVCacheManager, LMCacheConfig
 from psrl.utils.logger import (
     DualOutputHandler,
@@ -64,6 +65,11 @@ from psrl.utils.logger import (
 )
 from psrl.utils.ray import shared_pull_model_context_async
 from psrl.workers.config import RolloutConfig
+from psrl.workers.gen.rope import (
+    _ensure_vllm_hf_rope_overrides,
+    effective_max_position_embeddings,
+    vllm_engine_kwargs,
+)
 from psrl.workers.gen.smg_adapter import build_worker_registration_payload, cfg_get, is_cache_aware_method
 from psrl.workers.gen.stats_collector import DPLBStatCollector
 from psrl.workers.gen.utils import DEFAULT_MAX_CONNECTIONS, DEFAULT_TIMEOUT, TokenOutput
@@ -74,6 +80,37 @@ get_encoding()
 
 psrl_logger = logging.getLogger(__file__)
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
+
+
+def _weight_arena_config_dict(psrl_config) -> dict[str, Any]:
+    nixl_config = psrl_config.get("nixl", {}) or {}
+    arena_config = nixl_config.get("weight_arena", {}) or {}
+    if OmegaConf.is_config(arena_config):
+        arena_config = OmegaConf.to_container(arena_config, resolve=True)
+    if arena_config is None:
+        return {}
+    if not isinstance(arena_config, dict):
+        raise TypeError(f"psrl.nixl.weight_arena must be a mapping, got {type(arena_config).__name__}.")
+    return arena_config
+
+
+def _weight_arena_worker_env(psrl_config, role: str) -> dict[str, str]:
+    arena_config = _weight_arena_config_dict(psrl_config)
+    if role == "reward":
+        enabled = bool(arena_config.get("reward_enabled", False))
+    elif role in ("rollout", "validate"):
+        enabled = bool(arena_config.get("rollout_enabled", False))
+    else:
+        enabled = False
+    if not enabled:
+        return {}
+
+    if role != "reward" and psrl_config.get("ps_mode") not in ("nixl_cpu", "nixl_gpu"):
+        raise RuntimeError(f"psrl.nixl.weight_arena for role={role} requires psrl.ps_mode to be nixl_cpu or nixl_gpu.")
+    tms_config = psrl_config.get("tms", {}) or {}
+    if tms_config.get("range") != "all":
+        raise RuntimeError(f"psrl.nixl.weight_arena for role={role} requires psrl.tms.range=all.")
+    return {"PSRL_VLLM_WEIGHT_ARENA": "1", "VLLM_PSRL_WEIGHT_ARENA": "1"}
 
 
 @dataclass
@@ -113,7 +150,9 @@ class PSRL_vLLMHttpServer(vLLMHttpServer):
             cuda_visible_devices,
         )
 
-        # model weights will be loaded by pulling from ps
+        # Rollout model weights are loaded by pulling from PS. Reward models have
+        # no PS and restore their checkpoint weights through the worker extension.
+        self._reward_model_load_format = config.load_format or "auto"
         self.config.load_format = "dummy"
 
         self.psrl_config = psrl_config
@@ -168,6 +207,31 @@ class PSRL_vLLMHttpServer(vLLMHttpServer):
         # Populated after engine startup. Generative models retain `None`.
         self.pooling_params: PoolingParams | None = None
 
+    def _preprocess_engine_kwargs(self, engine_kwargs: dict) -> None:
+        _ensure_vllm_hf_rope_overrides(engine_kwargs, self.model_config.hf_config)
+
+    def _validate_configs(self) -> None:
+        from verl.workers.rollout.utils import get_max_position_embeddings
+
+        # The parent compares `max_model_len` to the unscaled HF field.
+        # YaRN extends that ceiling by `factor`.
+        engine_kwargs = vllm_engine_kwargs(self.config)
+        native = get_max_position_embeddings(self.model_config.hf_config)
+        effective = effective_max_position_embeddings(self.model_config.hf_config, engine_kwargs, native)
+        hf_config = self.model_config.hf_config
+        if effective == native:
+            super()._validate_configs()
+            return
+        native_field = getattr(hf_config, "max_position_embeddings", None)
+        hf_config.max_position_embeddings = effective
+        try:
+            super()._validate_configs()
+        finally:
+            if native_field is None:
+                delattr(hf_config, "max_position_embeddings")
+            else:
+                hf_config.max_position_embeddings = native_field
+
     async def is_init_model(self):
         self._is_init_model.set()
 
@@ -178,12 +242,60 @@ class PSRL_vLLMHttpServer(vLLMHttpServer):
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
     ):
-        await self.engine.collective_rpc(
+        return await self.engine.collective_rpc(
             method=method,
             timeout=timeout,
             args=args,
             kwargs=kwargs,
         )
+
+    def _is_reward_model(self) -> bool:
+        """Identify static reward servers in the current server/replica layout."""
+        return self.gen_interface.ps_manager_handle is None
+
+    def _tms_weights_cpu_backup_enabled(self) -> bool:
+        """Return the effective TMS backup policy for this vLLM worker.
+
+        Reward weight arenas already keep a persistent CPU copy and reward
+        coordination uses level-2 sleep. A second TMS CPU backup would retain
+        another copy of the same model and defeat the full-release path.
+        """
+        arena_config = _weight_arena_config_dict(self.psrl_config)
+        if self._is_reward_model() and arena_config.get("reward_enabled", False):
+            return False
+        return bool(self.config.enable_weights_cpu_backup)
+
+    def _should_load_reward_weights_at_start(self) -> bool:
+        """Match the previous worker lifecycle for elastic and non-elastic reward models."""
+        weight_arena_config = _weight_arena_config_dict(self.psrl_config)
+        reward_arena_enabled = bool(weight_arena_config.get("reward_enabled", False))
+
+        deployment_config = self.psrl_config.get("deployment", {}) or {}
+        elastic_config = deployment_config.get("elastic", {}) or {}
+        elastic_enabled = bool(elastic_config.get("enable", False))
+        return reward_arena_enabled or not elastic_enabled
+
+    async def _preload_reward_weights_to_cpu_cache(self) -> None:
+        """Prepare checkpoint-backed CPU weights for level-2 reward-model wake-ups."""
+        results = await self.collective_rpc(
+            method="preload_weights_to_cpu_cache",
+            args=(self.model_config.path, self._reward_model_load_format),
+        )
+        if results is None:
+            raise RuntimeError("Reward model failed to preload weights to CPU cache.")
+        psrl_logger.info(
+            "Preloaded reward-model checkpoint weights to CPU cache on replica=%s.",
+            self.get_replica_idx(),
+        )
+
+    async def _load_reward_weights_from_cpu_cache(self) -> None:
+        """Restore reward-model weights after level-2 sleep released GPU storage."""
+        loaded_params = await self.collective_rpc(
+            method="load_weights_from_cpu_cache",
+            args=(),
+        )
+        if loaded_params is None:
+            raise RuntimeError("Reward model failed to load weights from CPU cache.")
 
     def _get_worker_extension_cls(self) -> str:
         return "psrl.workers.gen.vllm_extension.vLLMWorkerExtension"
@@ -463,8 +575,12 @@ class PSRL_vLLMHttpServer(vLLMHttpServer):
 
         # AGENT(VERL): setup rollout scheduler for PSRL
         args["scheduler_cls"] = "psrl.workers.gen.rollout_scheduler.RolloutScheduler"
+        weight_arena_config = _weight_arena_config_dict(self.psrl_config)
         args["additional_config"] = {
-            "enable_weights_cpu_backup": self.config.enable_weights_cpu_backup,
+            "enable_weights_cpu_backup": self._tms_weights_cpu_backup_enabled(),
+            "psrl_nixl_weight_arena": weight_arena_config,
+            "psrl_role": "reward" if self._is_reward_model() else "rollout",
+            "instance_id": self.gen_interface.rollout_replica_idx,
         }
 
         server_args = ["serve", self.model_config.path] + build_cli_args_from_config(args)
@@ -565,6 +681,11 @@ class PSRL_vLLMHttpServer(vLLMHttpServer):
         assert self.kv_cache_manager is not None, "kv_cache_manager must be initialized before engine startup."
         self.kv_cache_manager.attach_engine(engine_client)
         psrl_logger.info("[KVCacheManager]: Engine attached after vLLM server initialization.")
+
+        if self._is_reward_model():
+            await self._preload_reward_weights_to_cpu_cache()
+            if self._should_load_reward_weights_at_start():
+                await self._load_reward_weights_from_cpu_cache()
 
         # self._server_port, self._server_task = await run_unvicorn(app, args, self._server_address)
         self._server_port = await self._start_grpc_server(engine_client)
@@ -714,15 +835,41 @@ class PSRL_vLLMHttpServer(vLLMHttpServer):
     # We add `data_parallel_rank` parameters to these methods to support DP-aware control in PSRL.
 
     async def is_sleeping(self) -> bool:
-        return await self.engine.is_sleeping()
+        return await self.engine.engine_core.call_utility_async("psrl_is_memory_sleeping")
+
+    async def get_engine_runtime_snapshots(
+        self,
+    ) -> dict[int, dict]:
+        """
+        Query scheduler state even when idle engines produce no iteration outputs.
+        """
+        return await self.engine.engine_core.psrl_get_runtime_snapshots_async()
 
     async def sleep(self, level: int):
-        await self.engine.sleep(level)
+        reward_model = self._is_reward_model()
+        if reward_model:
+            await self.close_grpc_generate_admission()
+        await self.engine.sleep(level, mode="abort")
+        if level == 2 and not self._is_reward_model():
+            # Released weights cannot satisfy a subsequent version check.
+            self.curr_rollout_instance_model_version = [-1] * self.get_instance_num()
         if self.psrl_config.tms.range in ["rollout", "all"]:
             # NOTE(linsh): TMS requires an explicit aggressive cache clear.
             aggressive_empty_cache(force_sync=True)
 
     async def wake_up(self):
+        if self._is_reward_model():
+            await self.close_grpc_generate_admission()
+            await self.engine.engine_core.call_utility_async("psrl_wake_up_memory", ["weights"])
+            await self._load_reward_weights_from_cpu_cache()
+            cache_tags = ["kv_cache"]
+            if self.psrl_config.tms.enable_cuda_graph:
+                cache_tags.append("graph")
+            await self.engine.engine_core.call_utility_async("psrl_wake_up_memory", cache_tags)
+            await self.engine.resume_generation()
+            await self.open_grpc_generate_admission()
+            return
+
         wake_up_tags = ["weights", "kv_cache"]
         if self.psrl_config.tms.enable_cuda_graph:
             wake_up_tags.append("graph")
@@ -796,7 +943,7 @@ class PSRL_vLLMHttpServer(vLLMHttpServer):
         if not request_ids:
             return {"aborted_count": 0, "request_ids": []}
 
-        await self.engine.abort(request_ids)
+        await self.engine.abort(request_ids, internal=True)
 
         # Try to reset prefix cache to ensure clean state
         if reset_prefix_cache:
@@ -816,8 +963,17 @@ class PSRL_vLLMHttpServer(vLLMHttpServer):
         Returns:
             The number of requests that were aborted.
         """
-        await self.engine.abort(request_ids)
-        return len(request_ids)
+        internal_ids = [rid for rid in request_ids if rid in self.engine.output_processor.request_states]
+        external_ids = [rid for rid in request_ids if rid not in self.engine.output_processor.request_states]
+        count = await self.engine.abort(internal_ids, internal=True) if internal_ids else 0
+        if external_ids:
+            count += await self.engine.abort(external_ids)
+        return count
+
+    def get_external_request_id(self, internal_id: str) -> str | None:
+        """Resolve a scheduler identity through the live output processor state."""
+        state = self.engine.output_processor.request_states.get(internal_id)
+        return state.external_req_id if state is not None else None
 
     def get_replica_idx(self) -> int:
         return self.gen_interface.rollout_replica_idx
@@ -838,7 +994,11 @@ class PSRL_vLLMHttpServer(vLLMHttpServer):
         self.curr_rollout_instance_model_version = [0] * self.get_instance_num()
         self._is_rollout_instance_registered = True
 
-    async def register_server_to_gateway(self, gateway_url: str) -> str | None:
+    async def register_server_to_gateway(
+        self,
+        gateway_url: str,
+        model_id: str,
+    ) -> str | None:
         if self.node_rank != 0:
             return None
         await self._wait_for_grpc_servicer_ready()
@@ -863,7 +1023,9 @@ class PSRL_vLLMHttpServer(vLLMHttpServer):
 
         payload = build_worker_registration_payload(
             url=f"grpc://{self._server_address}:{self._server_port}",
-            model_id=self.model_config.path,
+            model_id=model_id,
+            role=self.gen_interface.role,
+            fuse_rollout_with_validate=self.psrl_config.fuse_rollout_with_validate,
             max_model_len=total_kv_tokens,
             dp_size=self.config.data_parallel_size,
             tp_size=self.config.tensor_model_parallel_size,
@@ -1238,6 +1400,8 @@ class PSRL_vLLMHttpServer(vLLMHttpServer):
 
     async def init_nixl_client(self):
         await self._is_init_model.wait()
+        if self._is_init_nixl_client.is_set():
+            return
         await self.collective_rpc(
             method="init_nixl_client",
             args=(
@@ -1271,8 +1435,10 @@ class PSRL_vLLMHttpServer(vLLMHttpServer):
 
     async def nixl_sleep(self, level: int):
         await self._is_init_nixl_client.wait()
-        await self.sleep(level)
+        # Deregister while the current physical pages are still mapped. The
+        # subsequent sleep may unmap or release those pages.
         await self.collective_rpc(method="nixl_deregister")
+        await self.sleep(level)
 
     async def nixl_send_local_info_to(self, dst_agent_names: str | list[str]):
         await self._is_init_nixl_client.wait()
@@ -1550,6 +1716,7 @@ class PSRL_vLLMReplica(vLLMReplica):
         )
         worker_cuda_visible_devices = [worker_info[1] for worker_info in worker_infos]
         worker_node_ids = [worker_info[0] for worker_info in worker_infos]
+        self.worker_gpu_locations = tuple((node, int(gpu)) for node, gpu in worker_infos)
 
         # create server actor in each node with node affinity and cuda visible devices
         nnodes, gpus_per_replica_node = self.nnodes, self.gpus_per_replica_node
@@ -1576,7 +1743,12 @@ class PSRL_vLLMReplica(vLLMReplica):
                 # Disaggregated weight synchronization requires disabling NCCL cuMem.
                 "NCCL_CUMEM_ENABLE": "0",
                 "VLLM_DISABLE_ATTN": "1" if self.config.disable_attn else "0",
+                "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
+                "VLLM_SKIP_P2P_CHECK": "1",
+                "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:False",
             }
+            role = "reward" if self.is_reward_model else self.gen_interface.role
+            env_vars.update(_weight_arena_worker_env(self.psrl_config, role))
             if self.psrl_config.tms.range == "all" or self.psrl_config.tms.enable_nixl:
                 # add tms config to rollout workers
                 import torch_memory_saver  # noqa: F401
@@ -1596,6 +1768,7 @@ class PSRL_vLLMReplica(vLLMReplica):
                 env_vars.update(
                     {
                         "LD_PRELOAD": dynlib_path,
+                        "LD_LIBRARY_PATH": prepend_python_library_path(),
                         "TMS_INIT_ENABLE": "0",
                         "TMS_INIT_ENABLE_CPU_BACKUP": "0",
                         "PSRL_VLLM_PATCHES": vllm_patch_env,

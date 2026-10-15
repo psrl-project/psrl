@@ -3,6 +3,7 @@ import logging
 import os
 
 from psrl.workers.gen.rollout_coordination import RolloutCoordinator
+from psrl.workers.gen.smg_adapter import ROUTING_LOOP_STATUS_PATH
 
 psrl_logger = logging.getLogger(__name__)
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
@@ -38,6 +39,8 @@ class RewardModelCoordinator(RolloutCoordinator):
         if self.config.psrl.status_collection.enable:
             self.process_status_queue_task = self.running_loop.create_task(self._process_status_queue())
             self.process_status_queue_task.add_done_callback(lambda f: f.result())
+            self.sync_status_to_router_task = self.running_loop.create_task(self._sync_status_to_router())
+            self.sync_status_to_router_task.add_done_callback(lambda f: f.result())
 
         psrl_logger.info("RewardModelCoordinator busy loop started for model_name=%s", self.reward_model_name)
 
@@ -53,12 +56,9 @@ class RewardModelCoordinator(RolloutCoordinator):
     async def _status_based_sync_and_migrate_loop(self) -> None:
         """No sync/migration loop for static reward models."""
 
-    async def _sync_status_to_router(self) -> None:
-        """No router to sync engine status to for reward models."""
-
     def _get_sleep_level(self) -> int:
-        """Reward model sleep level=1: releases KV cache but retains model weights in GPU memory."""
-        return 1
+        """Use level-2 sleep so reward-model weights are released from GPU memory."""
+        return 2
 
     async def _do_sleep_instance(self, replica_id: str) -> None:
         """Sleep a reward server without NIXL deregistration."""
@@ -72,17 +72,26 @@ class RewardModelCoordinator(RolloutCoordinator):
 
     async def get_router_backlog_size(self) -> int:
         """
-        Return in-flight requests across all SMG gateway workers.
+        Return requests waiting in the SMG routing queue.
 
-        The `/workers` load counters track active requests. Gateway errors return zero
-        so elastic reward management can continue.
+        Gateway errors propagate so the elastic executor retains the last valid count.
         """
         if not self.rollout_gateway_url:
             return 0
-        try:
-            data = await self._gateway_get_json("/workers")
-            workers = data.get("workers", [])
-            return sum(int(w.get("load", 0)) for w in workers)
-        except Exception:
-            psrl_logger.debug("RewardModelCoordinator.get_router_backlog_size: gateway query failed, returning 0")
-            return 0
+        status = await self._gateway_get_json(ROUTING_LOOP_STATUS_PATH)
+        return int(status["pending_request_num"])
+
+    async def get_router_backlog_summary(self, top_t: int | None = None) -> dict[str, int]:
+        """
+        Return the available aggregate waiting-queue metrics from SMG.
+
+        SMG does not expose queued request token lengths. The summary therefore
+        reports an exact request count and zero tokens instead of fabricating load.
+        """
+        pending = await self.get_router_backlog_size()
+        count = pending if top_t is None else min(pending, max(0, int(top_t)))
+        return {
+            "pending": pending,
+            "count": count,
+            "total_tokens": 0,
+        }

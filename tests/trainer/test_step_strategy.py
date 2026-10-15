@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -31,3 +32,10 @@ class TestBuildStepStrategy:
         cfg.granularity = "none"
         strategy = build_step_strategy(cfg, trainer)
         assert isinstance(strategy, FullBatchStepStrategy)
+
+    def test_fine_grain_rejects_elastic_deployment(self):
+        from psrl.trainer.ppo.strategies.fine_grain_overlap import FineGrainOverlapStrategy
+
+        trainer = SimpleNamespace(elastic_mode=True)
+        with pytest.raises(ValueError, match="elastic deployments"):
+            FineGrainOverlapStrategy(trainer, SimpleNamespace())

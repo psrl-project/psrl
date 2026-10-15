@@ -1,0 +1,1059 @@
+diff --git a/model_gateway/src/routers/grpc/common/stages/worker_selector/psrl.rs b/model_gateway/src/routers/grpc/common/stages/worker_selector/psrl.rs
+--- a/model_gateway/src/routers/grpc/common/stages/worker_selector/psrl.rs
++++ b/model_gateway/src/routers/grpc/common/stages/worker_selector/psrl.rs
+@@ -221,6 +221,31 @@
+         }
+
+         let meta = routing_meta?;
++
++        // Request eligibility also applies to sticky pins and elastic migrations.
++        candidates.retain(|worker| {
++            match worker.metadata().spec.labels.get("psrl_request_scope").map(String::as_str) {
++                Some("all") => true,
++                Some("validate") => meta.is_validate,
++                Some("train") => !meta.is_validate,
++                _ => false,
++            }
++        });
++
++        if candidates.is_empty() {
++            return None;
++        }
++
++        if let Some(worker_id) = headers.and_then(|h| h.get("x-elastic-worker-id")).and_then(|v| v.to_str().ok()) {
++            let dp_rank: usize = headers?.get("x-elastic-dp-rank")?.to_str().ok()?.parse().ok()?;
++            let _lock = self.selection_lock.lock();
++            let worker = candidates.into_iter().find(|worker| {
++                self.worker_instance_id(worker) == (worker_id.to_string(), dp_rank)
++                    && self.version_after_sync(worker) >= meta.version_tag
++            })?;
++            worker.increment_load();
++            return Some(worker);
++        }
+
+         // ── Stage 1: version filter ─────────────────────────────────────────
+         candidates.retain(|w| self.version_after_sync(w) >= meta.version_tag);
+@@ -923,6 +948,80 @@
+         }
+     }
+
++    #[tokio::test]
++    async fn dedicated_request_scope_overrides_sticky_and_group_pins() {
++        for is_validate in [false, true] {
++            let runtime = make_runtime();
++            let selector = make_selector(&runtime);
++            let mut workers = Vec::new();
++            for scope in ["train", "validate"] {
++                let worker: Arc<dyn Worker> = Arc::new(
++                    BasicWorkerBuilder::new(format!("grpc://{scope}:8000"))
++                        .connection_mode(ConnectionMode::Grpc)
++                        .health_config(openai_protocol::worker::HealthCheckConfig {
++                            disable_health_check: true,
++                            ..Default::default()
++                        })
++                        .label("psrl_request_scope", scope)
++                        .build(),
++                );
++                selector.worker_registry.register(Arc::clone(&worker));
++                workers.push(worker);
++            }
++            let expected = usize::from(is_validate);
++            let wrong_instance = selector.worker_instance_id(&workers[1 - expected]);
++            let mut meta = make_meta(0);
++            meta.is_validate = is_validate;
++            meta.is_sticky = true;
++            meta.force_pin_once = true;
++            meta.rollout_instance_hint = Some(wrong_instance.clone());
++            runtime.record_selected_instance(2, Some(meta.prompt_id), wrong_instance);
++            let selected = selector
++                .select_single_worker(UNKNOWN_MODEL_ID, None, None, None, Some(&meta))
++                .await
++                .expect("A worker with the matching request scope must be available.");
++            assert_eq!(selected.url(), workers[expected].url());
++        }
++    }
++
++    #[tokio::test]
++    async fn request_scope_controls_forced_elastic_destinations() {
++        for (scope, is_validate, expected) in [
++            (Some("train"), false, true),
++            (Some("train"), true, false),
++            (Some("validate"), false, false),
++            (Some("validate"), true, true),
++            (Some("all"), false, true),
++            (Some("all"), true, true),
++            (Some("unknown"), false, false),
++            (None, true, false),
++        ] {
++            let runtime = make_runtime();
++            let selector = make_selector(&runtime);
++            let mut builder = BasicWorkerBuilder::new("grpc://worker:8000")
++                .connection_mode(ConnectionMode::Grpc)
++                .health_config(openai_protocol::worker::HealthCheckConfig {
++                    disable_health_check: true,
++                    ..Default::default()
++                });
++            if let Some(scope) = scope {
++                builder = builder.label("psrl_request_scope", scope);
++            }
++            let worker: Arc<dyn Worker> = Arc::new(builder.build());
++            selector.worker_registry.register(Arc::clone(&worker));
++            let instance = selector.worker_instance_id(&worker);
++            let mut headers = http::HeaderMap::new();
++            headers.insert("x-elastic-worker-id", instance.0.parse().unwrap());
++            headers.insert("x-elastic-dp-rank", "0".parse().unwrap());
++            let mut meta = make_meta(0);
++            meta.is_validate = is_validate;
++            let selected = selector
++                .select_single_worker(UNKNOWN_MODEL_ID, None, None, Some(&headers), Some(&meta))
++                .await;
++            assert_eq!(selected.is_some(), expected, "Scope {scope:?}, validation {is_validate}.");
++        }
++    }
++
+     /// An unversioned (`-1`) request is pinned to the selected instance's
+     /// synced version, and the pin is signalled back to the caller.
+     #[tokio::test]
+diff --git a/model_gateway/src/routers/grpc/context.rs b/model_gateway/src/routers/grpc/context.rs
+--- a/model_gateway/src/routers/grpc/context.rs
++++ b/model_gateway/src/routers/grpc/context.rs
+@@ -159,6 +159,9 @@
+
+     // Stage 5: Dispatch metadata
+     pub dispatch: Option<DispatchMetadata>,
++
++    /// Backend request identity retained across partial rollout loopback for migration settlement.
++    pub last_dispatch_request_id: Option<String>,
+
+     // Load guard for worker load tracking (created at execution stage)
+     pub load_guards: Option<LoadGuards>,
+diff --git a/model_gateway/src/routers/grpc/routing_loop/controller.rs b/model_gateway/src/routers/grpc/routing_loop/controller.rs
+--- a/model_gateway/src/routers/grpc/routing_loop/controller.rs
++++ b/model_gateway/src/routers/grpc/routing_loop/controller.rs
+@@ -9,7 +9,7 @@
+ };
+ use serde::{Deserialize, Serialize};
+
+-use super::runtime::RoutingLoopRuntime;
++use super::runtime::{RequestMigrationTarget, RoutingLoopRuntime};
+ use crate::{routers::error, server::AppState};
+
+ fn runtime_from_state(state: &AppState) -> Result<Arc<RoutingLoopRuntime>, Box<Response>> {
+@@ -64,6 +64,51 @@
+ pub(crate) async fn routing_loop_status(State(state): State<Arc<AppState>>) -> Response {
+     match runtime_from_state(&state) {
+         Ok(runtime) => Json(runtime.status().await).into_response(),
++        Err(response) => *response,
++    }
++}
++
++pub(crate) async fn routing_loop_snapshot(State(state): State<Arc<AppState>>) -> Response {
++    match runtime_from_state(&state) {
++        Ok(runtime) => Json(runtime.queued_request_snapshot().await).into_response(),
++        Err(response) => *response,
++    }
++}
++
++#[derive(Deserialize)]
++pub(crate) struct MigrationQuery {
++    request_id: String,
++}
++
++pub(crate) async fn prepare_request_migration(
++    State(state): State<Arc<AppState>>, Json(target): Json<RequestMigrationTarget>,
++) -> Response {
++    match runtime_from_state(&state) {
++        Ok(runtime) => {
++            runtime.prepare_migration(target);
++            Json(serde_json::json!({"prepared": true})).into_response()
++        }
++        Err(response) => *response,
++    }
++}
++
++pub(crate) async fn request_migration_status(
++    State(state): State<Arc<AppState>>, Query(query): Query<MigrationQuery>,
++) -> Response {
++    match runtime_from_state(&state) {
++        Ok(runtime) => Json(runtime.migration_status(&query.request_id)).into_response(),
++        Err(response) => *response,
++    }
++}
++
++pub(crate) async fn finish_request_migration(
++    State(state): State<Arc<AppState>>, Json(query): Json<MigrationQuery>,
++) -> Response {
++    match runtime_from_state(&state) {
++        Ok(runtime) => {
++            runtime.finish_migration(&query.request_id);
++            Json(serde_json::json!({"finished": true})).into_response()
++        }
+         Err(response) => *response,
+     }
+ }
+diff --git a/model_gateway/src/routers/grpc/routing_loop/queue.rs b/model_gateway/src/routers/grpc/routing_loop/queue.rs
+--- a/model_gateway/src/routers/grpc/routing_loop/queue.rs
++++ b/model_gateway/src/routers/grpc/routing_loop/queue.rs
+@@ -144,6 +144,26 @@
+     pub(crate) fn iter_requests(&self) -> impl Iterator<Item = &T> {
+         self.heap.iter().map(|entry| &entry.request)
+     }
++
++    fn ordered_requests(&self) -> Vec<&T> {
++        let mut entries: Vec<_> = self.heap.iter().collect();
++        entries.sort_by(|a, b| b.cmp(a));
++        entries.into_iter().map(|entry| &entry.request).collect()
++    }
++
++    fn pop_matching(&mut self, predicate: &impl Fn(&T) -> bool) -> Option<T> {
++        let mut held = Vec::new();
++        let mut selected = None;
++        while let Some(entry) = self.heap.pop() {
++            if predicate(&entry.request) {
++                selected = Some(entry.request);
++                break;
++            }
++            held.push(entry);
++        }
++        self.heap.extend(held);
++        selected
++    }
+ }
+
+ /// Version-partitioned unbounded priority queue.
+@@ -241,9 +261,21 @@
+             .flat_map(|(_, queue)| queue.iter_requests())
+     }
+
++    pub(crate) fn ordered_requests(&self) -> Vec<&T> {
++        self.queues.values().flat_map(|queue| queue.ordered_requests()).collect()
++    }
++
++    pub(crate) fn pop_matching(&mut self, predicate: impl Fn(&T) -> bool) -> Option<T> {
++        self.queues.values_mut().find_map(|queue| queue.pop_matching(&predicate))
++    }
++
+     fn partition_for(&self, request: &T) -> i32 {
+         if self.enable_multi_priority_queue {
+-            request.partition_key()
++            if request.is_validation() {
++                i32::MIN
++            } else {
++                request.partition_key()
++            }
+         } else {
+             0
+         }
+@@ -292,6 +324,49 @@
+     }
+
+     #[test]
++    fn snapshot_follows_dispatch_order_without_consuming_requests() {
++        let mut q = MultiPriorityRequestQueue::new(RequestSortKey::ShortLength, true);
++        q.push(TestReq::new(1, 2, 1));
++        q.push(TestReq::new(2, 1, 8));
++        q.push(TestReq::new(3, 1, 2));
++        q.push(TestReq::new(4, 1, 2));
++        assert_eq!(q.ordered_requests().iter().map(|r| r.id).collect::<Vec<_>>(), vec![3, 4, 2, 1]);
++        assert_eq!(q.len(), 4);
++        let mut actual = Vec::new();
++        while let Some(request) = q.pop() {
++            actual.push(request.id);
++        }
++        assert_eq!(actual, vec![3, 4, 2, 1]);
++    }
++
++    #[test]
++    fn validation_precedes_older_training_partitions() {
++        for multi_queue in [false, true] {
++            let mut queue = MultiPriorityRequestQueue::new(RequestSortKey::ShortLength, multi_queue);
++            queue.push(TestReq::new(1, 1, 1));
++            let mut validation = TestReq::new(2, 5, 100);
++            validation.validate = true;
++            queue.push(validation);
++            assert_eq!(queue.ordered_requests()[0].id, 2);
++            assert_eq!(queue.peek().map(|request| request.id), Some(2));
++            assert_eq!(queue.pop().map(|request| request.id), Some(2));
++            assert_eq!(queue.pop().map(|request| request.id), Some(1));
++        }
++    }
++
++    #[test]
++    fn exclusive_migration_pop_preserves_other_requests_and_fifo_ties() {
++        let mut q = MultiPriorityRequestQueue::new(RequestSortKey::ShortLength, true);
++        q.push(TestReq::new(1, 0, 2));
++        q.push(TestReq::new(2, 0, 2));
++        q.push(TestReq::new(3, 1, 1));
++        assert_eq!(q.pop_matching(|r| r.id == 3).map(|r| r.id), Some(3));
++        assert_eq!(q.pop_matching(|r| r.id == 99), None);
++        assert_eq!(q.pop().map(|r| r.id), Some(1));
++        assert_eq!(q.pop().map(|r| r.id), Some(2));
++    }
++
++    #[test]
+     fn priority_queue_orders_by_short_length_with_fifo_tiebreak() {
+         let mut q = PriorityRequestQueue::new(RequestSortKey::ShortLength);
+         q.push(TestReq::new(1, 0, 10));
+diff --git a/model_gateway/src/routers/grpc/routing_loop/runtime.rs b/model_gateway/src/routers/grpc/routing_loop/runtime.rs
+--- a/model_gateway/src/routers/grpc/routing_loop/runtime.rs
++++ b/model_gateway/src/routers/grpc/routing_loop/runtime.rs
+@@ -15,7 +15,7 @@
+ };
+ use dashmap::DashMap;
+ use metrics::{counter, gauge, histogram};
+-use serde::Serialize;
++use serde::{Deserialize, Serialize};
+ use tokio::{
+     sync::{mpsc, oneshot, Mutex, Notify},
+     task::{yield_now, JoinSet},
+@@ -117,7 +117,29 @@
+     pub(crate) prompt_id: i64,
+ }
+
++#[derive(Debug, Clone, Serialize)]
++pub(crate) struct QueuedRequestSnapshot {
++    pub(crate) request_id: String,
++    pub(crate) seq_len: usize,
++    pub(crate) version_tag: i64,
++    pub(crate) route_order: usize,
++    pub(crate) model_id: String,
++    pub(crate) is_validate: bool,
++    pub(crate) pinned_instance: Option<(String, usize)>,
++}
++
++#[derive(Debug, Clone, Deserialize, Serialize)]
++pub(crate) struct RequestMigrationTarget {
++    pub(crate) request_id: String,
++    pub(crate) destination: (String, usize),
++    #[serde(default)]
++    pub(crate) dispatched: bool,
++    #[serde(default)]
++    pub(crate) completed: bool,
++}
++
+ pub struct RoutingLoopRuntime {
++    migration_targets: DashMap<String, RequestMigrationTarget>,
+     queue: Mutex<MultiPriorityRequestQueue<RoutingQueueEntry>>,
+     tx: mpsc::UnboundedSender<RoutingQueueEntry>,
+     paused: AtomicBool,
+@@ -168,6 +190,7 @@
+     ) -> (Arc<Self>, mpsc::UnboundedReceiver<RoutingQueueEntry>) {
+         let (tx, rx) = mpsc::unbounded_channel();
+         let runtime = Arc::new(Self {
++            migration_targets: DashMap::new(),
+             queue: Mutex::new(MultiPriorityRequestQueue::new(
+                 config.request_sort_key,
+                 config.enable_multi_priority_queue,
+@@ -360,6 +383,88 @@
+         }
+     }
+
++    pub(crate) fn prepare_migration(&self, mut target: RequestMigrationTarget) {
++        target.dispatched = false;
++        target.completed = false;
++        self.migration_targets
++            .insert(target.request_id.clone(), target);
++    }
++
++    pub(crate) fn migration_status(&self, request_id: &str) -> Option<RequestMigrationTarget> {
++        self.migration_targets
++            .get(request_id)
++            .map(|target| target.clone())
++    }
++
++    pub(crate) fn finish_migration(&self, request_id: &str) {
++        self.migration_targets.remove(request_id);
++    }
++
++    fn apply_migration_target(&self, ctx: &mut RequestContext) {
++        let Some(request_id) = &ctx.state.last_dispatch_request_id else {
++            return;
++        };
++        let Some(target) = self.migration_targets.get(request_id) else {
++            return;
++        };
++        if target.dispatched {
++            return;
++        }
++        let headers = ctx.input.headers.get_or_insert_with(Default::default);
++        if let Ok(worker_id) = HeaderValue::from_str(&target.destination.0) {
++            headers.insert("x-elastic-worker-id", worker_id);
++            headers.insert(
++                "x-elastic-dp-rank",
++                HeaderValue::from_str(&target.destination.1.to_string()).unwrap(),
++            );
++        }
++    }
++
++    fn migration_dispatched(&self, ctx: &mut RequestContext) {
++        let Some(request_id) = &ctx.state.last_dispatch_request_id else {
++            return;
++        };
++        if let Some(mut target) = self.migration_targets.get_mut(request_id) {
++            target.dispatched = true;
++        }
++        if let Some(headers) = ctx.input.headers.as_mut() {
++            headers.remove("x-elastic-worker-id");
++            headers.remove("x-elastic-dp-rank");
++        }
++    }
++
++    fn migration_completed(&self, ctx: &RequestContext) {
++        if let Some(request_id) = &ctx.state.last_dispatch_request_id {
++            if let Some(mut target) = self.migration_targets.get_mut(request_id) {
++                target.completed = true;
++            }
++        }
++    }
++
++    pub(crate) async fn queued_request_snapshot(&self) -> Vec<QueuedRequestSnapshot> {
++        let queue = self.queue.lock().await;
++        queue
++            .ordered_requests()
++            .into_iter()
++            .enumerate()
++            .map(|(route_order, entry)| QueuedRequestSnapshot {
++                request_id: entry
++                    .request_id()
++                    .map_or_else(|| format!("pending-{route_order}"), |id| id.to_string()),
++                seq_len: entry.input_len(),
++                version_tag: entry.version_tag(),
++                route_order,
++                model_id: entry.ctx.input.model_id.clone(),
++                is_validate: entry.is_validation(),
++                pinned_instance: entry.routing_meta.as_ref().and_then(|meta| {
++                    self.prompt_to_pinned_instance
++                        .get(&meta.prompt_id)
++                        .map(|value| value.clone())
++                }),
++            })
++            .collect()
++    }
++
+     pub(crate) async fn status(&self) -> RoutingLoopStatus {
+         let queue = self.queue.lock().await;
+         let queue_len = queue.len();
+@@ -423,6 +528,17 @@
+     async fn pop_entries(&self, max_entries: usize) -> Vec<RoutingQueueEntry> {
+         let mut queue = self.queue.lock().await;
+         let mut entries = Vec::with_capacity(max_entries);
++        if let Some(target) = self.migration_targets.iter().next() {
++            if !target.dispatched {
++                if let Some(entry) = queue.pop_matching(|entry| {
++                    entry.ctx.state.last_dispatch_request_id.as_deref()
++                        == Some(target.request_id.as_str())
++                }) {
++                    entries.push(entry);
++                }
++            }
++            return entries;
++        }
+         for _ in 0..max_entries {
+             let Some(entry) = queue.pop() else { break };
+             entries.push(entry);
+@@ -937,6 +1053,7 @@
+         return;
+     };
+     let decision_epoch = decision_permit.epoch();
++    runtime.apply_migration_target(&mut ctx);
+     let select_result = pipeline.execute_worker_selection(&mut ctx).await;
+     drop(decision_permit);
+     if select_result.is_err() {
+@@ -969,6 +1086,7 @@
+     if let Err(response) = pipeline.commit_worker_selection(&mut ctx).await {
+         drop(handoff_permit);
+         send_completion_error(completion, response);
++        runtime.migration_completed(&ctx);
+         runtime.cleanup_tracking(request_id, prompt_id);
+         return;
+     }
+@@ -979,13 +1097,27 @@
+     if let Some(refreshed) = parse_routing_request_meta_from_context(&ctx) {
+         routing_meta = Some(refreshed);
+     }
++    ctx.state.partial_rollout_state = Some(partial_state);
+     if let Err(response) = pipeline.execute_post_selection_execution(&mut ctx).await {
+         drop(handoff_permit);
+         send_completion_error(completion, response);
++        runtime.migration_completed(&ctx);
+         runtime.cleanup_tracking(request_id, prompt_id);
+         return;
+     }
+     drop(handoff_permit);
++    let mut partial_state = ctx
++        .state
++        .partial_rollout_state
++        .take()
++        .expect("Partial rollout state is missing.");
++
++    runtime.migration_dispatched(&mut ctx);
++    ctx.state.last_dispatch_request_id = ctx
++        .state
++        .dispatch
++        .as_ref()
++        .map(|dispatch| dispatch.request_id.clone());
+
+     // ── Step 3: extract the raw gRPC stream ──────────────────────────────
+     let stream = match ctx.state.response.execution_result.take() {
+@@ -997,6 +1129,7 @@
+             ctx.state.response.execution_result = other;
+             let stage_result = pipeline.execute_remaining_stages(&mut ctx).await;
+             send_partial_completion(completion, &mut ctx, stage_result, HeaderMap::new());
++            runtime.migration_completed(&ctx);
+             runtime.cleanup_tracking(request_id, prompt_id);
+             return;
+         }
+@@ -1004,7 +1137,7 @@
+
+     // ── Step 4: drain the stream, collecting tokens and finish_reason ────
+     let mut stream = stream;
+-    let drained = match drain_stream_for_partial_rollout(&mut stream).await {
++    let mut drained = match drain_stream_for_partial_rollout(&mut stream).await {
+         Ok(d) => d,
+         Err(msg) => {
+             error!(
+@@ -1016,10 +1149,20 @@
+             );
+             let response = router_error::internal_error("stream_drain_failed", msg.as_str());
+             send_completion_error(completion, response);
++            runtime.migration_completed(&ctx);
+             runtime.cleanup_tracking(request_id, prompt_id);
+             return;
+         }
+     };
++
++    if drained.finish_reason == "abort"
++        && partial_state.max_new_tokens.is_some_and(|budget| {
++            partial_state.token_ids.len() + drained.new_token_ids.len() >= budget as usize
++        })
++    {
++        drained.finish_reason = "length".to_owned();
++        drained.complete.finish_at_length();
++    }
+
+     // ── Step 5: branch on finish_reason ─────────────────────────────────
+     match drained.finish_reason.as_str() {
+@@ -1029,6 +1172,7 @@
+                 let response =
+                     router_error::internal_error(re_err.error_code(), re_err.to_string().as_str());
+                 send_completion_error(completion, response);
++                runtime.migration_completed(&ctx);
+                 runtime.cleanup_tracking(request_id, prompt_id);
+                 return;
+             }
+@@ -1085,12 +1229,14 @@
+                         re_err.to_string().as_str(),
+                     );
+                     send_completion_error(completion, response);
++                    runtime.migration_completed(&ctx);
+                     runtime.cleanup_tracking(request_id, prompt_id);
+                     return;
+                 }
+             } else {
+                 complete.set_output_ids(merged_token_ids);
+             }
++            complete.set_token_usage(partial_state.prompt_len, accumulated_tokens as u32);
+
+             // Place the assembled complete frame back for PostExecution stages.
+             ctx.state.response.execution_result = Some(ExecutionResult::Complete(complete));
+@@ -1110,6 +1256,11 @@
+                 .map(|worker| runtime.instance_id_for_worker(&worker));
+
+             let mut response_headers = HeaderMap::new();
++            response_headers.insert(
++                "x-smg-partial-rollout-count",
++                HeaderValue::from_str(&partial_state.iteration_count.saturating_sub(1).to_string())
++                    .unwrap(),
++            );
+             if let Some((base_id, dp_rank)) = served_instance {
+                 if let Ok(v) = HeaderValue::from_str(&base_id) {
+                     response_headers.insert("x-base-worker-id", v);
+@@ -1134,6 +1285,7 @@
+             }
+             let stage_result = pipeline.execute_remaining_stages(&mut ctx).await;
+             send_partial_completion(completion, &mut ctx, stage_result, response_headers);
++            runtime.migration_completed(&ctx);
+             runtime.cleanup_tracking(request_id, prompt_id);
+         }
+         "abort" => {
+@@ -1142,6 +1294,7 @@
+                 let response =
+                     router_error::internal_error(re_err.error_code(), re_err.to_string().as_str());
+                 send_completion_error(completion, response);
++                runtime.migration_completed(&ctx);
+                 runtime.cleanup_tracking(request_id, prompt_id);
+                 return;
+             }
+@@ -1157,6 +1310,7 @@
+                     let response =
+                         router_error::internal_error("loopback_no_instance", "no worker selected");
+                     send_completion_error(completion, response);
++                    runtime.migration_completed(&ctx);
+                     runtime.cleanup_tracking(request_id, prompt_id);
+                     return;
+                 }
+@@ -1228,6 +1382,7 @@
+             );
+             let response = router_error::internal_error("unexpected_finish_reason", other);
+             send_completion_error(completion, response);
++            runtime.migration_completed(&ctx);
+             runtime.cleanup_tracking(request_id, prompt_id);
+         }
+     }
+@@ -1277,6 +1432,15 @@
+ #[cfg(test)]
+ mod tests {
+     use super::*;
++    use openai_protocol::generate::GenerateRequest;
++    use reasoning_parser::ParserFactory as ReasoningParserFactory;
++    use tool_parser::ParserFactory as ToolParserFactory;
++
++    use crate::{
++        config::PolicyConfig,
++        policies::PolicyRegistry,
++        routers::grpc::context::{ProcessingState, RequestInput, RequestType, SharedComponents},
++    };
+
+     fn make_runtime() -> Arc<RoutingLoopRuntime> {
+         RoutingLoopRuntime::new(
+@@ -1285,6 +1449,157 @@
+             Arc::new(WorkerRegistry::new()),
+         )
+         .0
++    }
++
++    fn make_migration_entry(backend_id: &str) -> RoutingQueueEntry {
++        let request: GenerateRequest = serde_json::from_value(serde_json::json!({"text": "hello"}))
++            .expect("Generate request must be valid.");
++        let state = ProcessingState {
++            last_dispatch_request_id: Some(backend_id.to_string()),
++            ..Default::default()
++        };
++        let ctx = RequestContext {
++            input: RequestInput {
++                request_type: RequestType::Generate(Arc::new(request)),
++                headers: None,
++                model_id: "model".to_string(),
++                tenant_request_meta: None,
++            },
++            components: Arc::new(SharedComponents {
++                tokenizer_registry: Arc::new(llm_tokenizer::registry::TokenizerRegistry::new()),
++                tool_parser_factory: ToolParserFactory::default(),
++                reasoning_parser_factory: ReasoningParserFactory::default(),
++                configured_tool_parser: None,
++                multimodal: None,
++            }),
++            state,
++        };
++        let (sender, _) = oneshot::channel();
++        RoutingQueueEntry {
++            ctx,
++            pipeline: RequestPipeline::new_pd(
++                Arc::new(WorkerRegistry::new()),
++                Arc::new(PolicyRegistry::new(PolicyConfig::RoundRobin)),
++                ToolParserFactory::default(),
++                ReasoningParserFactory::default(),
++                None,
++                None,
++                None,
++            ),
++            completion: RoutingLoopCompletion::Http(sender),
++            routing_meta: Some(RoutingMeta {
++                request_id: 42,
++                prompt_id: 42,
++                version_tag: 1,
++                is_validate: false,
++                is_sticky: false,
++                force_pin_once: false,
++                rollout_instance_hint: None,
++                response_token_count: Some(3),
++            }),
++        }
++    }
++
++    #[tokio::test]
++    async fn migration_without_frontend_rid_dispatches_backend_identity_exclusively() {
++        let runtime = make_runtime();
++        let mut entry = make_migration_entry("gen-backend-a");
++        reset_ctx_for_loopback(&mut entry.ctx);
++        runtime.prepare_migration(RequestMigrationTarget {
++            request_id: "gen-backend-a".to_string(),
++            destination: ("destination".to_string(), 2),
++            dispatched: false,
++            completed: false,
++        });
++        runtime
++            .push_entries(vec![make_migration_entry("gen-other"), entry])
++            .await;
++
++        let mut selected = runtime.pop_entries(10).await;
++        assert_eq!(
++            selected.len(),
++            1,
++            "Only the prepared migration may dispatch."
++        );
++        let mut entry = selected.pop().expect("Migration entry must be present.");
++        runtime.apply_migration_target(&mut entry.ctx);
++        let headers = entry
++            .ctx
++            .input
++            .headers
++            .as_ref()
++            .expect("Migration headers must be set.");
++        assert_eq!(
++            headers["x-elastic-worker-id"], "destination",
++            "The planned destination must be retained."
++        );
++        assert_eq!(
++            headers["x-elastic-dp-rank"], "2",
++            "The planned DP rank must be retained."
++        );
++        assert!(
++            runtime.pop_entries(10).await.is_empty(),
++            "Normal requests must wait for migration settlement."
++        );
++
++        runtime.migration_dispatched(&mut entry.ctx);
++        assert!(
++            runtime
++                .migration_status("gen-backend-a")
++                .expect("Prepared migration must have status.")
++                .dispatched,
++            "Redispatch must settle the backend ID."
++        );
++        assert!(
++            runtime.pop_entries(10).await.is_empty(),
++            "The next request must wait for the coordinator acknowledgement."
++        );
++        runtime.finish_migration("gen-backend-a");
++        assert_eq!(
++            runtime.pop_entries(10).await.len(),
++            1,
++            "Unrelated pending requests must remain queued."
++        );
++    }
++
++    #[test]
++    fn migration_uses_latest_backend_segment_instead_of_frontend_rid() {
++        let runtime = make_runtime();
++        let mut entry = make_migration_entry("gen-latest");
++        entry.ctx.input.request_type = RequestType::Generate(Arc::new(
++            serde_json::from_value(serde_json::json!({"text": "hello", "rid": "frontend"}))
++                .expect("Generate request must be valid."),
++        ));
++        runtime.prepare_migration(RequestMigrationTarget {
++            request_id: "gen-latest".to_string(),
++            destination: ("destination".to_string(), 0),
++            dispatched: false,
++            completed: false,
++        });
++        runtime.apply_migration_target(&mut entry.ctx);
++        assert!(
++            entry.ctx.input.headers.is_some(),
++            "The backend ID must resolve independently of the frontend ID."
++        );
++        runtime.migration_dispatched(&mut entry.ctx);
++        assert!(
++            runtime
++                .migration_status("gen-latest")
++                .expect("Prepared migration must have status.")
++                .dispatched,
++            "The backend migration must settle."
++        );
++        assert!(
++            entry
++                .ctx
++                .input
++                .headers
++                .as_ref()
++                .expect("Dispatched migration must retain its transport headers.")
++                .get("x-elastic-worker-id")
++                .is_none(),
++            "The forced destination must be consumed once."
++        );
+     }
+
+     #[tokio::test]
+diff --git a/model_gateway/src/server.rs b/model_gateway/src/server.rs
+--- a/model_gateway/src/server.rs
++++ b/model_gateway/src/server.rs
+@@ -59,7 +59,8 @@
+         conversations,
+         grpc::routing_loop::{
+             controller::{
+-                pause_routing_loop, resume_routing_loop, routing_loop_filter, routing_loop_status,
++                finish_request_migration, pause_routing_loop, prepare_request_migration,
++                request_migration_status, resume_routing_loop, routing_loop_filter, routing_loop_snapshot, routing_loop_status,
+                 workers_stats,
+             },
+             runtime::{run_routing_loop, RoutingLoopRuntime},
+@@ -1043,6 +1044,9 @@
+             get(v1_tokenizers_status),
+         )
+         .route("/routing_loop/status", get(routing_loop_status))
++        .route("/routing_loop/snapshot", get(routing_loop_snapshot))
++        .route("/routing_loop/migration", get(request_migration_status).post(prepare_request_migration))
++        .route("/routing_loop/migration/finish", post(finish_request_migration))
+         .route("/routing_loop/pause", post(pause_routing_loop))
+         .route("/routing_loop/resume", post(resume_routing_loop))
+         .route("/routing_loop/filter", get(routing_loop_filter));
+diff --git a/model_gateway/src/routers/grpc/proto_wrapper.rs b/model_gateway/src/routers/grpc/proto_wrapper.rs
+--- a/model_gateway/src/routers/grpc/proto_wrapper.rs
++++ b/model_gateway/src/routers/grpc/proto_wrapper.rs
+@@ -1318,6 +1318,84 @@
+ }
+
+ impl ProtoGenerateRequest {
++    /// Return the resolved generation budget before loopback adjustment.
++    pub(crate) fn max_new_tokens(&self) -> Option<u32> {
++        match self {
++            Self::Sglang(req) => req.sampling_params.as_ref()?.max_new_tokens,
++            Self::Vllm(req) => req.sampling_params.as_ref()?.max_tokens,
++            Self::Trtllm(req) => Some(req.max_tokens),
++            Self::Mlx(req) => req.sampling_params.as_ref()?.max_tokens,
++            Self::TokenSpeed(req) => req.sampling_params.as_ref()?.max_new_tokens,
++        }
++    }
++
++    /// Extend the tokenized prompt and consume the accumulated generation budget.
++    pub(crate) fn continue_from_tokens(&mut self, tokens: &[u32]) -> Result<(), &'static str> {
++        if tokens.is_empty() {
++            return Ok(());
++        }
++        let consumed = u32::try_from(tokens.len()).map_err(|_| "Completion prefix is too long.")?;
++        match self {
++            Self::Sglang(req) => {
++                req.tokenized
++                    .as_mut()
++                    .ok_or("Tokenized input is missing.")?
++                    .input_ids
++                    .extend_from_slice(tokens);
++                if let Some(params) = req.sampling_params.as_mut() {
++                    params.max_new_tokens =
++                        params.max_new_tokens.map(|v| v.saturating_sub(consumed));
++                    params.min_new_tokens = params.min_new_tokens.saturating_sub(consumed);
++                }
++            }
++            Self::Vllm(req) => {
++                let Some(vllm::generate_request::Input::Tokenized(input)) = req.input.as_mut()
++                else {
++                    return Err("Tokenized input is missing.");
++                };
++                input.input_ids.extend_from_slice(tokens);
++                if let Some(params) = req.sampling_params.as_mut() {
++                    params.max_tokens = params.max_tokens.map(|v| v.saturating_sub(consumed));
++                    params.min_tokens = params.min_tokens.saturating_sub(consumed);
++                }
++            }
++            Self::Trtllm(req) => {
++                req.tokenized
++                    .as_mut()
++                    .ok_or("Tokenized input is missing.")?
++                    .input_token_ids
++                    .extend_from_slice(tokens);
++                req.max_tokens = req.max_tokens.saturating_sub(consumed);
++                if let Some(params) = req.sampling_config.as_mut() {
++                    params.min_tokens = params.min_tokens.map(|v| v.saturating_sub(consumed));
++                }
++            }
++            Self::Mlx(req) => {
++                let Some(mlx::generate_request::Input::Tokenized(input)) = req.input.as_mut()
++                else {
++                    return Err("Tokenized input is missing.");
++                };
++                input.input_ids.extend_from_slice(tokens);
++                if let Some(params) = req.sampling_params.as_mut() {
++                    params.max_tokens = params.max_tokens.map(|v| v.saturating_sub(consumed));
++                }
++            }
++            Self::TokenSpeed(req) => {
++                req.tokenized
++                    .as_mut()
++                    .ok_or("Tokenized input is missing.")?
++                    .input_ids
++                    .extend_from_slice(tokens);
++                if let Some(params) = req.sampling_params.as_mut() {
++                    params.max_new_tokens =
++                        params.max_new_tokens.map(|v| v.saturating_sub(consumed));
++                    params.min_new_tokens = params.min_new_tokens.saturating_sub(consumed);
++                }
++            }
++        }
++        Ok(())
++    }
++
+     /// Get SGLang variant (panics if not SGLang)
+     #[expect(
+         clippy::panic,
+@@ -1890,6 +1968,35 @@
+ }
+
+ impl ProtoGenerateComplete {
++    /// Replace backend segment accounting with the original request accounting.
++    pub(crate) fn set_token_usage(&mut self, prompt_tokens: u32, completion_tokens: u32) {
++        macro_rules! update {
++            ($complete:expr) => {{
++                $complete.prompt_tokens = prompt_tokens;
++                $complete.completion_tokens = completion_tokens;
++                $complete.cached_tokens = $complete.cached_tokens.min(prompt_tokens);
++            }};
++        }
++        match self {
++            Self::Sglang(c) => update!(c),
++            Self::Vllm(c) => update!(c),
++            Self::Trtllm(c) => update!(c),
++            Self::Mlx(c) => update!(c),
++            Self::TokenSpeed(c) => update!(c),
++        }
++    }
++
++    /// Finish an interrupted request that has consumed its generation budget.
++    pub(crate) fn finish_at_length(&mut self) {
++        match self {
++            Self::Sglang(c) => c.finish_reason = "length".to_owned(),
++            Self::Vllm(c) => c.finish_reason = "length".to_owned(),
++            Self::Trtllm(c) => c.finish_reason = "length".to_owned(),
++            Self::Mlx(c) => c.finish_reason = "length".to_owned(),
++            Self::TokenSpeed(c) => c.finish_reason = "length".to_owned(),
++        }
++    }
++
+     /// Get SGLang variant (panics if not SGLang)
+     #[expect(
+         clippy::panic,
+diff --git a/model_gateway/src/routers/grpc/routing_loop/partial_rollout.rs b/model_gateway/src/routers/grpc/routing_loop/partial_rollout.rs
+--- a/model_gateway/src/routers/grpc/routing_loop/partial_rollout.rs
++++ b/model_gateway/src/routers/grpc/routing_loop/partial_rollout.rs
+@@ -124,11 +124,10 @@
+     /// Routed-experts accumulator.  `None` when the request did not opt in,
+     /// or before the first iteration that produces a non-empty RE segment.
+     pub routed_experts: Option<RoutedExpertsAccumulator>,
+-    /// Number of loopback iterations completed so far (excluding the final one).
+-    ///
+-    /// Incremented by `merge_into_partial_state` on each `"abort"` cycle.
+-    /// At completion this equals the number of PS weight-sync interruptions.
++    /// Number of merged backend segments, including the final segment.
+     pub iteration_count: u32,
++    /// Resolved output budget from the first backend request.
++    pub max_new_tokens: Option<u32>,
+
+     // ─── Routed-experts metadata (immutable across loopback) ───────────
+     /// Original prompt length at iter 1 dispatch time, before any loopback
+@@ -154,6 +153,7 @@
+             logprobs: None,
+             routed_experts: None,
+             iteration_count: 0,
++            max_new_tokens: None,
+             prompt_len: 0,
+             first_iter_prompt_start: 0,
+             expected_final_re_bytes: 0,
+@@ -217,6 +217,9 @@
+             ProtoResponseVariant::Complete(complete) => {
+                 if new_token_ids.is_empty() {
+                     new_token_ids = complete.output_ids().to_vec();
++                }
++                if new_logprobs.is_none() {
++                    new_logprobs = complete.output_logprobs().map(|lp| lp.token_logprobs);
+                 }
+                 let finish_reason = complete.finish_reason().to_owned();
+                 let new_routed_experts = complete
+diff --git a/model_gateway/src/routers/grpc/common/stages/request_execution.rs b/model_gateway/src/routers/grpc/common/stages/request_execution.rs
+--- a/model_gateway/src/routers/grpc/common/stages/request_execution.rs
++++ b/model_gateway/src/routers/grpc/common/stages/request_execution.rs
+@@ -137,6 +137,27 @@
+             );
+             error::internal_error("execution_plan_not_built", "Execution plan not built")
+         })?;
++
++        if let Some(state) = ctx.state.partial_rollout_state.as_mut() {
++            let generate = match &mut execution_plan {
++                ExecutionPlan::Single(ProtoRequest::Generate(generate))
++                | ExecutionPlan::PrefillDecode(generate)
++                | ExecutionPlan::EncodePrefillDecode {
++                    request: generate, ..
++                } => Some(generate),
++                ExecutionPlan::Single(ProtoRequest::Embed(_)) => None,
++            };
++            if let Some(generate) = generate {
++                if state.iteration_count == 0 {
++                    state.max_new_tokens = generate.max_new_tokens();
++                }
++                generate
++                    .continue_from_tokens(&state.token_ids)
++                    .map_err(|message| {
++                        error::internal_error("partial_rollout_input_invalid", message)
++                    })?;
++            }
++        }
+
+         // Set `partial_rollout_overrides.routed_experts_prompt_start = Some(...)`
+         // before re-entering the pipeline on iter ≥ 2 so vLLM only captures
+diff --git a/model_gateway/src/routers/grpc/common/stages/worker_selector/naive.rs b/model_gateway/src/routers/grpc/common/stages/worker_selector/naive.rs
+--- a/model_gateway/src/routers/grpc/common/stages/worker_selector/naive.rs
++++ b/model_gateway/src/routers/grpc/common/stages/worker_selector/naive.rs
+@@ -45,7 +45,7 @@
+         text: Option<&str>,
+         tokens: Option<&[u32]>,
+         headers: Option<&http::HeaderMap>,
+-        _routing_meta: Option<&RoutingMeta>,
++        routing_meta: Option<&RoutingMeta>,
+     ) -> Option<Arc<dyn Worker>> {
+         // Treat "unknown" model as wildcard (match any worker)
+         let model_filter = if model_id == UNKNOWN_MODEL_ID {
+@@ -83,21 +83,41 @@
+         // (stable tie-break on equal loads → always index 0).
+         let selected = {
+             let _lock = self.selection_lock.lock();
+-            let idx = policy.select_worker(
+-                &available,
+-                &SelectWorkerInfo {
+-                    request_text: text,
+-                    tokens,
+-                    headers,
+-                    hash_ring,
+-                    priority_groups: None,
+-                    response_token_count: None,
+-                    score_trace: None,
+-                    leg: WorkerLeg::Single,
+-                },
+-            )?;
+-            available[idx].increment_load();
+-            available[idx].clone()
++            let worker = if let Some(worker_id) = headers.and_then(|h| h.get("x-elastic-worker-id"))
++            {
++                let worker_id = worker_id.to_str().ok()?;
++                let dp_rank: usize = headers?
++                    .get("x-elastic-dp-rank")?
++                    .to_str()
++                    .ok()?
++                    .parse()
++                    .ok()?;
++                available.iter().find(|worker| {
++                    self.worker_registry
++                        .reserve_id_for_url(worker.base_url())
++                        .as_str()
++                        == worker_id
++                        && worker.dp_rank().unwrap_or(0) == dp_rank
++                })?
++            } else {
++                let idx = policy.select_worker(
++                    &available,
++                    &SelectWorkerInfo {
++                        request_text: text,
++                        tokens,
++                        headers,
++                        hash_ring,
++                        priority_groups: None,
++                        response_token_count: routing_meta
++                            .and_then(|meta| meta.response_token_count),
++                        score_trace: None,
++                        leg: WorkerLeg::Single,
++                    },
++                )?;
++                &available[idx]
++            };
++            worker.increment_load();
++            worker.clone()
+         };
+
+         // Record worker selection metric

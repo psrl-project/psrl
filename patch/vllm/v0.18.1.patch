@@ -29,6 +29,236 @@ index 27aa6175b..19549d78e 100644
          output, _ = self.o_proj(attn_output)
          return output
  
+diff --git a/vllm/model_executor/models/qwen3.py b/vllm/model_executor/models/qwen3.py
+index 91931f9f4..6b08ecc2e 100644
+--- a/vllm/model_executor/models/qwen3.py
++++ b/vllm/model_executor/models/qwen3.py
+@@ -123,6 +123,13 @@ class Qwen3Attention(nn.Module):
+             if attn_type == AttentionType.ENCODER_ONLY
+             else Attention
+         )
++
++        self.disable_attn = False
++        import os
++        if "VLLM_DISABLE_ATTN" in os.environ and os.environ["VLLM_DISABLE_ATTN"] == "1":
++            print("Hijacking the attention in Qwen3 to forbid the use of the attention.")
++            self.disable_attn = True
++
+         self.attn = attn_cls(
+             self.num_heads,
+             self.head_dim,
+@@ -157,7 +164,11 @@ class Qwen3Attention(nn.Module):
+         k_by_head = self.k_norm(k_by_head)
+         k = k_by_head.view(k.shape)
+         q, k = self.rotary_emb(positions, q, k)
+-        attn_output = self.attn(q, k, v)
++        # For profiling, we hijack here to forbid the use of the attention.
++        if self.disable_attn:
++            attn_output = q
++        else:
++            attn_output = self.attn(q, k, v)
+         output, _ = self.o_proj(attn_output)
+         return output
+ 
+diff --git a/vllm/model_executor/models/qwen3_5.py b/vllm/model_executor/models/qwen3_5.py
+index 9b1dc7468..753ac600c 100644
+--- a/vllm/model_executor/models/qwen3_5.py
++++ b/vllm/model_executor/models/qwen3_5.py
+@@ -202,13 +202,14 @@ class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
+             device=hidden_states.device,
+         )
+ 
+-        torch.ops.vllm.gdn_attention_core(
+-            mixed_qkv,
+-            b,
+-            a,
+-            core_attn_out,
+-            self.prefix,
+-        )
++        if not self.disable_attn:
++            torch.ops.vllm.gdn_attention_core(
++                mixed_qkv,
++                b,
++                a,
++                core_attn_out,
++                self.prefix,
++            )
+ 
+         # ============================================================
+         # Part 3: Output Projection
+diff --git a/vllm/model_executor/models/qwen3_moe.py b/vllm/model_executor/models/qwen3_moe.py
+index f2ce070be..f52af86bc 100644
+--- a/vllm/model_executor/models/qwen3_moe.py
++++ b/vllm/model_executor/models/qwen3_moe.py
+@@ -318,6 +318,15 @@ class Qwen3MoeAttention(nn.Module):
+             rope_parameters=rope_parameters,
+             dual_chunk_attention_config=dual_chunk_attention_config,
+         )
++
++        self.disable_attn = False
++        import os
++        if "VLLM_DISABLE_ATTN" in os.environ and os.environ["VLLM_DISABLE_ATTN"] == "1":
++            print(
++                "Hijacking the attention in Qwen3Moe to forbid the use of the attention."
++            )
++            self.disable_attn = True
++
+         self.attn = Attention(
+             self.num_heads,
+             self.head_dim,
+@@ -353,7 +362,11 @@ class Qwen3MoeAttention(nn.Module):
+         k_by_head = self.k_norm(k_by_head)
+         k = k_by_head.view(k.shape)
+         q, k = self.rotary_emb(positions, q, k)
+-        attn_output = self.attn(q, k, v)
++        # For profiling, we hijack here to forbid the use of the attention.
++        if self.disable_attn:
++            attn_output = q
++        else:
++            attn_output = self.attn(q, k, v)
+         output, _ = self.o_proj(attn_output)
+         return output
+ 
+diff --git a/vllm/model_executor/models/qwen3_next.py b/vllm/model_executor/models/qwen3_next.py
+index bbe30c719..9a737d8b8 100644
+--- a/vllm/model_executor/models/qwen3_next.py
++++ b/vllm/model_executor/models/qwen3_next.py
+@@ -490,5 +490,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
+         self.A_log = nn.Parameter(
+             torch.empty(
+                 divide(self.num_v_heads, self.tp_size),
++                dtype=torch.float32,
+             )
+         )
+@@ -523,6 +524,15 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
+             raise ValueError(f"Duplicate layer name: {prefix}")
+         compilation_config.static_forward_context[prefix] = self
+ 
++        self.disable_attn = False
++        import os
++        if "VLLM_DISABLE_ATTN" in os.environ and os.environ["VLLM_DISABLE_ATTN"] == "1":
++            print(
++                "Hijacking the linear attention in Qwen3Next to forbid the use of "
++                "the attention."
++            )
++            self.disable_attn = True
++
+     def create_qkvz_proj(
+         self,
+         hidden_size: int,
+@@ -668,13 +678,14 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
+             device=hidden_states.device,
+         )
+ 
+-        torch.ops.vllm.gdn_attention_core(
+-            mixed_qkv,
+-            b,
+-            a,
+-            core_attn_out,
+-            self.prefix,
+-        )
++        if not self.disable_attn:
++            torch.ops.vllm.gdn_attention_core(
++                mixed_qkv,
++                b,
++                a,
++                core_attn_out,
++                self.prefix,
++            )
+ 
+         # ============================================================
+         # Part 3: Output Projection
+@@ -1112,6 +1123,15 @@ class Qwen3NextAttention(nn.Module):
+             dual_chunk_attention_config=self.dual_chunk_attention_config,
+         )
+ 
++        self.disable_attn = False
++        import os
++        if "VLLM_DISABLE_ATTN" in os.environ and os.environ["VLLM_DISABLE_ATTN"] == "1":
++            print(
++                "Hijacking the attention in Qwen3Next to forbid the use of the "
++                "attention."
++            )
++            self.disable_attn = True
++
+         self.attn = Attention(
+             self.num_heads,
+             self.head_dim,
+@@ -1160,7 +1180,11 @@ class Qwen3NextAttention(nn.Module):
+ 
+         q, k = self.rotary_emb(positions, q, k)
+ 
+-        attn_output = self.attn(q, k, v)
++        # For profiling, we hijack here to forbid the use of the attention.
++        if self.disable_attn:
++            attn_output = q
++        else:
++            attn_output = self.attn(q, k, v)
+ 
+         if self.attn_output_gate:
+             gate = torch.sigmoid(gate)
+diff --git a/vllm/model_executor/models/chatglm.py b/vllm/model_executor/models/chatglm.py
+index f48e5dc1d..0721d042e 100644
+--- a/vllm/model_executor/models/chatglm.py
++++ b/vllm/model_executor/models/chatglm.py
+@@ -113,6 +113,14 @@ class GLMAttention(nn.Module):
+             rope_parameters=rope_parameters,
+             is_neox_style=is_neox_style,
+         )
++        self.disable_attn = False
++        import os
++        if "VLLM_DISABLE_ATTN" in os.environ and os.environ["VLLM_DISABLE_ATTN"] == "1":
++            print(
++                "Hijacking the attention in ChatGLM to forbid the use of the attention."
++            )
++            self.disable_attn = True
++
+         self.attn = Attention(
+             self.num_heads,
+             self.head_dim,
+@@ -131,7 +139,11 @@ class GLMAttention(nn.Module):
+         qkv, _ = self.query_key_value(hidden_states)
+         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+         q, k = self.rotary_emb(position_ids, q, k)
+-        context_layer = self.attn(q, k, v)
++        # For profiling, we hijack here to forbid the use of the attention.
++        if self.disable_attn:
++            context_layer = q
++        else:
++            context_layer = self.attn(q, k, v)
+         attn_output, _ = self.dense(context_layer)
+         return attn_output
+ 
+diff --git a/vllm/model_executor/models/glm4.py b/vllm/model_executor/models/glm4.py
+index 89447927d..1375d33df 100644
+--- a/vllm/model_executor/models/glm4.py
++++ b/vllm/model_executor/models/glm4.py
+@@ -123,6 +123,12 @@ class Glm4Attention(nn.Module):
+             rope_parameters=config.rope_parameters,
+             is_neox_style=False,
+         )
++        self.disable_attn = False
++        import os
++        if "VLLM_DISABLE_ATTN" in os.environ and os.environ["VLLM_DISABLE_ATTN"] == "1":
++            print("Hijacking the attention in Glm4 to forbid the use of the attention.")
++            self.disable_attn = True
++
+         self.attn = Attention(
+             self.num_heads,
+             self.head_dim,
+@@ -142,7 +148,11 @@ class Glm4Attention(nn.Module):
+         qkv, _ = self.qkv_proj(hidden_states)
+         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+         q, k = self.rotary_emb(positions, q, k)
+-        attn_output = self.attn(q, k, v)
++        # For profiling, we hijack here to forbid the use of the attention.
++        if self.disable_attn:
++            attn_output = q
++        else:
++            attn_output = self.attn(q, k, v)
+         output, _ = self.o_proj(attn_output)
+         return output
+ 
 diff --git a/vllm/v1/engine/async_llm.py b/vllm/v1/engine/async_llm.py
 index a9c42e78e..4823ca330 100644
 --- a/vllm/v1/engine/async_llm.py

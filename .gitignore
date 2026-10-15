@@ -7,6 +7,7 @@ third_party/
 third_party_old/
 third_party_old_2/
 third_party_new/
+third_party*/
 
 # Auto-generated Sphinx api docs
 /docs/generated
@@ -59,7 +60,7 @@ examples/sciaccel_rl/slides/
 # "topology" contains "log", so the rule above swallows this config group.
 !psrl/eval/config/topology/
 **/models/
-**/data/
+# **/data/
 **/results/
 
 
@@ -261,3 +262,35 @@ dmypy.json
 *.swp
 # macOS
 .DS_Store
+
+# vim
+*.swp
+
+# ckpt
+*.lock
+
+# data
+*.parquet
+
+
+# local logs
+logs
+log
+outputs
+
+
+/models/
+/data/
+docs/
+
+vllm_bench_results/
+
+.codex
+
+examples/bench/rollout/exp/
+
+.config/
+.triton/
+
+*.csv
+analysis/

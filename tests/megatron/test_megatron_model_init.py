@@ -1,172 +1,99 @@
 """
-Megatron training client Actor example
-Focuses on core Megatron model loading functionality
+Verify Megatron Bridge initialization and parameter conversion across parallel layouts.
 """
 
+import argparse
 import os
+import subprocess
+import sys
+from pathlib import Path
 
-import ray
-import torch
-import torch.distributed as dist
-from megatron.core import parallel_state as mpu
-from verl.models.mcore import init_mcore_model
-from verl.utils.device import get_device_name
-from verl.utils.megatron_utils import get_model
-from verl.utils.torch_dtypes import PrecisionType
+import pytest
 
-# Import verl utilities
-from verl.workers.megatron_workers import set_random_seed
-
-QWEN_MODEL_PATH = os.environ.get("PSRL_WORKSPACE", "/tmp") + "/models/Qwen2.5-0.5B-Instruct"
+pytestmark = [pytest.mark.gpu, pytest.mark.integration]
 
 
-def make_dual_print(log_path, prefix=None):
-    with open(log_path, "w") as _:
-        pass
+def _run_model_check(model_path, tensor_parallel_size, pipeline_parallel_size, virtual_pipeline_size):
+    import torch
+    import torch.distributed as distributed
+    from megatron.bridge import AutoBridge
+    from megatron.core import parallel_state
+    from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
+    from psrl.utils.converter import create_parameter_mapping
+    from psrl.utils.converter.megatron_converter import convert_megatron_inplace
+    from transformers import AutoConfig
 
-    def dual_print(*args, **kwargs):
-        msg = " ".join(str(a) for a in args)
-        if prefix:
-            msg = f"[{prefix}] {msg}"
-        print(msg, **kwargs)
-        with open(log_path, "a") as f:
-            print(msg, file=f, **kwargs)
-
-    return dual_print
-
-
-@ray.remote(num_cpus=1)
-class MegatronClient:
-    def __init__(self, rank, world_size, model_path=QWEN_MODEL_PATH, log_dir=None):
-        # Set environment variables
-        os.environ["MASTER_ADDR"] = "localhost"
-        os.environ["MASTER_PORT"] = "29500"
-        os.environ["RANK"] = str(rank)
-        os.environ["WORLD_SIZE"] = str(world_size)
-        os.environ["LOCAL_RANK"] = str(rank)
-
-        self.rank = rank
-        self.world_size = world_size
-        self.model_path = model_path
-
-        log_path = os.path.join(log_dir, f"{self.rank}.log")
-        self.print = make_dual_print(log_path, prefix=f"Rank {self.rank}")
-
-        self.print(f"[Rank {rank}] Initializing MegatronClient begin")
-
-        # Initialize distributed training
-        dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
-        # torch.cuda.set_device(0)
-
-        # Initialize Megatron parallel state
-        self._init_megatron_parallel()
-
-        # Set random seed
-        set_random_seed(0)
-
-        # Initialize model
-        self._init_model()
-
-        # Convert model
-        self._covert_model()
-
-        self.print(f"[Rank {rank}] Initialization completed")
-
-    def _init_megatron_parallel(self):
-        """Initialize Megatron parallel state"""
-        mpu.initialize_model_parallel(
-            tensor_model_parallel_size=2,
-            pipeline_model_parallel_size=2,
-            virtual_pipeline_model_parallel_size=2,
-            use_sharp=False,
-            context_parallel_size=1,
-            expert_model_parallel_size=1,
-            expert_tensor_parallel_size=1,
-            nccl_communicator_config_path=None,
+    torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+    distributed.init_process_group(backend="nccl")
+    try:
+        parallel_state.initialize_model_parallel(
+            tensor_model_parallel_size=tensor_parallel_size,
+            pipeline_model_parallel_size=pipeline_parallel_size,
+            virtual_pipeline_model_parallel_size=virtual_pipeline_size,
         )
-        self.print(f"[Rank {self.rank}] Megatron parallel initialized")
-
-    def _init_model(self):
-        """Initialize Megatron model"""
-        from transformers import AutoConfig
-        from verl.models.mcore import hf_to_mcore_config
-        from verl.utils.fs import copy_to_local
-
-        # Copy model to local
-        local_path = copy_to_local(self.model_path)
-
-        # Get HuggingFace config
-        hf_config = AutoConfig.from_pretrained(local_path, trust_remote_code=False)
-
-        # Convert to Megatron config
-        dtype = PrecisionType.to_dtype(torch.bfloat16)
-        tf_config = hf_to_mcore_config(hf_config, dtype)
-
-        self.print(f"[Rank {self.rank}] Config loaded: {hf_config.model_type}")
-
-        def model_provider(pre_process, post_process):
-            """Model provider function"""
-            model = init_mcore_model(
-                tf_config,
-                hf_config,
-                pre_process,
-                post_process,
-                share_embeddings_and_output_weights=getattr(hf_config, "tie_word_embeddings", False),
-                value=False,
-            )
-            model.to(get_device_name())
-            return model
-
-        # Initialize Megatron model
-        self.model = get_model(
-            model_provider,
-            wrap_with_ddp=True,
-            use_distributed_optimizer=True,
+        model_parallel_cuda_manual_seed(0)
+        config = AutoConfig.from_pretrained(model_path, local_files_only=True)
+        bridge = AutoBridge.from_hf_config(config)
+        provider = bridge.to_megatron_provider(load_weights=False)
+        provider.apply_overrides_and_finalize(
+            dtype=torch.bfloat16,
+            overrides={
+                "tensor_model_parallel_size": tensor_parallel_size,
+                "pipeline_model_parallel_size": pipeline_parallel_size,
+                "virtual_pipeline_model_parallel_size": virtual_pipeline_size,
+                "sequence_parallel": False,
+            },
         )
+        modules = provider.provide_distributed_model(wrap_with_ddp=False)
+        with torch.no_grad():
+            for module in modules:
+                for parameter in module.parameters():
+                    parameter.fill_(1)
 
-        self.print(f"[Rank {self.rank}] Model initialized: {self.model}")
-
-    def _covert_model(self):
-        """Convert model"""
-        from psrl.utils.converter import create_parameter_mapping
-        from psrl.utils.converter.megatron_converter import convert_megatron_inplace
-        from transformers import AutoConfig
-
-        model_config = AutoConfig.from_pretrained(self.model_path)
-        parameter_mapping = create_parameter_mapping("Megatron", model_config)
-        unified_state_dict, sharding_dict = convert_megatron_inplace(parameter_mapping, self.model)
-        self.print(f"[Rank {self.rank}] Model converted: {unified_state_dict}")
-        self.print(f"[Rank {self.rank}] Sharding dict: {sharding_dict}")
-
-    def shutdown(self):
-        """Shutdown client"""
-        self.print(f"[Rank {self.rank}] Shutting down")
-        if dist.is_initialized():
-            dist.destroy_process_group()
-        return True
+        mapping = create_parameter_mapping("Megatron", config)
+        conversion = convert_megatron_inplace(mapping, modules)
+        assert conversion.state_dict, "Every rank must expose converted parameters."
+        assert conversion.state_dict.keys() == conversion.sharding_dict.keys(), (
+            "Every converted parameter must have sharding metadata."
+        )
+        conversion.sync_plan.before_push(conversion.state_dict)
+        for name, tensor in conversion.state_dict.items():
+            assert conversion.sharding_dict[name].shard_indices, f"Missing local shards for {name!r}."
+            torch.testing.assert_close(tensor, torch.ones_like(tensor))
+        conversion.sync_plan.after_push(conversion.state_dict)
+        distributed.barrier()
+    finally:
+        parallel_state.destroy_model_parallel()
+        distributed.destroy_process_group()
 
 
-def test_megatron():
-    """Test Megatron client"""
-    log_dir = os.environ.get("PSRL_WORKSPACE") + "/psrl/unit_tests/megatron/log"
-    os.makedirs(log_dir, exist_ok=True)
-    ray.init(ignore_reinit_error=True)
-
-    num_workers = 8
-    print(f"Testing MegatronClient with {num_workers} workers")
-
-    # Create clients
-    clients = [
-        MegatronClient.options(num_gpus=1).remote(rank=rank, world_size=num_workers, log_dir=log_dir)
-        for rank in range(num_workers)
+@pytest.mark.parametrize(("pipeline_parallel_size", "virtual_pipeline_size"), [(1, None), (2, 2)])
+def test_megatron(gpu_model_path, gpu_tensor_parallel_size, pipeline_parallel_size, virtual_pipeline_size):
+    command = [
+        sys.executable,
+        "-m",
+        "torch.distributed.run",
+        "--standalone",
+        f"--nproc-per-node={gpu_tensor_parallel_size * pipeline_parallel_size}",
+        str(Path(__file__).resolve()),
+        "--model",
+        gpu_model_path,
+        "--tp",
+        str(gpu_tensor_parallel_size),
+        "--pp",
+        str(pipeline_parallel_size),
     ]
-
-    # Shutdown clients
-    ray.get([client.shutdown.remote() for client in clients])
-    ray.shutdown()
-
-    print("Test completed successfully!")
+    if virtual_pipeline_size is not None:
+        command.extend(["--vp", str(virtual_pipeline_size)])
+    result = subprocess.run(command, capture_output=True, text=True, timeout=600)
+    assert result.returncode == 0, f"Megatron initialization or conversion failed. {result.stdout} {result.stderr}"
 
 
 if __name__ == "__main__":
-    test_megatron()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", required=True)
+    parser.add_argument("--tp", type=int, default=2)
+    parser.add_argument("--pp", type=int, default=1)
+    parser.add_argument("--vp", type=int)
+    arguments = parser.parse_args()
+    _run_model_check(arguments.model, arguments.tp, arguments.pp, arguments.vp)

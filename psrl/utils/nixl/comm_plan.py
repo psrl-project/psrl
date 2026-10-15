@@ -6,11 +6,15 @@ analyzing network topology and tensor distribution to generate optimal
 PUSH_SIDE to PS and PULL_SIDE from PS communication plans.
 """
 
+import logging
 import pickle
+import time
 from dataclasses import dataclass
 
 from psrl.utils.nixl.global_vars import GLOBAL_TOPOLOGY
 from psrl.utils.nixl.nixl_spec import NIXLClientInfo, NIXLClientType
+
+psrl_logger = logging.getLogger(__file__)
 
 
 @dataclass
@@ -37,6 +41,41 @@ class NIXLCommPlan:
     def deserialize(data):
         """Deserialize communication plan"""
         return pickle.loads(data)
+
+    def for_clients(self, client_names: list[str] | set[str] | tuple[str, ...]) -> "NIXLCommPlan":
+        """Return the initiating-side plan entries used by ``client_names``."""
+        selected = set(client_names)
+        return NIXLCommPlan(
+            push_to_ps_plan={
+                client_name: self.push_to_ps_plan[client_name]
+                for client_name in selected
+                if client_name in self.push_to_ps_plan
+            },
+            rollout_pull_from_ps_plan={
+                client_name: self.rollout_pull_from_ps_plan[client_name]
+                for client_name in selected
+                if client_name in self.rollout_pull_from_ps_plan
+            },
+            train_pull_from_ps_plan={
+                client_name: self.train_pull_from_ps_plan[client_name]
+                for client_name in selected
+                if client_name in self.train_pull_from_ps_plan
+            },
+        )
+
+    def target_clients_for(self, client_names: list[str] | set[str] | tuple[str, ...]) -> set[str]:
+        """Return remote clients referenced by the selected initiating-side plans."""
+        targets: set[str] = set()
+        selected = set(client_names)
+        for plan in (
+            self.push_to_ps_plan,
+            self.rollout_pull_from_ps_plan,
+            self.train_pull_from_ps_plan,
+        ):
+            for client_name in selected:
+                for target_plans in plan.get(client_name, {}).values():
+                    targets.update(target_plans)
+        return targets
 
     def get_push_plan(self, push_client: str, key: str) -> dict[str, list[tuple[int, ...]]]:
         """Get write plan for specific PUSH_SIDE client and key"""
@@ -131,6 +170,22 @@ class CommunicationPlanner:
             else:
                 raise ValueError(f"Unknown client type: {client_info.type}")
 
+        client_type_counts: dict[str, int] = {}
+        for client_info in clients.values():
+            client_type = client_info.type.value
+            client_type_counts[client_type] = client_type_counts.get(client_type, 0) + 1
+        psrl_logger.info(
+            "[comm-plan] start clients=%d key_refs=%d shard_refs=%d client_types=%s",
+            len(clients),
+            sum(len(client.tensor_infos) for client in clients.values()),
+            sum(
+                len(tensor_info.sharding.shard_indices)
+                for client in clients.values()
+                for tensor_info in client.tensor_infos.values()
+            ),
+            client_type_counts,
+        )
+
         # Initialize communication plans
         push_to_ps_plan = {client: {} for client_group in push_client_groups.values() for client in client_group}
         rollout_pull_from_ps_plan = {
@@ -142,18 +197,32 @@ class CommunicationPlanner:
 
         # Generate PUSH_SIDE -> PS_FOR_PUSH write plan
         if push_client_groups and ps_for_push_client_groups:
-            self._make_push_to_ps_plan(clients, push_client_groups, ps_for_push_client_groups, push_to_ps_plan)
+            self._make_push_to_ps_plan(
+                clients,
+                push_client_groups,
+                ps_for_push_client_groups,
+                push_to_ps_plan,
+                phase_name="push_to_ps",
+            )
 
         # Generate PUSH_SIDE <- PS_FOR_PUSH read plan
         if train_pull_client_groups and ps_for_train_pull_client_groups:
             self._make_pull_from_ps_plan(
-                clients, train_pull_client_groups, ps_for_train_pull_client_groups, train_pull_from_ps_plan
+                clients,
+                train_pull_client_groups,
+                ps_for_train_pull_client_groups,
+                train_pull_from_ps_plan,
+                phase_name="train_pull_from_ps",
             )
 
         # Generate PULL_SIDE <- PS_FOR_PULL read plan
         if rollout_pull_client_groups and ps_for_rollout_pull_client_groups:
             self._make_pull_from_ps_plan(
-                clients, rollout_pull_client_groups, ps_for_rollout_pull_client_groups, rollout_pull_from_ps_plan
+                clients,
+                rollout_pull_client_groups,
+                ps_for_rollout_pull_client_groups,
+                rollout_pull_from_ps_plan,
+                phase_name="rollout_pull_from_ps",
             )
 
         return NIXLCommPlan(
@@ -168,6 +237,7 @@ class CommunicationPlanner:
         push_client_groups: dict[int, list[str]],  # {client_group_id: [client_name_1, client_name_2, ...]}
         ps_for_push_client_groups: dict[int, list[str]],  # {client_group_id: [client_name_1, client_name_2, ...]}
         push_to_ps_plan: dict[str, dict[str, dict[str, list[tuple[int, ...]]]]],
+        phase_name: str,
     ):
         """Generate PUSH_SIDE to PS write plan with load balancing"""
         self._make_comm_plan_generic(
@@ -176,6 +246,7 @@ class CommunicationPlanner:
             target_client_groups=ps_for_push_client_groups,
             comm_plan=push_to_ps_plan,
             is_push_to_ps=True,
+            phase_name=phase_name,
         )
 
     def _make_pull_from_ps_plan(
@@ -184,6 +255,7 @@ class CommunicationPlanner:
         pull_client_groups: dict[int, list[str]],  # {client_group_id: [client_name_1, client_name_2, ...]}
         ps_for_pull_client_groups: dict[int, list[str]],  # {client_group_id: [client_name_1, client_name_2, ...]}
         pull_from_ps_plan: dict[str, dict[str, dict[str, list[tuple[int, ...]]]]],
+        phase_name: str,
     ):
         """Generate PULL_SIDE from PS read plan with load balancing"""
         self._make_comm_plan_generic(
@@ -192,7 +264,17 @@ class CommunicationPlanner:
             target_client_groups=pull_client_groups,
             comm_plan=pull_from_ps_plan,
             is_push_to_ps=False,
+            phase_name=phase_name,
         )
+
+    @staticmethod
+    def _summarize_shards(shards, limit: int = 24) -> dict[str, object]:
+        shard_list = sorted(shards)
+        return {
+            "count": len(shard_list),
+            "sample": shard_list[:limit],
+            "truncated": len(shard_list) > limit,
+        }
 
     def _make_comm_plan_generic(
         self,
@@ -201,6 +283,7 @@ class CommunicationPlanner:
         target_client_groups: dict[int, list[str]],  # {client_group_id: [client_name_1, client_name_2, ...]}
         comm_plan: dict[str, dict[str, dict[str, list[tuple[int, ...]]]]],
         is_push_to_ps: bool,
+        phase_name: str,
     ):
         """
         Generic communication plan generation with intelligent load balancing
@@ -216,10 +299,36 @@ class CommunicationPlanner:
             comm_plan: Communication plan to update
             is_push_to_ps: True if PUSH_SIDE to PS_FOR_PUSH, False if PS_FOR_PULL to PULL_SIDE
         """
+        phase_start = time.monotonic()
+        last_progress_time = phase_start
+        processed_target_keys = 0
+        processed_target_shards = 0
+        source_selection_steps = 0
+        source_clients = [client for group in source_client_groups.values() for client in group]
+        target_clients = [client for group in target_client_groups.values() for client in group]
+        psrl_logger.info(
+            "[comm-plan] phase=%s start source_clients=%d target_clients=%d "
+            "source_key_refs=%d target_key_refs=%d source_shard_refs=%d target_shard_refs=%d",
+            phase_name,
+            len(source_clients),
+            len(target_clients),
+            sum(len(clients[client].tensor_infos) for client in source_clients),
+            sum(len(clients[client].tensor_infos) for client in target_clients),
+            sum(
+                len(tensor_info.sharding.shard_indices)
+                for client in source_clients
+                for tensor_info in clients[client].tensor_infos.values()
+            ),
+            sum(
+                len(tensor_info.sharding.shard_indices)
+                for client in target_clients
+                for tensor_info in clients[client].tensor_infos.values()
+            ),
+        )
+
         # Track data volume for each source client
-        source_client_volumes = {
-            client: 0.0 for client_group in source_client_groups.values() for client in client_group
-        }
+        source_client_volumes = {client: 0.0 for client in source_clients}
+        source_key_counts = {client: len(clients[client].tensor_infos) for client in source_clients}
 
         restrict_target_to_source_client_group_mapping = {}
         if self.restrict_client_group_comm:
@@ -289,16 +398,25 @@ class CommunicationPlanner:
                     # Use the precomputed key->sources mapping and a set for O(1) discard,
                     # avoiding O(G × C_s) per-key scan and O(C_s) list.remove().
                     if key not in key_to_srcs:
-                        client_keys_info = {}
-                        for source_client_group_id in restrict_ids:
-                            for source_client in source_client_groups[source_client_group_id]:
-                                client_keys_info[source_client] = list(clients[source_client].tensor_infos.keys())
-                        error_msg = (
-                            f"No available key {key} in source client groups {source_client_groups}, "
-                            f"which is required by target client {target_client}, "
-                            f"keys of them are {client_keys_info}"
+                        eligible_source_clients = [
+                            source_client
+                            for source_client_group_id in restrict_ids
+                            for source_client in source_client_groups[source_client_group_id]
+                        ]
+                        sources_with_key = [
+                            source_client
+                            for source_client in source_clients
+                            if key in clients[source_client].tensor_infos
+                        ]
+                        raise RuntimeError(
+                            f"Communication plan has no source for target key: phase={phase_name}, "
+                            f"target={target_client}, key={key!r}, "
+                            f"target_shards={self._summarize_shards(target_tensor_info.sharding.shard_indices)}, "
+                            f"restricted_source_group_ids={restrict_ids}, "
+                            f"eligible_source_clients={eligible_source_clients}, "
+                            f"sources_with_key={sources_with_key}, "
+                            f"source_key_counts={source_key_counts}"
                         )
-                        raise AssertionError(error_msg)
 
                     # Build a working set for this (target_client, key) assignment round:
                     # set.discard() is O(1) vs list.remove() O(C_s).
@@ -307,10 +425,14 @@ class CommunicationPlanner:
                     # Get all shards needed by target client
                     needed_shards = set(target_tensor_info.sharding.shard_indices)
                     assigned_shards = set()
+                    processed_target_keys += 1
+                    processed_target_shards += len(needed_shards)
 
                     # Greedy assignment: prioritize source clients with
                     # optimal network connection and least data volume
                     while assigned_shards != needed_shards:
+                        source_selection_steps += 1
+
                         # Custom sorting: first by link type (LOCAL > NVLINK > PCIE > IB > ETH), then by data volume
                         def sort_key(source_client, target_client=target_client):
                             # Get link priority (higher is better)
@@ -373,6 +495,31 @@ class CommunicationPlanner:
                         f"Not all shards assigned for key {key} on target client {target_client}. "
                         f"Needed shards: {needed_shards}. Assigned shards: {assigned_shards}."
                     )
+
+                    now = time.monotonic()
+                    if now - last_progress_time >= 5.0:
+                        psrl_logger.info(
+                            "[comm-plan] phase=%s progress elapsed_s=%.3f processed_target_keys=%d "
+                            "processed_target_shards=%d source_selection_steps=%d current_target=%s current_key=%s",
+                            phase_name,
+                            now - phase_start,
+                            processed_target_keys,
+                            processed_target_shards,
+                            source_selection_steps,
+                            target_client,
+                            key,
+                        )
+                        last_progress_time = now
+
+        psrl_logger.info(
+            "[comm-plan] phase=%s done elapsed_s=%.3f processed_target_keys=%d "
+            "processed_target_shards=%d source_selection_steps=%d",
+            phase_name,
+            time.monotonic() - phase_start,
+            processed_target_keys,
+            processed_target_shards,
+            source_selection_steps,
+        )
 
     def _get_link_type_for_test(self, client1: str, client2: str):
         """Helper method for testing to get link type between clients"""

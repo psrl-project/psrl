@@ -1,164 +1,89 @@
 """
-Example usage of vLLM to HuggingFace state dict converter.
-
-This example shows how to convert a vLLM model's state dict to HuggingFace format
-using the new class-based API.
+Verify the vLLM weight layout and Hugging Face conversion on real GPU workers.
 """
 
+import argparse
 import os
+import subprocess
+import sys
 
-from psrl.utils.converter import create_parameter_mapping
-from psrl.utils.converter.vllm_converter import convert_vllm_inplace
+import pytest
 
-
-def example_with_real_model():
-    """Example with a real vLLM model instance, now supports distributed torchrun."""
-    import torch.distributed as dist
-    from vllm import LLM
-
-    # Read distributed info from environment variables
-    rank = int(os.environ.get("RANK", "0"))
-    world_size = int(os.environ.get("WORLD_SIZE", "1"))
-    psrl_workspace = os.environ.get("PSRL_WORKSPACE", "./psrl_workspace")
-    print(f"rank: {rank}, world_size: {world_size}, psrl_workspace: {psrl_workspace}")
-
-    # Initialize torch distributed
-    dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
-
-    model_path = f"{psrl_workspace}/models/Qwen2.5-0.5B-Instruct"
-    llm = LLM(
-        model=model_path,
-        tensor_parallel_size=world_size,
-        distributed_executor_backend="external_launcher",
-        seed=0,
-    )
-    vllm_model = llm.llm_engine.model_executor.driver_worker.model_runner.model
-    # for module_prefix, module in vllm_model.named_modules():
-    # print(f"[rank{rank}] {module_prefix}: {module.__class__.__name__}, {module}")
-
-    model_class = type(vllm_model)
-    print(f"[rank{rank}] model_class: {model_class}")
-    print(f"[rank{rank}] vllm_model: {vllm_model}")
-
-    # Get the state dict
-    vllm_state_dict = vllm_model.state_dict()
-    for name, param in vllm_state_dict.items():
-        print(f"[rank{rank}] {name}: {param.shape}")
-
-    # Convert to HuggingFace format
-    from transformers import AutoConfig
-
-    model_config = AutoConfig.from_pretrained(model_path)
-    param_mapping = create_parameter_mapping(model_class, model_config)
-    hf_state_dict, sharding = convert_vllm_inplace(param_mapping, vllm_model, tp_rank=rank)
-
-    # Save the converted state dict for each rank
-    print("=" * 50)
-    for name in hf_state_dict:
-        print(f"[rank{rank}] {name}: {hf_state_dict[name].shape}, {hf_state_dict[name].sum()}, {sharding[name]}")
-    # torch.save(hf_state_dict, f"converted_model_rank{rank}.pth")
-
-    dist.barrier()
-    dist.destroy_process_group()
+pytestmark = [pytest.mark.gpu, pytest.mark.integration]
 
 
-def test_new_api_no_parameter_mapping():
-    """Test that SupportsWeightLayoutSpec models convert without any ParameterMapping.
-
-    Requires: GPU, torchrun, checkpoint at $PSRL_WORKSPACE/models/Qwen2.5-0.5B-Instruct
-    """
+def _inspect_model(model):
     import torch
-    import torch.distributed as dist
     from psrl.utils.converter.vllm_converter import convert_vllm_inplace
-    from vllm import LLM
-    from vllm.model_executor.models.interfaces import SupportsWeightLayoutSpec
+    from vllm.distributed import get_tensor_model_parallel_rank
+    from vllm_patches.interfaces import supports_weight_layout
+    from vllm_patches.weight_layout import WeightLayoutPlan
 
-    rank = int(os.environ.get("RANK", "0"))
-    world_size = int(os.environ.get("WORLD_SIZE", "1"))
-    psrl_workspace = os.environ.get("PSRL_WORKSPACE", "./psrl_workspace")
+    assert supports_weight_layout(model), "The model must expose its weight layout."
+    plan = model.build_weight_layout()
+    assert isinstance(plan, WeightLayoutPlan), "The model must return a weight layout plan."
+    resolved = plan.flatten()
+    for name in model.state_dict():
+        if "qkv_proj" in name or "gate_up_proj" in name:
+            module = model.get_submodule(name.rsplit(".", 1)[0])
+            assert resolved.matches_rules(name, module), f"Missing layout rules for packed parameter {name!r}."
 
-    dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
-
-    model_path = f"{psrl_workspace}/models/Qwen2.5-0.5B-Instruct"
-    llm = LLM(
-        model=model_path,
-        tensor_parallel_size=world_size,
-        distributed_executor_backend="external_launcher",
-        seed=0,
+    state, shardings = convert_vllm_inplace(model, tp_rank=get_tensor_model_parallel_rank())
+    assert state, "Converted parameters must be present."
+    assert state.keys() == shardings.keys(), "Every converted parameter must have sharding metadata."
+    for name, tensor in state.items():
+        assert isinstance(tensor, torch.Tensor), f"Expected a tensor for {name!r}."
+        assert shardings[name].shard_indices, f"Expected local shards for {name!r}."
+    for suffix in ("q_proj.weight", "k_proj.weight", "v_proj.weight", "gate_proj.weight", "up_proj.weight"):
+        assert any(key.endswith(suffix) for key in state), f"Missing split parameter {suffix!r}."
+    assert not any("qkv_proj" in key or "gate_up_proj" in key for key in state), (
+        "Packed projections must be decomposed into Hugging Face parameters."
     )
-    vllm_model = llm.llm_engine.model_executor.driver_worker.model_runner.model
-
-    # Verify the model implements SupportsWeightLayoutSpec
-    assert isinstance(vllm_model, SupportsWeightLayoutSpec), (
-        f"{type(vllm_model).__name__} must implement SupportsWeightLayoutSpec"
-    )
-
-    # New API: no parameter_mapping needed
-    hf_state_dict, sharding = convert_vllm_inplace(vllm_model, tp_rank=rank)
-
-    # Verify output shape/completeness
-    assert len(hf_state_dict) > 0, "Converted state dict must be non-empty"
-    for name, tensor in hf_state_dict.items():
-        assert isinstance(tensor, torch.Tensor), f"Expected tensor for {name}"
-        assert name in sharding, f"Missing sharding entry for {name}"
-
-    # Verify packed params have been decomposed
-    param_names = set(hf_state_dict.keys())
-    assert any("q_proj" in n for n in param_names), "q_proj must appear after QKV decomposition"
-    assert any("k_proj" in n for n in param_names), "k_proj must appear after QKV decomposition"
-    assert any("v_proj" in n for n in param_names), "v_proj must appear after QKV decomposition"
-    assert not any("qkv_proj" in n for n in param_names), "qkv_proj must not appear after splitting into q/k/v."
-    assert any("gate_proj" in n for n in param_names), "gate_proj must appear after gate_up split"
-    assert not any("gate_up_proj" in n for n in param_names), "gate_up_proj must not appear after splitting."
-
-    print(f"[rank{rank}] PASS: {len(hf_state_dict)} parameters converted")
-    for name in sorted(hf_state_dict.keys())[:5]:
-        print(f"[rank{rank}]   {name}: {hf_state_dict[name].shape}, sharding={sharding[name]}")
-
-    dist.barrier()
-    dist.destroy_process_group()
+    return len(state)
 
 
-def test_spec_consistency():
-    """Verify the model's spec stacked_params are consistent with its state dict keys.
-
-    Requires: GPU, torchrun, checkpoint at $PSRL_WORKSPACE/models/Qwen2.5-0.5B-Instruct
-    """
-    import torch.distributed as dist
+def _run_gpu_checks(model_path, tensor_parallel_size):
     from vllm import LLM
 
-    rank = int(os.environ.get("RANK", "0"))
-    world_size = int(os.environ.get("WORLD_SIZE", "1"))
-    psrl_workspace = os.environ.get("PSRL_WORKSPACE", "./psrl_workspace")
-
-    dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
-
-    model_path = f"{psrl_workspace}/models/Qwen2.5-0.5B-Instruct"
-    llm = LLM(
+    engine = LLM(
         model=model_path,
-        tensor_parallel_size=world_size,
-        distributed_executor_backend="external_launcher",
+        tensor_parallel_size=tensor_parallel_size,
+        distributed_executor_backend="mp",
+        enforce_eager=True,
+        max_model_len=128,
+        max_num_seqs=1,
+        gpu_memory_utilization=0.25,
         seed=0,
     )
-    vllm_model = llm.llm_engine.model_executor.driver_worker.model_runner.model
-    spec = vllm_model.get_weight_layout_spec()
+    parameter_counts = engine.apply_model(_inspect_model)
+    assert len(parameter_counts) == tensor_parallel_size, "Every tensor parallel rank must be inspected."
+    assert len(set(parameter_counts)) == 1, "Tensor parallel ranks must expose the same parameter count."
 
-    # Every packed suffix in spec must appear in at least one actual parameter name
-    state_dict_keys = set(vllm_model.state_dict().keys())
-    for packed_suffix, hf_suffix, shard_id in spec.stacked_params:
-        found = any(packed_suffix in k for k in state_dict_keys)
-        assert found, f"The model state dict lacks spec entry {packed_suffix!r}. The spec may be stale."
 
-    print(f"[rank{rank}] PASS: spec consistency verified, {len(spec.stacked_params)} stacked entries")
-
-    dist.barrier()
-    dist.destroy_process_group()
+def test_real_vllm_weight_layout(gpu_model_path, gpu_tensor_parallel_size):
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "tests.state_dict.test_vllm_converter",
+            "--model",
+            gpu_model_path,
+            "--tp",
+            str(gpu_tensor_parallel_size),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=600,
+        env={**os.environ, "VLLM_ALLOW_INSECURE_SERIALIZATION": "1"},
+    )
+    assert result.returncode == 0, f"vLLM worker conversion failed. {result.stdout} {result.stderr}"
 
 
 if __name__ == "__main__":
-    import sys
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", required=True)
+    parser.add_argument("--tp", type=int, default=2)
+    arguments = parser.parse_args()
+    from tests.state_dict.test_vllm_converter import _run_gpu_checks
 
-    if len(sys.argv) > 1 and sys.argv[1] == "consistency":
-        test_spec_consistency()
-    else:
-        test_new_api_no_parameter_mapping()
+    _run_gpu_checks(arguments.model, arguments.tp)

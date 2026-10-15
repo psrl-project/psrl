@@ -1,0 +1,431 @@
+diff --git a/src/ucp/core/ucp_device.c b/src/ucp/core/ucp_device.c
+index 7f089d0bb..7845e3265 100644
+--- a/src/ucp/core/ucp_device.c
++++ b/src/ucp/core/ucp_device.c
+@@ -431,7 +431,7 @@ ucp_device_mem_list_create(ucp_ep_h ep,
+     }
+ 
+     /* Perform pseudo lane selection without size */
+-    rkey_config = &ep->worker->rkey_config[rkey_cfg_index];
++    rkey_config = &ucs_array_elem(&ep->worker->rkey_config, rkey_cfg_index);
+     ep_config = ucp_worker_ep_config(ep->worker, rkey_config->key.ep_cfg_index);
+     remote_sys_dev = rkey_config->key.sys_dev;
+     remote_md_map  = rkey_config->key.md_map;
+diff --git a/src/ucp/core/ucp_ep.h b/src/ucp/core/ucp_ep.h
+index 0024393d0..9c9a1fa81 100644
+--- a/src/ucp/core/ucp_ep.h
++++ b/src/ucp/core/ucp_ep.h
+@@ -570,12 +570,12 @@ typedef struct ucp_ep_ext {
+ typedef struct ucp_ep {
+     ucp_worker_h                  worker;        /* Worker this endpoint belongs to */
+ 
+-    uint8_t                       refcount;      /* Reference counter: 0 - it is
+-                                                    allowed to destroy EP */
+     ucp_worker_cfg_index_t        cfg_index;     /* Configuration index */
+     ucp_ep_match_conn_sn_t        conn_sn;       /* Sequence number for remote connection */
+-    ucp_lane_index_t              am_lane;       /* Cached value */
+     ucp_ep_flags_t                flags;         /* Endpoint flags */
++    uint8_t                       refcount;      /* Reference counter: 0 - it is
++                                                    allowed to destroy EP */
++    ucp_lane_index_t              am_lane;       /* Cached value */
+     /* Transports for every lane */
+     uct_ep_h                      uct_eps[UCP_MAX_FAST_PATH_LANES];
+     ucp_ep_ext_t                  *ext;                   /* Endpoint extension */
+diff --git a/src/ucp/core/ucp_rkey.c b/src/ucp/core/ucp_rkey.c
+index 7a92313fd..101001a5f 100644
+--- a/src/ucp/core/ucp_rkey.c
++++ b/src/ucp/core/ucp_rkey.c
+@@ -1308,7 +1308,8 @@ void ucp_rkey_proto_select_dump(ucp_worker_h worker,
+                                 ucp_worker_cfg_index_t rkey_cfg_index,
+                                 ucs_string_buffer_t *strb)
+ {
+-    const ucp_rkey_config_t *rkey_config = &worker->rkey_config[rkey_cfg_index];
++    const ucp_rkey_config_t *rkey_config = &ucs_array_elem(&worker->rkey_config,
++                                                           rkey_cfg_index);
+ 
+     ucp_proto_select_dump_short(&rkey_config->put_short, "put_short", strb);
+     ucp_proto_select_info(worker, rkey_config->key.ep_cfg_index, rkey_cfg_index,
+diff --git a/src/ucp/core/ucp_rkey.inl b/src/ucp/core/ucp_rkey.inl
+index efd691454..4c93d7b9d 100644
+--- a/src/ucp/core/ucp_rkey.inl
++++ b/src/ucp/core/ucp_rkey.inl
+@@ -41,7 +41,7 @@ static UCS_F_ALWAYS_INLINE ucp_rkey_config_t *
+ ucp_rkey_config(ucp_worker_h worker, ucp_rkey_h rkey)
+ {
+     ucs_assert(rkey->cfg_index != UCP_WORKER_CFG_INDEX_NULL);
+-    return &worker->rkey_config[rkey->cfg_index];
++    return &ucs_array_elem(&worker->rkey_config, rkey->cfg_index);
+ }
+ 
+ static UCS_F_ALWAYS_INLINE uct_rkey_t
+diff --git a/src/ucp/core/ucp_types.h b/src/ucp/core/ucp_types.h
+index 67b2ee87f..a399562b7 100644
+--- a/src/ucp/core/ucp_types.h
++++ b/src/ucp/core/ucp_types.h
+@@ -55,10 +55,10 @@ UCP_UINT_TYPE(UCP_MAX_SYS_DEVICES)   ucp_sys_dev_map_t;
+ 
+ 
+ /* Worker configuration index for endpoint and rkey */
+-typedef uint8_t                      ucp_worker_cfg_index_t;
++typedef uint16_t                     ucp_worker_cfg_index_t;
+-#define UCP_WORKER_MAX_EP_CONFIG     UINT8_MAX
++#define UCP_WORKER_MAX_EP_CONFIG     UINT16_MAX
+-#define UCP_WORKER_MAX_RKEY_CONFIG   128
+-#define UCP_WORKER_CFG_INDEX_NULL    UINT8_MAX
++#define UCP_WORKER_MAX_RKEY_CONFIG   UINT16_MAX
++#define UCP_WORKER_CFG_INDEX_NULL    UINT16_MAX
+ 
+ 
+ /* Forward declarations */
+diff --git a/src/ucp/core/ucp_worker.c b/src/ucp/core/ucp_worker.c
+index bbd53bdb7..33d9d473a 100644
+--- a/src/ucp/core/ucp_worker.c
++++ b/src/ucp/core/ucp_worker.c
+@@ -2054,23 +2054,52 @@ static void ucp_worker_destroy_mpools(ucp_worker_h worker)
+                       !(worker->flags & UCP_WORKER_FLAG_IGNORE_REQUEST_LEAK));
+ }
+ 
+-static unsigned ucp_worker_ep_config_free_cb(void *arg)
++static unsigned ucp_worker_config_free_cb(void *arg)
+ {
+     ucs_free(arg);
+     return 1;
+ }
+ 
+-static int
+-ucp_worker_ep_config_filter(const ucs_callbackq_elem_t *elem, void *arg)
++static int ucp_worker_config_filter(const ucs_callbackq_elem_t *elem, void *arg)
+ {
+-    if (elem->cb == ucp_worker_ep_config_free_cb) {
+-        ucp_worker_ep_config_free_cb(elem->arg);
++    if (elem->cb == ucp_worker_config_free_cb) {
++        ucp_worker_config_free_cb(elem->arg);
+         return 1;
+     }
+ 
+     return 0;
+ }
+ 
++static void
++ucp_worker_config_array_release_old(ucp_worker_h worker, void *old_buffer,
++                                    void *new_buffer, size_t copy_size)
++{
++    if (old_buffer != NULL) {
++        memcpy(new_buffer, old_buffer, copy_size);
++        /* Schedule release of old configs array backing buffer on the main
++         * thread (this func can be called by async thread).
++         * So the main thread can still access the old configuration buffer
++         * if it's modified by async thread.
++         */
++        ucs_callbackq_add_oneshot(&worker->uct->progress_q, worker,
++                                  ucp_worker_config_free_cb, old_buffer);
++    }
++}
++
++#define ucp_worker_config_array_append(_worker, _config_array, _failed_actions) \
++    ({ \
++        void *_old_buffer_p = NULL; \
++        ucs_typeof(ucs_array_begin(_config_array)) _config; \
++        \
++        _config = ucs_array_append_safe(_config_array, &_old_buffer_p, \
++                                        _failed_actions); \
++        ucp_worker_config_array_release_old( \
++                _worker, _old_buffer_p, ucs_array_begin(_config_array), \
++                sizeof(*ucs_array_begin(_config_array)) * \
++                        (ucs_array_length(_config_array) - 1)); \
++        _config; \
++    })
++
+ /* All the ucp endpoints will share the configurations. No need for every ep to
+  * have its own configuration (to save memory footprint). Same config can be used
+  * by different eps.
+@@ -2084,7 +2113,6 @@ ucs_status_t ucp_worker_get_ep_config(ucp_worker_h worker,
+ {
+     ucp_worker_cfg_index_t ep_cfg_index;
+     ucp_ep_config_t *ep_config;
+-    void *old_ep_cfg_buf;
+     ucs_status_t status;
+ 
+     ucs_assertv_always(key->num_lanes > 0,
+@@ -2106,20 +2134,8 @@ ucs_status_t ucp_worker_get_ep_config(ucp_worker_h worker,
+         return UCS_ERR_EXCEEDS_LIMIT;
+     }
+ 
+-    old_ep_cfg_buf = NULL;
+-    ep_config      = ucs_array_append_safe(&worker->ep_config, &old_ep_cfg_buf,
+-                                           return UCS_ERR_NO_MEMORY);
+-    if (old_ep_cfg_buf != NULL) {
+-        memcpy(worker->ep_config.buffer, old_ep_cfg_buf,
+-               sizeof(ucp_ep_config_t) * ucs_array_length(&worker->ep_config));
+-        /* Schedule release of old ep configs array backing buffer on the main
+-         * thread (this func can be called by async thread).
+-         * So the main thread can still access the old configuration buffer
+-         * if it's modified by async thread.
+-         */
+-        ucs_callbackq_add_oneshot(&worker->uct->progress_q, worker,
+-                                  ucp_worker_ep_config_free_cb, old_ep_cfg_buf);
+-    }
++    ep_config = ucp_worker_config_array_append(worker, &worker->ep_config,
++                                               return UCS_ERR_NO_MEMORY);
+ 
+     status = ucp_ep_config_init(worker, ep_config, key);
+     if (status != UCS_OK) {
+@@ -2173,17 +2189,18 @@ ucp_worker_add_rkey_config(ucp_worker_h worker,
+ 
+     ucs_assert(worker->context->config.ext.proto_enable);
+ 
+-    if (worker->rkey_config_count >= UCP_WORKER_MAX_RKEY_CONFIG) {
++    if (ucs_array_length(&worker->rkey_config) >= UCP_WORKER_MAX_RKEY_CONFIG) {
+         ucs_error("too many rkey configurations: %d (max: %d)",
+-                  worker->rkey_config_count, UCP_WORKER_MAX_RKEY_CONFIG);
++                  ucs_array_length(&worker->rkey_config),
++                  UCP_WORKER_MAX_RKEY_CONFIG);
+ 
+         /* Dump all rkey config keys */
+         ucs_string_buffer_init(&log_strb);
+ 
+-        ucs_carray_for_each(rkey_config, worker->rkey_config,
+-                            worker->rkey_config_count) {
+-            ucs_string_buffer_appendf(&log_strb, "rkey [%ld]: ",
+-                                      rkey_config - worker->rkey_config);
++        ucs_array_for_each(rkey_config, &worker->rkey_config) {
++            ucs_string_buffer_appendf(
++                    &log_strb, "rkey [%ld]: ",
++                    rkey_config - ucs_array_begin(&worker->rkey_config));
+             ucp_worker_dump_rkey_config_key(&log_strb, &rkey_config->key);
+         }
+ 
+@@ -2201,8 +2218,12 @@ ucp_worker_add_rkey_config(ucp_worker_h worker,
+                (lanes_distance != NULL));
+ 
+     /* Initialize rkey configuration */
+-    rkey_cfg_index   = worker->rkey_config_count;
+-    rkey_config      = &worker->rkey_config[rkey_cfg_index];
++    rkey_cfg_index      = ucs_array_length(&worker->rkey_config);
++    rkey_config         = ucp_worker_config_array_append(
++                                  worker, &worker->rkey_config,
++                                  status = UCS_ERR_NO_MEMORY;
++                                  goto err;);
++
+     rkey_config->key = *key;
+ 
+     /* Copy remote-memory distance of each lane to rkey config */
+@@ -2222,7 +2243,7 @@ ucp_worker_add_rkey_config(ucp_worker_h worker,
+                     &khret);
+     if (khret == UCS_KH_PUT_FAILED) {
+         status = UCS_ERR_NO_MEMORY;
+-        goto err;
++        goto err_pop_rkey_config;
+     }
+ 
+     /* We should not get into this function if key already exists */
+@@ -2235,7 +2256,6 @@ ucp_worker_add_rkey_config(ucp_worker_h worker,
+         goto err_kh_del;
+     }
+ 
+-    ++worker->rkey_config_count;
+     *cfg_index_p = rkey_cfg_index;
+ 
+     /* Set threshold for short put */
+@@ -2252,6 +2272,8 @@ ucp_worker_add_rkey_config(ucp_worker_h worker,
+ 
+ err_kh_del:
+     kh_del(ucp_worker_rkey_config, &worker->rkey_config_hash, khiter);
++err_pop_rkey_config:
++    ucs_array_pop_back(&worker->rkey_config);
+ err:
+     return status;
+ }
+@@ -2277,11 +2299,10 @@ static void ucp_worker_destroy_configs(ucp_worker_h worker)
+     }
+     ucs_array_cleanup_dynamic(&worker->ep_config);
+ 
+-    ucs_carray_for_each(rkey_config, worker->rkey_config,
+-                        worker->rkey_config_count) {
++    ucs_array_for_each(rkey_config, &worker->rkey_config) {
+         ucp_proto_select_cleanup(&rkey_config->proto_select);
+     }
+-    worker->rkey_config_count = 0;
++    ucs_array_cleanup_dynamic(&worker->rkey_config);
+ }
+ 
+ ucs_thread_mode_t ucp_worker_get_thread_mode(uint64_t worker_flags)
+@@ -2499,7 +2520,6 @@ ucs_status_t ucp_worker_create(ucp_context_h context,
+     worker->flush_ops_count      = 0;
+     worker->fence_seq            = 0;
+     worker->inprogress           = 0;
+-    worker->rkey_config_count    = 0;
+     worker->num_active_ifaces    = 0;
+     worker->num_ifaces           = 0;
+     worker->am_message_id        = ucs_generate_uuid(0);
+@@ -2589,6 +2609,12 @@ ucs_status_t ucp_worker_create(ucp_context_h context,
+      * of the use-cases. Will be extended automatically otherwise. */
+     ucs_array_reserve(&worker->ep_config, 32);
+ 
++    ucs_array_init_dynamic(&worker->rkey_config);
++
++    /* Reserve 32 elements for rkey configs.
++     * Will be extended automatically if needed in rkey_config addition. */
++    ucs_array_reserve(&worker->rkey_config, 32);
++
+     /* Create statistics */
+     status = UCS_STATS_NODE_ALLOC(&worker->stats, &ucp_worker_stats_class,
+                                   ucs_stats_get_root(), "-%p", worker);
+@@ -2956,7 +2982,7 @@ void ucp_worker_destroy(ucp_worker_h worker)
+     }
+ 
+     ucs_callbackq_remove_oneshot(&worker->uct->progress_q, worker,
+-                                 ucp_worker_ep_config_filter, NULL);
++                                 ucp_worker_config_filter, NULL);
+ 
+     ucs_vfs_obj_remove(worker);
+     ucp_tag_match_cleanup(&worker->tm);
+@@ -3361,7 +3387,8 @@ void ucp_worker_print_info(ucp_worker_h worker, FILE *stream)
+ 
+     if (context->config.ext.proto_enable) {
+         ucs_string_buffer_init(&strb);
+-        for (rkey_cfg_index = 0; rkey_cfg_index < worker->rkey_config_count;
++        for (rkey_cfg_index = 0;
++             rkey_cfg_index < ucs_array_length(&worker->rkey_config);
+              ++rkey_cfg_index) {
+             ucp_rkey_proto_select_dump(worker, rkey_cfg_index, &strb);
+             ucs_string_buffer_appendf(&strb, "\n");
+diff --git a/src/ucp/core/ucp_worker.h b/src/ucp/core/ucp_worker.h
+index 561f0ec80..39ebc94ce 100644
+--- a/src/ucp/core/ucp_worker.h
++++ b/src/ucp/core/ucp_worker.h
+@@ -291,6 +291,9 @@ struct ucp_worker_cm {
+ UCS_PTR_MAP_TYPE(ep, 1);
+ UCS_PTR_MAP_TYPE(request, 0);
+ 
++/* rkey configuration storage */
++UCS_ARRAY_DECLARE_TYPE(ucp_rkey_config_arr_t, unsigned, ucp_rkey_config_t);
++
+ 
+ /**
+  * UCP worker (thread context).
+@@ -367,8 +370,7 @@ typedef struct ucp_worker {
+ 
+     ucp_ep_config_arr_t              ep_config; /* EP configurations storage */
+ 
+-    unsigned                         rkey_config_count;   /* Current number of rkey configurations */
+-    ucp_rkey_config_t                rkey_config[UCP_WORKER_MAX_RKEY_CONFIG];
++    ucp_rkey_config_arr_t            rkey_config; /* Rkey configurations storage */
+ 
+     struct {
+         int                          timerfd;             /* Timer needed to signal to user's fd when
+diff --git a/src/ucp/proto/proto_common.c b/src/ucp/proto/proto_common.c
+index d729decf4..9ed62fb06 100644
+--- a/src/ucp/proto/proto_common.c
++++ b/src/ucp/proto/proto_common.c
+@@ -431,10 +431,13 @@ ucp_proto_common_get_lane_perf(const ucp_proto_common_init_params_t *params,
+ 
+     /* For remote memory access, consider remote system topology distance */
+     if (params->flags & UCP_PROTO_COMMON_INIT_FLAG_REMOTE_ACCESS) {
+-        ucs_assertv(params->super.rkey_cfg_index < worker->rkey_config_count,
+-                    "rkey_cfg_index=%d rkey_config_count=%d",
+-                    params->super.rkey_cfg_index, worker->rkey_config_count);
+-        rkey_config = &worker->rkey_config[params->super.rkey_cfg_index];
++        ucs_assertv(params->super.rkey_cfg_index <
++                            ucs_array_length(&worker->rkey_config),
++                    "rkey_cfg_index=%d rkey_config array length=%u",
++                    params->super.rkey_cfg_index,
++                    ucs_array_length(&worker->rkey_config));
++        rkey_config = &ucs_array_elem(&worker->rkey_config,
++                                      params->super.rkey_cfg_index);
+         distance    = rkey_config->lanes_distance[lane];
+         ucp_proto_common_update_lane_perf_by_distance(
+                 tl_perf, perf_node, &distance, "remote system", "sys-dev %d %s",
+diff --git a/src/ucp/proto/proto_debug.c b/src/ucp/proto/proto_debug.c
+index d84547b3f..0cee9564e 100644
+--- a/src/ucp/proto/proto_debug.c
++++ b/src/ucp/proto/proto_debug.c
+@@ -459,8 +459,9 @@ void ucp_proto_select_info_str(ucp_worker_h worker,
+             ucs_string_buffer_appendf(strb, " to ");
+         }
+ 
+-        ucp_rkey_config_dump_brief(&worker->rkey_config[rkey_cfg_index].key,
+-                                   strb);
++        ucp_rkey_config_dump_brief(
++                &ucs_array_elem(&worker->rkey_config, rkey_cfg_index).key,
++                strb);
+     }
+ 
+     if (ucp_proto_select_is_atomic_op(select_param)) {
+diff --git a/src/ucp/proto/proto_select.c b/src/ucp/proto/proto_select.c
+index f529b46fc..d772c4be0 100644
+--- a/src/ucp/proto/proto_select.c
++++ b/src/ucp/proto/proto_select.c
+@@ -201,7 +201,8 @@ ucp_proto_select_init_protocols(ucp_worker_h worker,
+     if (rkey_cfg_index == UCP_WORKER_CFG_INDEX_NULL) {
+         init_params.rkey_config_key = NULL;
+     } else {
+-        init_params.rkey_config_key = &worker->rkey_config[rkey_cfg_index].key;
++        init_params.rkey_config_key =
++                &ucs_array_elem(&worker->rkey_config, rkey_cfg_index).key;
+ 
+         /* rkey configuration must be for the same ep */
+         ucs_assertv_always(
+@@ -817,7 +818,8 @@ ucp_proto_select_get(ucp_worker_h worker, ucp_worker_cfg_index_t ep_cfg_index,
+         *new_rkey_cfg_index = UCP_WORKER_CFG_INDEX_NULL;
+         return &ucs_array_elem(&worker->ep_config, ep_cfg_index).proto_select;
+     } else {
+-        rkey_config_key = worker->rkey_config[rkey_cfg_index].key;
++        rkey_config_key =
++                ucs_array_elem(&worker->rkey_config, rkey_cfg_index).key;
+ 
+         rkey_config_key.ep_cfg_index = ep_cfg_index;
+         status = ucp_worker_rkey_config_get(worker, &rkey_config_key, NULL,
+@@ -827,7 +829,8 @@ ucp_proto_select_get(ucp_worker_h worker, ucp_worker_cfg_index_t ep_cfg_index,
+             return NULL;
+         }
+ 
+-        return &worker->rkey_config[*new_rkey_cfg_index].proto_select;
++        return &ucs_array_elem(&worker->rkey_config, *new_rkey_cfg_index)
++                        .proto_select;
+     }
+ }
+ 
+diff --git a/src/ucp/rndv/proto_rndv.c b/src/ucp/rndv/proto_rndv.c
+index dc516b23c..41ab9c001 100644
+--- a/src/ucp/rndv/proto_rndv.c
++++ b/src/ucp/rndv/proto_rndv.c
+@@ -177,7 +177,7 @@ static ucs_status_t ucp_proto_rndv_ctrl_select_remote_proto(
+     ucs_trace("rndv select remote protocols rkey_config->md_map=0x%" PRIx64,
+               rkey_config_key.md_map);
+ 
+-    rkey_config = &worker->rkey_config[rkey_cfg_index];
++    rkey_config   = &ucs_array_elem(&worker->rkey_config, rkey_cfg_index);
+     *remote_proto = ucp_proto_select_lookup_slow(worker,
+                                                  &rkey_config->proto_select, 1,
+                                                  ep_cfg_index, rkey_cfg_index,
+diff --git a/test/gtest/common/test_obj_size.cc b/test/gtest/common/test_obj_size.cc
+index 6b3a0c0b7..2924aa90e 100644
+--- a/test/gtest/common/test_obj_size.cc
++++ b/test/gtest/common/test_obj_size.cc
+@@ -52,9 +52,9 @@ UCS_TEST_F(test_obj_size, size) {
+     EXPECTED_SIZE(ucp_ep_t, 64);
+     EXPECTED_SIZE(ucp_ep_ext_t, 208);
+ #if ENABLE_PARAMS_CHECK
+-    EXPECTED_SIZE(ucp_rkey_t, 32 + sizeof(ucp_ep_h));
++    EXPECTED_SIZE(ucp_rkey_t, 40 + sizeof(ucp_ep_h));
+ #else
+-    EXPECTED_SIZE(ucp_rkey_t, 32);
++    EXPECTED_SIZE(ucp_rkey_t, 40);
+ #endif
+     /* TODO reduce request size to 240 or less after removing old protocols state */
+     EXPECTED_SIZE(ucp_request_t, 272);
+diff --git a/test/gtest/ucp/test_ucp_proto_mock.cc b/test/gtest/ucp/test_ucp_proto_mock.cc
+index 379fd861f..4a49fd68b 100644
+--- a/test/gtest/ucp/test_ucp_proto_mock.cc
++++ b/test/gtest/ucp/test_ucp_proto_mock.cc
+@@ -284,7 +284,8 @@ public:
+                                   ucp_proto_select_key_t key,
+                                   ucp_worker_cfg_index_t rkey_cfg_index)
+     {
+-        ucp_rkey_config_t *config = &e.worker()->rkey_config[rkey_cfg_index];
++        ucp_rkey_config_t *config = &ucs_array_elem(&e.worker()->rkey_config,
++                                                    rkey_cfg_index);
+         check_proto_select(e, config->proto_select, data_vec, key,
+                            rkey_cfg_index);
+     }

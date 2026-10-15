@@ -9,6 +9,8 @@ from psrl.utils.rollout.vision_utils import normalize_messages
 from psrl.workers.agent_loop.loops import session_agent_loop as module
 from psrl.workers.agent_loop.loops.session_agent_loop import SessionAgentLoop
 
+pytestmark = pytest.mark.cpu_test
+
 
 def _bare_loop(trajectory_id_strategy: str = "manual") -> SessionAgentLoop:
     loop = SessionAgentLoop.__new__(SessionAgentLoop)

@@ -1,0 +1,777 @@
++ source /apdcephfs_zwfy10/share_303541817/yfzhao/psrl/env/env_311.sh
+++ CONDA_PATH=/apdcephfs_zwfy10/share_303541817/yfzhao/miniconda
+++ source /apdcephfs_zwfy10/share_303541817/yfzhao/miniconda/etc/profile.d/conda.sh
++++ export CONDA_EXE=/apdcephfs_zwfy10/share_303541817/yfzhao/miniconda/bin/conda
++++ CONDA_EXE=/apdcephfs_zwfy10/share_303541817/yfzhao/miniconda/bin/conda
++++ export _CONDA_EXE=/apdcephfs_zwfy10/share_303541817/yfzhao/miniconda/bin/conda
++++ _CONDA_EXE=/apdcephfs_zwfy10/share_303541817/yfzhao/miniconda/bin/conda
++++ export _CE_M=
++++ _CE_M=
++++ export _CE_CONDA=
++++ _CE_CONDA=
++++ export CONDA_PYTHON_EXE=/apdcephfs_zwfy10/share_303541817/yfzhao/miniconda/bin/python
++++ CONDA_PYTHON_EXE=/apdcephfs_zwfy10/share_303541817/yfzhao/miniconda/bin/python
++++ export _CONDA_ROOT=/apdcephfs_zwfy10/share_303541817/yfzhao/miniconda
++++ _CONDA_ROOT=/apdcephfs_zwfy10/share_303541817/yfzhao/miniconda
++++ '[' -z x ']'
+++ conda activate zyf-psrl-311
+++ local cmd=activate
+++ case "$cmd" in
+++ __conda_activate activate zyf-psrl-311
+++ '[' -n '' ']'
+++ local ask_conda
++++ PS1=
++++ __conda_exe shell.posix activate zyf-psrl-311
++++ '[' -n '' ']'
++++ /apdcephfs_zwfy10/share_303541817/yfzhao/miniconda/bin/conda shell.posix activate zyf-psrl-311
+++ ask_conda='. "/jizhicfs/johnnyslin/anaconda3/etc/conda/deactivate.d/libglib_deactivate.sh"
+export _CE_M='\'''\''
+export _CE_CONDA='\'''\''
+PS1='\''(zyf-psrl-311) '\''
+export PATH='\''/usr/local/cuda/bin:/usr/local/openmpi/bin:/opt/rh/gcc-toolset-13/root/usr/bin:/jizhicfs/pkuhetu/yfzhao/.codex/tmp/arg0/codex-arg0Ya2DLd:/root/.cursor/cli/servers/Stable-0fb762053c34788bb7760d5673f8a6d4c8589d50/server/bin/remote-cli:/usr/local/cuda/bin:/usr/local/openmpi/bin:/opt/rh/gcc-toolset-13/root/usr/bin:/apdcephfs_zwfy10/share_303541817/yfzhao/miniconda/envs/zyf-psrl-311/bin:/jizhicfs/johnnyslin/anaconda3/bin:/jizhicfs/johnnyslin/anaconda3/condabin:/usr/local/cuda/bin:/usr/local/openmpi/bin:/opt/rh/gcc-toolset-13/root/usr/bin:/usr/local/cuda/bin:/usr/local/openmpi/bin:/opt/rh/gcc-toolset-13/root/usr/bin:/usr/share/Modules/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/root/bin:/root/bin:/jizhicfs/lhy:/root/bin:/root/.cursor-server/extensions/openai.chatgpt-26.715.31925-linux-x64/bin/linux-x86_64:/root/bin'\''
+export CONDA_PREFIX='\''/apdcephfs_zwfy10/share_303541817/yfzhao/miniconda/envs/zyf-psrl-311'\''
+export CONDA_SHLVL='\''2'\''
+export CONDA_DEFAULT_ENV='\''zyf-psrl-311'\''
+export CONDA_PROMPT_MODIFIER='\''(zyf-psrl-311) '\''
+export CONDA_PREFIX_1='\''/jizhicfs/johnnyslin/anaconda3'\''
+export CONDA_EXE='\''/apdcephfs_zwfy10/share_303541817/yfzhao/miniconda/bin/conda'\''
+export _CONDA_EXE='\''/apdcephfs_zwfy10/share_303541817/yfzhao/miniconda/bin/conda'\''
+export CONDA_PYTHON_EXE='\''/apdcephfs_zwfy10/share_303541817/yfzhao/miniconda/bin/python'\''
+export _CONDA_ROOT='\''/apdcephfs_zwfy10/share_303541817/yfzhao/miniconda'\'''
+++ eval '. "/jizhicfs/johnnyslin/anaconda3/etc/conda/deactivate.d/libglib_deactivate.sh"
+export _CE_M='\'''\''
+export _CE_CONDA='\'''\''
+PS1='\''(zyf-psrl-311) '\''
+export PATH='\''/usr/local/cuda/bin:/usr/local/openmpi/bin:/opt/rh/gcc-toolset-13/root/usr/bin:/jizhicfs/pkuhetu/yfzhao/.codex/tmp/arg0/codex-arg0Ya2DLd:/root/.cursor/cli/servers/Stable-0fb762053c34788bb7760d5673f8a6d4c8589d50/server/bin/remote-cli:/usr/local/cuda/bin:/usr/local/openmpi/bin:/opt/rh/gcc-toolset-13/root/usr/bin:/apdcephfs_zwfy10/share_303541817/yfzhao/miniconda/envs/zyf-psrl-311/bin:/jizhicfs/johnnyslin/anaconda3/bin:/jizhicfs/johnnyslin/anaconda3/condabin:/usr/local/cuda/bin:/usr/local/openmpi/bin:/opt/rh/gcc-toolset-13/root/usr/bin:/usr/local/cuda/bin:/usr/local/openmpi/bin:/opt/rh/gcc-toolset-13/root/usr/bin:/usr/share/Modules/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/root/bin:/root/bin:/jizhicfs/lhy:/root/bin:/root/.cursor-server/extensions/openai.chatgpt-26.715.31925-linux-x64/bin/linux-x86_64:/root/bin'\''
+export CONDA_PREFIX='\''/apdcephfs_zwfy10/share_303541817/yfzhao/miniconda/envs/zyf-psrl-311'\''
+export CONDA_SHLVL='\''2'\''
+export CONDA_DEFAULT_ENV='\''zyf-psrl-311'\''
+export CONDA_PROMPT_MODIFIER='\''(zyf-psrl-311) '\''
+export CONDA_PREFIX_1='\''/jizhicfs/johnnyslin/anaconda3'\''
+export CONDA_EXE='\''/apdcephfs_zwfy10/share_303541817/yfzhao/miniconda/bin/conda'\''
+export _CONDA_EXE='\''/apdcephfs_zwfy10/share_303541817/yfzhao/miniconda/bin/conda'\''
+export CONDA_PYTHON_EXE='\''/apdcephfs_zwfy10/share_303541817/yfzhao/miniconda/bin/python'\''
+export _CONDA_ROOT='\''/apdcephfs_zwfy10/share_303541817/yfzhao/miniconda'\'''
++++ . /jizhicfs/johnnyslin/anaconda3/etc/conda/deactivate.d/libglib_deactivate.sh
+++++ export GSETTINGS_SCHEMA_DIR=
+++++ GSETTINGS_SCHEMA_DIR=
+++++ unset GSETTINGS_SCHEMA_DIR_CONDA_BACKUP
+++++ '[' -z ']'
+++++ unset GSETTINGS_SCHEMA_DIR
++++ export _CE_M=
++++ _CE_M=
++++ export _CE_CONDA=
++++ _CE_CONDA=
++++ PS1='(zyf-psrl-311) '
++++ export PATH=/usr/local/cuda/bin:/usr/local/openmpi/bin:/opt/rh/gcc-toolset-13/root/usr/bin:/jizhicfs/pkuhetu/yfzhao/.codex/tmp/arg0/codex-arg0Ya2DLd:/root/.cursor/cli/servers/Stable-0fb762053c34788bb7760d5673f8a6d4c8589d50/server/bin/remote-cli:/usr/local/cuda/bin:/usr/local/openmpi/bin:/opt/rh/gcc-toolset-13/root/usr/bin:/apdcephfs_zwfy10/share_303541817/yfzhao/miniconda/envs/zyf-psrl-311/bin:/jizhicfs/johnnyslin/anaconda3/bin:/jizhicfs/johnnyslin/anaconda3/condabin:/usr/local/cuda/bin:/usr/local/openmpi/bin:/opt/rh/gcc-toolset-13/root/usr/bin:/usr/local/cuda/bin:/usr/local/openmpi/bin:/opt/rh/gcc-toolset-13/root/usr/bin:/usr/share/Modules/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/root/bin:/root/bin:/jizhicfs/lhy:/root/bin:/root/.cursor-server/extensions/openai.chatgpt-26.715.31925-linux-x64/bin/linux-x86_64:/root/bin
++++ PATH=/usr/local/cuda/bin:/usr/local/openmpi/bin:/opt/rh/gcc-toolset-13/root/usr/bin:/jizhicfs/pkuhetu/yfzhao/.codex/tmp/arg0/codex-arg0Ya2DLd:/root/.cursor/cli/servers/Stable-0fb762053c34788bb7760d5673f8a6d4c8589d50/server/bin/remote-cli:/usr/local/cuda/bin:/usr/local/openmpi/bin:/opt/rh/gcc-toolset-13/root/usr/bin:/apdcephfs_zwfy10/share_303541817/yfzhao/miniconda/envs/zyf-psrl-311/bin:/jizhicfs/johnnyslin/anaconda3/bin:/jizhicfs/johnnyslin/anaconda3/condabin:/usr/local/cuda/bin:/usr/local/openmpi/bin:/opt/rh/gcc-toolset-13/root/usr/bin:/usr/local/cuda/bin:/usr/local/openmpi/bin:/opt/rh/gcc-toolset-13/root/usr/bin:/usr/share/Modules/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/root/bin:/root/bin:/jizhicfs/lhy:/root/bin:/root/.cursor-server/extensions/openai.chatgpt-26.715.31925-linux-x64/bin/linux-x86_64:/root/bin
++++ export CONDA_PREFIX=/apdcephfs_zwfy10/share_303541817/yfzhao/miniconda/envs/zyf-psrl-311
++++ CONDA_PREFIX=/apdcephfs_zwfy10/share_303541817/yfzhao/miniconda/envs/zyf-psrl-311
++++ export CONDA_SHLVL=2
++++ CONDA_SHLVL=2
++++ export CONDA_DEFAULT_ENV=zyf-psrl-311
++++ CONDA_DEFAULT_ENV=zyf-psrl-311
++++ export 'CONDA_PROMPT_MODIFIER=(zyf-psrl-311) '
++++ CONDA_PROMPT_MODIFIER='(zyf-psrl-311) '
++++ export CONDA_PREFIX_1=/jizhicfs/johnnyslin/anaconda3
++++ CONDA_PREFIX_1=/jizhicfs/johnnyslin/anaconda3
++++ export CONDA_EXE=/apdcephfs_zwfy10/share_303541817/yfzhao/miniconda/bin/conda
++++ CONDA_EXE=/apdcephfs_zwfy10/share_303541817/yfzhao/miniconda/bin/conda
++++ export _CONDA_EXE=/apdcephfs_zwfy10/share_303541817/yfzhao/miniconda/bin/conda
++++ _CONDA_EXE=/apdcephfs_zwfy10/share_303541817/yfzhao/miniconda/bin/conda
++++ export CONDA_PYTHON_EXE=/apdcephfs_zwfy10/share_303541817/yfzhao/miniconda/bin/python
++++ CONDA_PYTHON_EXE=/apdcephfs_zwfy10/share_303541817/yfzhao/miniconda/bin/python
++++ export _CONDA_ROOT=/apdcephfs_zwfy10/share_303541817/yfzhao/miniconda
++++ _CONDA_ROOT=/apdcephfs_zwfy10/share_303541817/yfzhao/miniconda
+++ __conda_hashr
+++ '[' -n '' ']'
+++ '[' -n '' ']'
+++ hash -r
+++ export PATH=/apdcephfs_zwfy10/share_303541817/yfzhao/miniconda/envs/zyf-psrl-311/bin:/usr/local/cuda/bin:/usr/local/openmpi/bin:/opt/rh/gcc-toolset-13/root/usr/bin:/jizhicfs/pkuhetu/yfzhao/.codex/tmp/arg0/codex-arg0Ya2DLd:/root/.cursor/cli/servers/Stable-0fb762053c34788bb7760d5673f8a6d4c8589d50/server/bin/remote-cli:/usr/local/cuda/bin:/usr/local/openmpi/bin:/opt/rh/gcc-toolset-13/root/usr/bin:/apdcephfs_zwfy10/share_303541817/yfzhao/miniconda/envs/zyf-psrl-311/bin:/jizhicfs/johnnyslin/anaconda3/bin:/jizhicfs/johnnyslin/anaconda3/condabin:/usr/local/cuda/bin:/usr/local/openmpi/bin:/opt/rh/gcc-toolset-13/root/usr/bin:/usr/local/cuda/bin:/usr/local/openmpi/bin:/opt/rh/gcc-toolset-13/root/usr/bin:/usr/share/Modules/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/root/bin:/root/bin:/jizhicfs/lhy:/root/bin:/root/.cursor-server/extensions/openai.chatgpt-26.715.31925-linux-x64/bin/linux-x86_64:/root/bin
+++ PATH=/apdcephfs_zwfy10/share_303541817/yfzhao/miniconda/envs/zyf-psrl-311/bin:/usr/local/cuda/bin:/usr/local/openmpi/bin:/opt/rh/gcc-toolset-13/root/usr/bin:/jizhicfs/pkuhetu/yfzhao/.codex/tmp/arg0/codex-arg0Ya2DLd:/root/.cursor/cli/servers/Stable-0fb762053c34788bb7760d5673f8a6d4c8589d50/server/bin/remote-cli:/usr/local/cuda/bin:/usr/local/openmpi/bin:/opt/rh/gcc-toolset-13/root/usr/bin:/apdcephfs_zwfy10/share_303541817/yfzhao/miniconda/envs/zyf-psrl-311/bin:/jizhicfs/johnnyslin/anaconda3/bin:/jizhicfs/johnnyslin/anaconda3/condabin:/usr/local/cuda/bin:/usr/local/openmpi/bin:/opt/rh/gcc-toolset-13/root/usr/bin:/usr/local/cuda/bin:/usr/local/openmpi/bin:/opt/rh/gcc-toolset-13/root/usr/bin:/usr/share/Modules/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/root/bin:/root/bin:/jizhicfs/lhy:/root/bin:/root/.cursor-server/extensions/openai.chatgpt-26.715.31925-linux-x64/bin/linux-x86_64:/root/bin
+++ unset http_proxy
+++ export https_proxy=http://star-proxy.oa.com:3128
+++ https_proxy=http://star-proxy.oa.com:3128
+++ export CODEX_HOME=/jizhicfs/pkuhetu/yfzhao/.codex
+++ CODEX_HOME=/jizhicfs/pkuhetu/yfzhao/.codex
+++ export WANDB_MODE=online
+++ WANDB_MODE=online
+++ export WANDB_API_KEY=30753eb810b88f59e0d2f99ce682521161ad8725
+++ WANDB_API_KEY=30753eb810b88f59e0d2f99ce682521161ad8725
+++ export LD_LIBRARY_PATH=/apdcephfs_zwfy10/share_303541817/yfzhao/miniconda/envs/zyf-psrl-311/lib/python3.11/site-packages/nvidia/cudnn/lib:/usr/local/cuda/lib64:/usr/local/openmpi/lib:/opt/rh/gcc-toolset-13/root/usr/lib64:/opt/rh/gcc-toolset-13/root/usr/lib:/usr/local/cuda/lib64:/usr/local/openmpi/lib:/opt/rh/gcc-toolset-13/root/usr/lib64:/opt/rh/gcc-toolset-13/root/usr/lib:/usr/local/cuda/lib64:/usr/local/openmpi/lib:/opt/rh/gcc-toolset-13/root/usr/lib64:/opt/rh/gcc-toolset-13/root/usr/lib:/usr/local/cuda/lib64:/usr/local/openmpi/lib:/opt/rh/gcc-toolset-13/root/usr/lib64:/opt/rh/gcc-toolset-13/root/usr/lib
+++ LD_LIBRARY_PATH=/apdcephfs_zwfy10/share_303541817/yfzhao/miniconda/envs/zyf-psrl-311/lib/python3.11/site-packages/nvidia/cudnn/lib:/usr/local/cuda/lib64:/usr/local/openmpi/lib:/opt/rh/gcc-toolset-13/root/usr/lib64:/opt/rh/gcc-toolset-13/root/usr/lib:/usr/local/cuda/lib64:/usr/local/openmpi/lib:/opt/rh/gcc-toolset-13/root/usr/lib64:/opt/rh/gcc-toolset-13/root/usr/lib:/usr/local/cuda/lib64:/usr/local/openmpi/lib:/opt/rh/gcc-toolset-13/root/usr/lib64:/opt/rh/gcc-toolset-13/root/usr/lib:/usr/local/cuda/lib64:/usr/local/openmpi/lib:/opt/rh/gcc-toolset-13/root/usr/lib64:/opt/rh/gcc-toolset-13/root/usr/lib
+++ export UCX_LOG_LEVEL=VERSION
+++ UCX_LOG_LEVEL=VERSION
+++ export UCX_NET_DEVICES=bond1,bond2,bond3,bond4,bond5,bond6,bond7,bond8,mlx5_bond_1:1,mlx5_bond_4:1,mlx5_bond_3:1,mlx5_bond_2:1,mlx5_bond_7:1,mlx5_bond_6:1,mlx5_bond_8:1,mlx5_bond_5:1
+++ UCX_NET_DEVICES=bond1,bond2,bond3,bond4,bond5,bond6,bond7,bond8,mlx5_bond_1:1,mlx5_bond_4:1,mlx5_bond_3:1,mlx5_bond_2:1,mlx5_bond_7:1,mlx5_bond_6:1,mlx5_bond_8:1,mlx5_bond_5:1
+++ export TORCH_NCCL_TRACE_BUFFER_SIZE=10
+++ TORCH_NCCL_TRACE_BUFFER_SIZE=10
+++ export PYTORCH_NVML_BASED_CUDA_CHECK=1
+++ PYTORCH_NVML_BASED_CUDA_CHECK=1
+++ export TORCH_CUDA_ARCH_LIST=9.0+PTX
+++ TORCH_CUDA_ARCH_LIST=9.0+PTX
+++ export RAY_worker_register_timeout_seconds=600
+++ RAY_worker_register_timeout_seconds=600
+++ export TOKENIZERS_PARALLELISM=true
+++ TOKENIZERS_PARALLELISM=true
+++ export VLLM_USE_V1=1
+++ VLLM_USE_V1=1
+++ export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+++ VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+++ export NCCL_SOCKET_IFNAME=bond1
+++ NCCL_SOCKET_IFNAME=bond1
+++ export NCCL_IB_HCA=mlx5_bond_1,mlx5_bond_5,mlx5_bond_3,mlx5_bond_7,mlx5_bond_4,mlx5_bond_8,mlx5_bond_2,mlx5_bond_6
+++ NCCL_IB_HCA=mlx5_bond_1,mlx5_bond_5,mlx5_bond_3,mlx5_bond_7,mlx5_bond_4,mlx5_bond_8,mlx5_bond_2,mlx5_bond_6
+++ export NCCL_CUMEM_ENABLE=0
+++ NCCL_CUMEM_ENABLE=0
+++ export 'NCCL_ALGO=allgather:^tree'
+++ NCCL_ALGO='allgather:^tree'
+++ export NCCL_PRIMS_PROFILE_ENABLE=0
+++ NCCL_PRIMS_PROFILE_ENABLE=0
+++ export NCCL_CHECK_DISABLE=1
+++ NCCL_CHECK_DISABLE=1
+++ export NCCL_LL_THRESHOLD=16384
+++ NCCL_LL_THRESHOLD=16384
+++ export NCCL_IB_DISABLE=0
+++ NCCL_IB_DISABLE=0
+++ export NCCL_IB_SL=3
+++ NCCL_IB_SL=3
+++ export NCCL_IB_GID_INDEX=3
+++ NCCL_IB_GID_INDEX=3
+++ export NCCL_IB_CUDA_SUPPORT=1
+++ NCCL_IB_CUDA_SUPPORT=1
+++ export NCCL_IB_TC=160
+++ NCCL_IB_TC=160
+++ export NCCL_DEBUG=VERSION
+++ NCCL_DEBUG=VERSION
+++ export NCCL_NET_GDR_READ=1
+++ NCCL_NET_GDR_READ=1
+++ export NCCL_SOCKET_NTHREADS=8
+++ NCCL_SOCKET_NTHREADS=8
+++ export NCCL_COLLNET_ENABLE=0
+++ NCCL_COLLNET_ENABLE=0
+++ export NCCL_NVLS_ENABLE=0
+++ NCCL_NVLS_ENABLE=0
+++ export NCCL_NET_GDR_LEVEL=2
+++ NCCL_NET_GDR_LEVEL=2
+++ export NCCL_PXN_DISABLE=0
+++ NCCL_PXN_DISABLE=0
+++ export SHARP_COLL_ENABLE_SAT=0
+++ SHARP_COLL_ENABLE_SAT=0
+++ echo 'env done'
+env done
++ HOME=/apdcephfs_zwfy10/share_303541817/yfzhao/psrl
+++ python -c 'import psrl; import os; print(os.path.dirname(os.path.dirname(psrl.__file__)))'
++ PSRL_PATH=/apdcephfs_zwfy10/share_303541817/yfzhao/psrl
++ MODEL_NAME=DeepSeek-R1-Distill-Qwen-32B
++ HF_MODEL_PATH=/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/models/DeepSeek-R1-Distill-Qwen-32B
++ GEN_TP=4
++ GEN_PP=1
++ NNODES=1
++ NGPUS_PER_NODE=8
++ max_prompt_length=1024
++ batch_size=32
++ disable_attn=true
++ max_response_length=8192
++ max_model_len=9216
++ num_iterations=1
++ warmup_iterations=1
++ test_mode=synthetic
++ temperature=1.0
++ top_p=1.0
++ top_k=-1
++ enable_chunked_prefill=False
++ profile_root=/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/examples/bench/rollout/exp/deepseek_r1_distill_qwen_32b_tp4_p1024_r8192
++ profile_logs_dir=/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/examples/bench/rollout/exp/deepseek_r1_distill_qwen_32b_tp4_p1024_r8192/details
++ summary_dir=/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/examples/bench/rollout/exp/deepseek_r1_distill_qwen_32b_tp4_p1024_r8192/summary
+++ echo true
+++ tr '[:upper:]' '[:lower:]'
++ disable_tag=true
++ profile_log_file=DeepSeek-R1-Distill-Qwen-32B_Syn_TP4_PP1_B32_P1024_R8192_disable_attn_true
++ run_log=rollout_test_DeepSeek-R1-Distill-Qwen-32B_tp4_b32_p1024_r8192_disable_attn_true.log
++ mkdir -p /apdcephfs_zwfy10/share_303541817/yfzhao/psrl/examples/bench/rollout/exp/deepseek_r1_distill_qwen_32b_tp4_p1024_r8192/details /apdcephfs_zwfy10/share_303541817/yfzhao/psrl/examples/bench/rollout/exp/deepseek_r1_distill_qwen_32b_tp4_p1024_r8192/summary
++ [[ true == \t\r\u\e ]]
++ export VLLM_DISABLE_ATTN=1
++ VLLM_DISABLE_ATTN=1
++ PYTHONUNBUFFERED=1
++ tee rollout_test_DeepSeek-R1-Distill-Qwen-32B_tp4_b32_p1024_r8192_disable_attn_true.log
++ python -m psrl.bench.rollout.main_rollout psrl.logging_path=/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/examples/bench/rollout/exp/deepseek_r1_distill_qwen_32b_tp4_p1024_r8192/summary model.path=/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/models/DeepSeek-R1-Distill-Qwen-32B +model.override_config.max_position_embeddings=32768 rollout.gpu_memory_utilization=0.95 rollout.tensor_parallel_size=4 rollout.pipeline_parallel_size=1 rollout.enable_chunked_prefill=False rollout.max_num_seqs=32 rollout.max_num_batched_tokens=32768 rollout.temperature=1.0 rollout.top_p=1.0 rollout.top_k=-1 +rollout.disable_attn=true rollout.disable_log_stats=false rollout.ignore_eos=false data.max_prompt_length=1024 data.max_response_length=8192 rollout_test.batch_size=32 rollout_test.num_iterations=1 rollout_test.warmup_iterations=1 rollout_test.mode=synthetic rollout_test.profile_logs_dir=/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/examples/bench/rollout/exp/deepseek_r1_distill_qwen_32b_tp4_p1024_r8192/details rollout_test.profile_log_file=DeepSeek-R1-Distill-Qwen-32B_Syn_TP4_PP1_B32_P1024_R8192_disable_attn_true
+ray init kwargs: {'num_cpus': None}
+2026-07-20 17:42:05,219	INFO worker.py:1771 -- Connecting to existing Ray cluster at address: 29.162.226.176:6379...
+2026-07-20 17:42:05,236	INFO worker.py:1942 -- Connected to Ray cluster. View the dashboard at [1m[32mhttp://29.162.226.176:8265 [39m[22m
+<Syn_TP4_PP1_B32_P1024_R8192> - Initialized simple rollout tester.
+[2026-07-20 17:42:06,140][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - Initialized simple rollout tester.
+SimpleRolloutTester hostname: TENCENT64.site, PID: 1446393
+{'data': {'max_prompt_length': 1024,
+          'max_response_length': 8192,
+          'prompt_key': 'prompt',
+          'reward_fn_key': 'data_source',
+          'shuffle': False,
+          'tokenizer': None,
+          'train_batch_size': 32,
+          'train_files': None,
+          'truncation': 'left',
+          'trust_remote_code': False,
+          'use_shm': True,
+          'val_batch_size': 32,
+          'val_files': None,
+          'validation_shuffle': False},
+ 'model': {'override_config': {'max_position_embeddings': 32768,
+                               'model_config': {},
+                               'moe_config': {'freeze_moe_router': False}},
+           'path': '/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/models/DeepSeek-R1-Distill-Qwen-32B',
+           'trust_remote_code': False,
+           'use_fused_kernels': False,
+           'use_remove_padding': False},
+ 'psrl': {'deployment': {'n_rollout_instances': 1},
+          'gen_mode': 'batch',
+          'logging_path': '/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/examples/bench/rollout/exp/deepseek_r1_distill_qwen_32b_tp4_p1024_r8192/summary',
+          'redundant_rollout': {'alg_rollout_n': 1,
+                                'enable': True,
+                                'redundant_global_batch_size': 32,
+                                'redundant_rollout_n': 1}},
+ 'ray_kwargs': {'ray_init': {'num_cpus': None}, 'timeline_json_file': None},
+ 'rollout': {'disable_attn': True,
+             'disable_log_stats': False,
+             'dtype': 'bfloat16',
+             'enable_chunked_prefill': False,
+             'enable_prefix_caching': False,
+             'gpu_memory_utilization': 0.95,
+             'ignore_eos': False,
+             'interrupt_as_prompt': False,
+             'load_format': 'auto',
+             'max_num_batched_tokens': 32768,
+             'max_num_seqs': 32,
+             'nccl_timeout': 600,
+             'pipeline_parallel_size': 1,
+             'status_collection': False,
+             'temperature': 1.0,
+             'tensor_parallel_size': 4,
+             'top_k': -1,
+             'top_p': 1.0},
+ 'rollout_test': {'batch_size': 32,
+                  'mode': 'synthetic',
+                  'num_iterations': 1,
+                  'profile_log_file': 'DeepSeek-R1-Distill-Qwen-32B_Syn_TP4_PP1_B32_P1024_R8192_disable_attn_true',
+                  'profile_logs_dir': '/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/examples/bench/rollout/exp/deepseek_r1_distill_qwen_32b_tp4_p1024_r8192/details',
+                  'warmup_iterations': 1},
+ 'trainer': {'total_epochs': 1, 'total_training_steps': None}}
+<Syn_TP4_PP1_B32_P1024_R8192> - Initializing vLLM AsyncLLM engine...
+[2026-07-20 17:42:06,144][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - Initializing vLLM AsyncLLM engine...
+[2026-07-20 17:42:06,453][vllm_patches][INFO] - ============================================================
+[2026-07-20 17:42:06,453][vllm_patches][INFO] - Initializing vLLM Custom Patches Plugin
+[2026-07-20 17:42:06,455][vllm_patches][INFO] - ============================================================
+[2026-07-20 17:42:10,857][vllm_patches][INFO] - Registered patch: TMSWorkerPatch
+[2026-07-20 17:42:10,858][vllm_patches][INFO] - Registered patch: TMSCudaGraphManagerPatch
+[2026-07-20 17:42:10,859][vllm_patches][INFO] - Registered patch: TMSCUDAGraphWrapperPatch
+[2026-07-20 17:42:10,859][vllm_patches][INFO] - Registered patch: TMSExecutorPatch
+[2026-07-20 17:42:10,859][vllm_patches][INFO] - No custom patches specified (PSRL_VLLM_PATCHES not set)
+[2026-07-20 17:42:10,860][vllm_patches][INFO] - ============================================================
+<Syn_TP4_PP1_B32_P1024_R8192> - Initializing stats collector for monitoring...
+[2026-07-20 17:42:10,860][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - Initializing stats collector for monitoring...
+WARNING 07-20 17:42:10 [envs.py:1717] Unknown vLLM environment variable detected: VLLM_USE_V1
+WARNING 07-20 17:42:10 [envs.py:1717] Unknown vLLM environment variable detected: VLLM_DISABLE_ATTN
+INFO 07-20 17:42:10 [model.py:533] Resolved architecture: Qwen2ForCausalLM
+INFO 07-20 17:42:10 [model.py:1582] Using max model len 9216
+WARNING 07-20 17:42:10 [arg_utils.py:2080] This model does not officially support disabling chunked prefill. Disabling this manually may cause the engine to crash or produce incorrect outputs.
+INFO 07-20 17:42:10 [arg_utils.py:1569] Using ray runtime env (env vars redacted): {}
+INFO 07-20 17:42:10 [vllm.py:775] Asynchronous scheduling is enabled.
+INFO 07-20 17:42:14 [compilation.py:289] Enabled custom fusions: allreduce_rms
+<Syn_TP4_PP1_B32_P1024_R8192> - vllm config: model='/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/models/DeepSeek-R1-Distill-Qwen-32B', speculative_config=None, tokenizer='/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/models/DeepSeek-R1-Distill-Qwen-32B', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=9216, download_dir=None, load_format=auto, tensor_parallel_size=4, pipeline_parallel_size=1, data_parallel_size=1, decode_context_parallel_size=1, dcp_comm_backend=ag_rs, disable_custom_all_reduce=False, quantization=None, enforce_eager=False, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=cuda, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False), seed=0, served_model_name=/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/models/DeepSeek-R1-Distill-Qwen-32B, enable_prefix_caching=False, enable_chunked_prefill=False, pooler_config=None, compilation_config={'mode': <CompilationMode.VLLM_COMPILE: 3>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': ['none'], 'splitting_ops': ['vllm::unified_attention', 'vllm::unified_attention_with_output', 'vllm::unified_mla_attention', 'vllm::unified_mla_attention_with_output', 'vllm::mamba_mixer2', 'vllm::mamba_mixer', 'vllm::short_conv', 'vllm::linear_attention', 'vllm::plamo2_mamba_mixer', 'vllm::gdn_attention_core', 'vllm::olmo_hybrid_gdn_full_forward', 'vllm::kda_attention', 'vllm::sparse_attn_indexer', 'vllm::rocm_aiter_sparse_attn_indexer', 'vllm::unified_kv_cache_update', 'vllm::unified_mla_kv_cache_update'], 'compile_mm_encoder': False, 'compile_sizes': [], 'compile_ranges_endpoints': [204, 32768], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.FULL_AND_PIECEWISE: (2, 1)>, 'cudagraph_num_of_warmups': 1, 'cudagraph_capture_sizes': [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': False, 'fuse_act_quant': False, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': True}, 'max_cudagraph_capture_size': 64, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': True, 'static_all_moe_layers': []}
+[2026-07-20 17:42:14,891][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - vllm config: model='/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/models/DeepSeek-R1-Distill-Qwen-32B', speculative_config=None, tokenizer='/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/models/DeepSeek-R1-Distill-Qwen-32B', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=9216, download_dir=None, load_format=auto, tensor_parallel_size=4, pipeline_parallel_size=1, data_parallel_size=1, decode_context_parallel_size=1, dcp_comm_backend=ag_rs, disable_custom_all_reduce=False, quantization=None, enforce_eager=False, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=cuda, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False), seed=0, served_model_name=/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/models/DeepSeek-R1-Distill-Qwen-32B, enable_prefix_caching=False, enable_chunked_prefill=False, pooler_config=None, compilation_config={'mode': <CompilationMode.VLLM_COMPILE: 3>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': ['none'], 'splitting_ops': ['vllm::unified_attention', 'vllm::unified_attention_with_output', 'vllm::unified_mla_attention', 'vllm::unified_mla_attention_with_output', 'vllm::mamba_mixer2', 'vllm::mamba_mixer', 'vllm::short_conv', 'vllm::linear_attention', 'vllm::plamo2_mamba_mixer', 'vllm::gdn_attention_core', 'vllm::olmo_hybrid_gdn_full_forward', 'vllm::kda_attention', 'vllm::sparse_attn_indexer', 'vllm::rocm_aiter_sparse_attn_indexer', 'vllm::unified_kv_cache_update', 'vllm::unified_mla_kv_cache_update'], 'compile_mm_encoder': False, 'compile_sizes': [], 'compile_ranges_endpoints': [204, 32768], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.FULL_AND_PIECEWISE: (2, 1)>, 'cudagraph_num_of_warmups': 1, 'cudagraph_capture_sizes': [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': False, 'fuse_act_quant': False, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': True}, 'max_cudagraph_capture_size': 64, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': True, 'static_all_moe_layers': []}
+<Syn_TP4_PP1_B32_P1024_R8192> - Stats collector initialized, logs will be saved to: /apdcephfs_zwfy10/share_303541817/yfzhao/psrl/examples/bench/rollout/exp/deepseek_r1_distill_qwen_32b_tp4_p1024_r8192/details/DeepSeek-R1-Distill-Qwen-32B_Syn_TP4_PP1_B32_P1024_R8192_disable_attn_true.jsonl
+[2026-07-20 17:42:14,895][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - Stats collector initialized, logs will be saved to: /apdcephfs_zwfy10/share_303541817/yfzhao/psrl/examples/bench/rollout/exp/deepseek_r1_distill_qwen_32b_tp4_p1024_r8192/details/DeepSeek-R1-Distill-Qwen-32B_Syn_TP4_PP1_B32_P1024_R8192_disable_attn_true.jsonl
+WARNING 07-20 17:42:14 [envs.py:1717] Unknown vLLM environment variable detected: VLLM_USE_V1
+WARNING 07-20 17:42:14 [envs.py:1717] Unknown vLLM environment variable detected: VLLM_DISABLE_ATTN
+INFO 07-20 17:42:14 [model.py:533] Resolved architecture: Qwen2ForCausalLM
+INFO 07-20 17:42:14 [model.py:1582] Using max model len 9216
+INFO 07-20 17:42:14 [arg_utils.py:1569] Using ray runtime env (env vars redacted): {}
+WARNING 07-20 17:42:15 [system_utils.py:152] We must use the `spawn` multiprocessing start method. Overriding VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. See https://docs.vllm.ai/en/latest/usage/troubleshooting.html#python-multiprocessing for more information. Reasons: CUDA is initialized
+(EngineCore pid=1446816) INFO 07-20 17:42:46 [core.py:103] Initializing a V1 LLM engine (v0.18.2.dev0+ga26e8dc7f.d20260706) with config: model='/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/models/DeepSeek-R1-Distill-Qwen-32B', speculative_config=None, tokenizer='/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/models/DeepSeek-R1-Distill-Qwen-32B', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=9216, download_dir=None, load_format=auto, tensor_parallel_size=4, pipeline_parallel_size=1, data_parallel_size=1, decode_context_parallel_size=1, dcp_comm_backend=ag_rs, disable_custom_all_reduce=False, quantization=None, enforce_eager=False, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=cuda, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False), seed=0, served_model_name=/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/models/DeepSeek-R1-Distill-Qwen-32B, enable_prefix_caching=False, enable_chunked_prefill=False, pooler_config=None, compilation_config={'mode': <CompilationMode.VLLM_COMPILE: 3>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': ['none'], 'splitting_ops': ['vllm::unified_attention', 'vllm::unified_attention_with_output', 'vllm::unified_mla_attention', 'vllm::unified_mla_attention_with_output', 'vllm::mamba_mixer2', 'vllm::mamba_mixer', 'vllm::short_conv', 'vllm::linear_attention', 'vllm::plamo2_mamba_mixer', 'vllm::gdn_attention_core', 'vllm::olmo_hybrid_gdn_full_forward', 'vllm::kda_attention', 'vllm::sparse_attn_indexer', 'vllm::rocm_aiter_sparse_attn_indexer', 'vllm::unified_kv_cache_update', 'vllm::unified_mla_kv_cache_update'], 'compile_mm_encoder': False, 'compile_sizes': [], 'compile_ranges_endpoints': [204, 32768], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.FULL_AND_PIECEWISE: (2, 1)>, 'cudagraph_num_of_warmups': 1, 'cudagraph_capture_sizes': [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': False, 'fuse_act_quant': False, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': True}, 'max_cudagraph_capture_size': 64, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': True, 'static_all_moe_layers': []}
+(EngineCore pid=1446816) WARNING 07-20 17:42:46 [multiproc_executor.py:997] Reducing Torch parallelism from 192 threads to 1 to avoid unnecessary CPU contention. Set OMP_NUM_THREADS in the external environment to tune this value as needed.
+(EngineCore pid=1446816) INFO 07-20 17:42:46 [multiproc_executor.py:134] DP group leader: node_rank=0, node_rank_within_dp=0, master_addr=127.0.0.1, mq_connect_ip=29.162.226.176 (local), world_size=4, local_world_size=4
+INFO 07-20 17:43:33 [worker_base.py:269] Injected <class 'psrl.bench.rollout.vllm_extension.vLLMWorkerExtension'> into <class 'vllm.v1.worker.gpu_worker.Worker'> for extended collective_rpc calls ['estimate_max_model_len']
+INFO 07-20 17:43:33 [worker_base.py:269] Injected <class 'psrl.bench.rollout.vllm_extension.vLLMWorkerExtension'> into <class 'vllm.v1.worker.gpu_worker.Worker'> for extended collective_rpc calls ['estimate_max_model_len']
+INFO 07-20 17:43:33 [worker_base.py:269] Injected <class 'psrl.bench.rollout.vllm_extension.vLLMWorkerExtension'> into <class 'vllm.v1.worker.gpu_worker.Worker'> for extended collective_rpc calls ['estimate_max_model_len']
+INFO 07-20 17:43:33 [worker_base.py:269] Injected <class 'psrl.bench.rollout.vllm_extension.vLLMWorkerExtension'> into <class 'vllm.v1.worker.gpu_worker.Worker'> for extended collective_rpc calls ['estimate_max_model_len']
+(Worker pid=1447366) INFO 07-20 17:43:34 [parallel_state.py:1395] world_size=4 rank=0 local_rank=0 distributed_init_method=tcp://127.0.0.1:41999 backend=nccl
+(Worker pid=1447368) INFO 07-20 17:43:34 [parallel_state.py:1395] world_size=4 rank=2 local_rank=2 distributed_init_method=tcp://127.0.0.1:41999 backend=nccl
+(Worker pid=1447367) INFO 07-20 17:43:34 [parallel_state.py:1395] world_size=4 rank=1 local_rank=1 distributed_init_method=tcp://127.0.0.1:41999 backend=nccl
+(Worker pid=1447369) INFO 07-20 17:43:34 [parallel_state.py:1395] world_size=4 rank=3 local_rank=3 distributed_init_method=tcp://127.0.0.1:41999 backend=nccl
+[rank0]:[W720 17:43:34.263572335 Utils.hpp:137] Warning: Environment variable TORCH_NCCL_TRACE_BUFFER_SIZE is deprecated; use TORCH_FR_BUFFER_SIZE instead (function operator())
+[rank3]:[W720 17:43:34.263585795 Utils.hpp:137] Warning: Environment variable TORCH_NCCL_TRACE_BUFFER_SIZE is deprecated; use TORCH_FR_BUFFER_SIZE instead (function operator())
+[rank1]:[W720 17:43:34.263586245 Utils.hpp:137] Warning: Environment variable TORCH_NCCL_TRACE_BUFFER_SIZE is deprecated; use TORCH_FR_BUFFER_SIZE instead (function operator())
+[rank2]:[W720 17:43:34.263589755 Utils.hpp:137] Warning: Environment variable TORCH_NCCL_TRACE_BUFFER_SIZE is deprecated; use TORCH_FR_BUFFER_SIZE instead (function operator())
+(Worker pid=1447366) INFO 07-20 17:43:37 [pynccl.py:111] vLLM is using nccl==2.27.5
+NCCL version 2.27.5+cuda12.9
+(Worker pid=1447369) INFO 07-20 17:43:40 [parallel_state.py:1717] rank 3 in world size 4 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 3, EP rank N/A, EPLB rank N/A
+(Worker pid=1447368) INFO 07-20 17:43:40 [parallel_state.py:1717] rank 2 in world size 4 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 2, EP rank N/A, EPLB rank N/A
+(Worker pid=1447367) INFO 07-20 17:43:40 [parallel_state.py:1717] rank 1 in world size 4 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 1, EP rank N/A, EPLB rank N/A
+(Worker pid=1447366) INFO 07-20 17:43:40 [parallel_state.py:1717] rank 0 in world size 4 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, EP rank N/A, EPLB rank N/A
+(Worker_TP0 pid=1447366) INFO 07-20 17:43:41 [gpu_model_runner.py:4482] Starting to load model /apdcephfs_zwfy10/share_303541817/yfzhao/psrl/models/DeepSeek-R1-Distill-Qwen-32B...
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) INFO 07-20 17:43:42 [cuda.py:317] Using FLASH_ATTN attention backend out of potential backends: ['FLASH_ATTN', 'FLASHINFER', 'TRITON_ATTN', 'FLEX_ATTENTION'].
+(Worker_TP0 pid=1447366) INFO 07-20 17:43:42 [flash_attn.py:598] Using FlashAttention version 3
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP1 pid=1447367) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP2 pid=1447368) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP3 pid=1447369) Hijacking the attention in Qwen2 to forbid the use of the attention.
+(Worker_TP0 pid=1447366) Loading safetensors checkpoint shards:   0% Completed | 0/8 [00:00<?, ?it/s]
+(Worker_TP0 pid=1447366) Loading safetensors checkpoint shards:  12% Completed | 1/8 [00:13<01:36, 13.80s/it]
+(Worker_TP0 pid=1447366) Loading safetensors checkpoint shards:  25% Completed | 2/8 [00:27<01:22, 13.82s/it]
+(Worker_TP0 pid=1447366) Loading safetensors checkpoint shards:  38% Completed | 3/8 [00:41<01:09, 13.95s/it]
+(Worker_TP0 pid=1447366) Loading safetensors checkpoint shards:  50% Completed | 4/8 [00:53<00:52, 13.03s/it]
+(Worker_TP0 pid=1447366) Loading safetensors checkpoint shards:  62% Completed | 5/8 [01:05<00:37, 12.55s/it]
+(Worker_TP0 pid=1447366) Loading safetensors checkpoint shards:  75% Completed | 6/8 [01:16<00:24, 12.27s/it]
+(Worker_TP0 pid=1447366) Loading safetensors checkpoint shards:  88% Completed | 7/8 [01:28<00:11, 11.98s/it]
+(Worker_TP0 pid=1447366) Loading safetensors checkpoint shards: 100% Completed | 8/8 [01:32<00:00,  9.52s/it]
+(Worker_TP0 pid=1447366) Loading safetensors checkpoint shards: 100% Completed | 8/8 [01:32<00:00, 11.55s/it]
+(Worker_TP0 pid=1447366) 
+(Worker_TP0 pid=1447366) INFO 07-20 17:45:15 [default_loader.py:384] Loading weights took 92.46 seconds
+(Worker_TP0 pid=1447366) INFO 07-20 17:45:16 [gpu_model_runner.py:4567] Model loading took 15.41 GiB memory and 93.615063 seconds
+(Worker_TP0 pid=1447366) INFO 07-20 17:45:31 [backends.py:988] Using cache directory: /apdcephfs_zwfy10/share_303541817/yfzhao/psrl/.cache/vllm/torch_compile_cache/701a5612bf/rank_0_0/backbone for vLLM's torch.compile
+(Worker_TP0 pid=1447366) INFO 07-20 17:45:31 [backends.py:1048] Dynamo bytecode transform time: 13.87 s
+(Worker_TP0 pid=1447366) WARNING 07-20 17:45:31 [allreduce_rms_fusion.py:779] Failed to initialize FlashInfer All Reduce workspace: CUDA error code=35(b'cudaErrorInsufficientDriver'). AllReduce fusion pass will be disabled.
+(Worker_TP0 pid=1447366) Exception ignored in: <function SymmDeviceMemory.__del__ at 0x7ff14899be20>
+(Worker_TP0 pid=1447366) Traceback (most recent call last):
+(Worker_TP2 pid=1447368) (Worker_TP0 pid=1447366)   File "/apdcephfs_zwfy10/share_303541817/yfzhao/miniconda/envs/zyf-psrl-311/lib/python3.11/site-packages/flashinfer/comm/mnnvl.py", line 993, in __del__
+WARNING 07-20 17:45:31 [allreduce_rms_fusion.py:779] Failed to initialize FlashInfer All Reduce workspace: CUDA error code=35(b'cudaErrorInsufficientDriver'). AllReduce fusion pass will be disabled.
+(Worker_TP2 pid=1447368) Exception ignored in: <function SymmDeviceMemory.__del__ at 0x7f7860c47e20>
+(Worker_TP2 pid=1447368) Traceback (most recent call last):
+(Worker_TP2 pid=1447368)   File "/apdcephfs_zwfy10/share_303541817/yfzhao/miniconda/envs/zyf-psrl-311/lib/python3.11/site-packages/flashinfer/comm/mnnvl.py", line 993, in __del__
+(Worker_TP1 pid=1447367) WARNING 07-20 17:45:31 [allreduce_rms_fusion.py:779] Failed to initialize FlashInfer All Reduce workspace: CUDA error code=35(b'cudaErrorInsufficientDriver'). AllReduce fusion pass will be disabled.
+(Worker_TP1 pid=1447367) Exception ignored in: <function SymmDeviceMemory.__del__ at 0x7febbf4bbe20>
+(Worker_TP1 pid=1447367) Traceback (most recent call last):
+(Worker_TP1 pid=1447367)   File "/apdcephfs_zwfy10/share_303541817/yfzhao/miniconda/envs/zyf-psrl-311/lib/python3.11/site-packages/flashinfer/comm/mnnvl.py", line 993, in __del__
+(Worker_TP3 pid=1447369) WARNING 07-20 17:45:31 [allreduce_rms_fusion.py:779] Failed to initialize FlashInfer All Reduce workspace: CUDA error code=35(b'cudaErrorInsufficientDriver'). AllReduce fusion pass will be disabled.
+(Worker_TP3 pid=1447369) Exception ignored in: <function SymmDeviceMemory.__del__ at 0x7f5aa6d1fe20>
+(Worker_TP3 pid=1447369) Traceback (most recent call last):
+(Worker_TP3 pid=1447369)   File "/apdcephfs_zwfy10/share_303541817/yfzhao/miniconda/envs/zyf-psrl-311/lib/python3.11/site-packages/flashinfer/comm/mnnvl.py", line 993, in __del__
+(Worker_TP1 pid=1447367)     if self.signal_pads_dev:(Worker_TP3 pid=1447369) (Worker_TP0 pid=1447366) 
+        if self.signal_pads_dev:(Worker_TP2 pid=1447368) if self.signal_pads_dev:
+
+    if self.signal_pads_dev:
+(Worker_TP3 pid=1447369) (Worker_TP2 pid=1447368) (Worker_TP0 pid=1447366) (Worker_TP1 pid=1447367)                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+^^
+
+
+(Worker_TP3 pid=1447369) AttributeError(Worker_TP2 pid=1447368) (Worker_TP0 pid=1447366) AttributeError(Worker_TP1 pid=1447367) : AttributeError: AttributeError'SymmDeviceMemory' object has no attribute 'signal_pads_dev': 'SymmDeviceMemory' object has no attribute 'signal_pads_dev': 
+
+'SymmDeviceMemory' object has no attribute 'signal_pads_dev''SymmDeviceMemory' object has no attribute 'signal_pads_dev'
+
+(Worker_TP2 pid=1447368) INFO 07-20 17:45:32 [backends.py:371] Cache the graph of compile range (1, 204) for later use
+(Worker_TP0 pid=1447366) INFO 07-20 17:45:32 [backends.py:371] Cache the graph of compile range (1, 204) for later use
+(Worker_TP0 pid=1447366) INFO 07-20 17:45:32 [backends.py:387] Compiling a graph for compile range (1, 204) takes 0.95 s
+(Worker_TP3 pid=1447369) INFO 07-20 17:45:32 [backends.py:371] Cache the graph of compile range (1, 204) for later use
+(Worker_TP1 pid=1447367) INFO 07-20 17:45:32 [backends.py:371] Cache the graph of compile range (1, 204) for later use
+(Worker_TP2 pid=1447368) WARNING 07-20 17:45:47 [allreduce_rms_fusion.py:845] AllReduce fusion pass is disabled.
+(Worker_TP1 pid=1447367) WARNING 07-20 17:45:47 [allreduce_rms_fusion.py:845] AllReduce fusion pass is disabled.
+(Worker_TP0 pid=1447366) WARNING 07-20 17:45:47 [allreduce_rms_fusion.py:845] AllReduce fusion pass is disabled.
+(Worker_TP3 pid=1447369) WARNING 07-20 17:45:47 [allreduce_rms_fusion.py:845] AllReduce fusion pass is disabled.
+(Worker_TP2 pid=1447368) INFO 07-20 17:45:58 [backends.py:371] Cache the graph of compile range (205, 32768) for later use
+(Worker_TP1 pid=1447367) INFO 07-20 17:45:58 [backends.py:371] Cache the graph of compile range (205, 32768) for later use
+(Worker_TP0 pid=1447366) INFO 07-20 17:45:59 [backends.py:371] Cache the graph of compile range (205, 32768) for later use
+(Worker_TP0 pid=1447366) INFO 07-20 17:45:59 [backends.py:387] Compiling a graph for compile range (205, 32768) takes 26.60 s
+(Worker_TP3 pid=1447369) INFO 07-20 17:45:59 [backends.py:371] Cache the graph of compile range (205, 32768) for later use
+(Worker_TP0 pid=1447366) INFO 07-20 17:46:01 [monitor.py:48] torch.compile and initial profiling/warmup run together took 43.71 s in total
+[rank2]:[W720 17:46:05.149481784 Utils.hpp:137] Warning: Environment variable TORCH_NCCL_TRACE_BUFFER_SIZE is deprecated; use TORCH_FR_BUFFER_SIZE instead (function operator())
+[rank1]:[W720 17:46:05.149502504 Utils.hpp:137] Warning: Environment variable TORCH_NCCL_TRACE_BUFFER_SIZE is deprecated; use TORCH_FR_BUFFER_SIZE instead (function operator())
+[rank0]:[W720 17:46:05.149502244 Utils.hpp:137] Warning: Environment variable TORCH_NCCL_TRACE_BUFFER_SIZE is deprecated; use TORCH_FR_BUFFER_SIZE instead (function operator())
+[rank3]:[W720 17:46:05.149511303 Utils.hpp:137] Warning: Environment variable TORCH_NCCL_TRACE_BUFFER_SIZE is deprecated; use TORCH_FR_BUFFER_SIZE instead (function operator())
+(Worker_TP0 pid=1447366) INFO 07-20 17:46:07 [kv_cache_utils.py:826] Overriding num_gpu_blocks=0 with num_gpu_blocks_override=64
+(Worker_TP1 pid=1447367) INFO 07-20 17:46:07 [kv_cache_utils.py:826] Overriding num_gpu_blocks=0 with num_gpu_blocks_override=64
+(Worker_TP0 pid=1447366) INFO 07-20 17:46:07 [gpu_model_runner.py:5624] Profiling CUDA graph memory: PIECEWISE=11 (largest=64), FULL=7 (largest=32)
+(Worker_TP1 pid=1447367) INFO 07-20 17:46:07 [gpu_model_runner.py:5624] Profiling CUDA graph memory: PIECEWISE=11 (largest=64), FULL=7 (largest=32)
+(Worker_TP3 pid=1447369) INFO 07-20 17:46:07 [kv_cache_utils.py:826] Overriding num_gpu_blocks=0 with num_gpu_blocks_override=64
+(Worker_TP3 pid=1447369) INFO 07-20 17:46:07 [gpu_model_runner.py:5624] Profiling CUDA graph memory: PIECEWISE=11 (largest=64), FULL=7 (largest=32)
+(Worker_TP2 pid=1447368) INFO 07-20 17:46:07 [kv_cache_utils.py:826] Overriding num_gpu_blocks=0 with num_gpu_blocks_override=64
+(Worker_TP2 pid=1447368) INFO 07-20 17:46:07 [gpu_model_runner.py:5624] Profiling CUDA graph memory: PIECEWISE=11 (largest=64), FULL=7 (largest=32)
+(Worker_TP0 pid=1447366) INFO 07-20 17:46:08 [custom_all_reduce.py:216] Registering 516 cuda graph addresses
+(Worker_TP1 pid=1447367) INFO 07-20 17:46:08 [custom_all_reduce.py:216] Registering 516 cuda graph addresses
+(Worker_TP3 pid=1447369) INFO 07-20 17:46:08 [custom_all_reduce.py:216] Registering 516 cuda graph addresses
+(Worker_TP2 pid=1447368) INFO 07-20 17:46:08 [custom_all_reduce.py:216] Registering 516 cuda graph addresses
+(Worker_TP0 pid=1447366) INFO 07-20 17:46:10 [gpu_model_runner.py:5703] Estimated CUDA graph memory: 0.17 GiB total
+(Worker_TP1 pid=1447367) INFO 07-20 17:46:10 [gpu_model_runner.py:5703] Estimated CUDA graph memory: 0.17 GiB total
+(Worker_TP3 pid=1447369) INFO 07-20 17:46:11 [gpu_model_runner.py:5703] Estimated CUDA graph memory: 0.17 GiB total
+(Worker_TP2 pid=1447368) INFO 07-20 17:46:11 [gpu_model_runner.py:5703] Estimated CUDA graph memory: 0.17 GiB total
+(Worker_TP0 pid=1447366) INFO 07-20 17:46:11 [gpu_worker.py:456] Available KV cache memory: 71.07 GiB
+(Worker_TP0 pid=1447366) INFO 07-20 17:46:11 [gpu_worker.py:490] In v0.19, CUDA graph memory profiling will be enabled by default (VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1), which more accurately accounts for CUDA graph memory during KV cache allocation. To try it now, set VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1 and increase --gpu-memory-utilization from 0.9500 to 0.9518 to maintain the same effective KV cache size.
+(Worker_TP1 pid=1447367) INFO 07-20 17:46:11 [gpu_worker.py:490] In v0.19, CUDA graph memory profiling will be enabled by default (VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1), which more accurately accounts for CUDA graph memory during KV cache allocation. To try it now, set VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1 and increase --gpu-memory-utilization from 0.9500 to 0.9518 to maintain the same effective KV cache size.
+(Worker_TP3 pid=1447369) INFO 07-20 17:46:12 [gpu_worker.py:490] In v0.19, CUDA graph memory profiling will be enabled by default (VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1), which more accurately accounts for CUDA graph memory during KV cache allocation. To try it now, set VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1 and increase --gpu-memory-utilization from 0.9500 to 0.9518 to maintain the same effective KV cache size.
+(Worker_TP2 pid=1447368) INFO 07-20 17:46:12 [gpu_worker.py:490] In v0.19, CUDA graph memory profiling will be enabled by default (VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1), which more accurately accounts for CUDA graph memory during KV cache allocation. To try it now, set VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1 and increase --gpu-memory-utilization from 0.9500 to 0.9518 to maintain the same effective KV cache size.
+(EngineCore pid=1446816) INFO 07-20 17:46:12 [kv_cache_utils.py:1316] GPU KV cache size: 1,163,664 tokens
+(EngineCore pid=1446816) INFO 07-20 17:46:12 [kv_cache_utils.py:1321] Maximum concurrency for 9,216 tokens per request: 126.27x
+(Worker_TP3 pid=1447369) INFO 07-20 17:46:12 [gpu_worker.py:598] Compile and warming up model for size 32768
+(Worker_TP0 pid=1447366) (Worker_TP2 pid=1447368) INFO 07-20 17:46:12 [gpu_worker.py:598] Compile and warming up model for size 32768
+INFO 07-20 17:46:12 [gpu_worker.py:598] Compile and warming up model for size 32768
+(Worker_TP1 pid=1447367) INFO 07-20 17:46:12 [gpu_worker.py:598] Compile and warming up model for size 32768
+(Worker_TP3 pid=1447369) (Worker_TP1 pid=1447367) 2026-07-20 17:46:12,459 - INFO - autotuner.py:262 - flashinfer.jit: [Autotuner]: Autotuning process starts ...
+2026-07-20 17:46:12,459 - INFO - autotuner.py:262 - flashinfer.jit: [Autotuner]: Autotuning process starts ...
+(Worker_TP0 pid=1447366) 2026-07-20 17:46:12,459 - INFO - autotuner.py:262 - flashinfer.jit: [Autotuner]: Autotuning process starts ...
+(Worker_TP2 pid=1447368) 2026-07-20 17:46:12,459 - INFO - autotuner.py:262 - flashinfer.jit: [Autotuner]: Autotuning process starts ...
+(Worker_TP2 pid=1447368) 2026-07-20 17:46:15,828 - INFO - autotuner.py:268 - flashinfer.jit: [Autotuner]: Autotuning process ends
+(Worker_TP3 pid=1447369) 2026-07-20 17:46:15,828 - INFO - autotuner.py:268 - flashinfer.jit: [Autotuner]: Autotuning process ends
+(Worker_TP1 pid=1447367) 2026-07-20 17:46:15,828 - INFO - autotuner.py:268 - flashinfer.jit: [Autotuner]: Autotuning process ends
+(Worker_TP0 pid=1447366) 2026-07-20 17:46:15,828 - INFO - autotuner.py:268 - flashinfer.jit: [Autotuner]: Autotuning process ends
+(Worker_TP0 pid=1447366) Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):   0%|          | 0/11 [00:00<?, ?it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  36%|███▋      | 4/11 [00:00<00:00, 38.63it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  82%|████████▏ | 9/11 [00:00<00:00, 41.47it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE): 100%|██████████| 11/11 [00:00<00:00, 40.65it/s]
+(Worker_TP0 pid=1447366) Capturing CUDA graphs (decode, FULL):   0%|          | 0/7 [00:00<?, ?it/s]Capturing CUDA graphs (decode, FULL):  86%|████████▌ | 6/7 [00:00<00:00, 52.39it/s]Capturing CUDA graphs (decode, FULL): 100%|██████████| 7/7 [00:00<00:00, 52.42it/s]
+(Worker_TP0 pid=1447366) INFO 07-20 17:46:20 [custom_all_reduce.py:216] Registering 2322 cuda graph addresses
+(Worker_TP1 pid=1447367) INFO 07-20 17:46:20 [custom_all_reduce.py:216] Registering 2322 cuda graph addresses
+(Worker_TP2 pid=1447368) INFO 07-20 17:46:20 [custom_all_reduce.py:216] Registering 2322 cuda graph addresses
+(Worker_TP3 pid=1447369) INFO 07-20 17:46:20 [custom_all_reduce.py:216] Registering 2322 cuda graph addresses
+(Worker_TP0 pid=1447366) INFO 07-20 17:46:21 [gpu_model_runner.py:5763] Graph capturing finished in 6 secs, took 0.17 GiB
+(Worker_TP0 pid=1447366) INFO 07-20 17:46:21 [gpu_worker.py:617] CUDA graph pool memory: 0.17 GiB (actual), 0.17 GiB (estimated), difference: 0.01 GiB (4.7%).
+(Worker_TP1 pid=1447367) INFO 07-20 17:46:21 [gpu_worker.py:617] CUDA graph pool memory: 0.17 GiB (actual), 0.17 GiB (estimated), difference: 0.01 GiB (4.7%).
+(Worker_TP3 pid=1447369) INFO 07-20 17:46:21 [gpu_worker.py:617] CUDA graph pool memory: 0.17 GiB (actual), 0.17 GiB (estimated), difference: 0.01 GiB (4.7%).
+(Worker_TP2 pid=1447368) INFO 07-20 17:46:21 [gpu_worker.py:617] CUDA graph pool memory: 0.17 GiB (actual), 0.17 GiB (estimated), difference: 0.01 GiB (4.7%).
+(EngineCore pid=1446816) INFO 07-20 17:46:21 [core.py:281] init engine (profile, create kv cache, warmup model) took 64.95 seconds
+(EngineCore pid=1446816) INFO 07-20 17:46:23 [vllm.py:775] Asynchronous scheduling is enabled.
+<Syn_TP4_PP1_B32_P1024_R8192> - vLLM AsyncLLM engine initialized successfully!
+[2026-07-20 17:46:23,110][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - vLLM AsyncLLM engine initialized successfully!
+(EngineCore pid=1446816) INFO 07-20 17:46:24 [compilation.py:289] Enabled custom fusions: allreduce_rms
+<Syn_TP4_PP1_B32_P1024_R8192> - Estimated max model length: [1164432, 1163664, 1163664, 1167504]
+[2026-07-20 17:46:24,838][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - Estimated max model length: [1164432, 1163664, 1163664, 1167504]
+<Syn_TP4_PP1_B32_P1024_R8192> - Starting rollout performance test in synthetic mode...
+[2026-07-20 17:46:24,839][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - Starting rollout performance test in synthetic mode...
+<Syn_TP4_PP1_B32_P1024_R8192> - Running 1 warmup iterations + 1 test iterations
+[2026-07-20 17:46:24,839][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - Running 1 warmup iterations + 1 test iterations
+<Syn_TP4_PP1_B32_P1024_R8192> - Warmup iteration 1/1
+[2026-07-20 17:46:24,840][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - Warmup iteration 1/1
+WARNING 07-20 17:46:25 [input_processor.py:227] Passing raw prompts to InputProcessor is deprecated and will be removed in v0.18. You should instead pass the outputs of Renderer.render_cmpl() or Renderer.render_chat().
+<Syn_TP4_PP1_B32_P1024_R8192> - ==============================
+[2026-07-20 17:46:35,257][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - ==============================
+<Syn_TP4_PP1_B32_P1024_R8192> - WARMUP PHASE COMPLETED
+[2026-07-20 17:46:35,258][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - WARMUP PHASE COMPLETED
+<Syn_TP4_PP1_B32_P1024_R8192> - ==============================
+[2026-07-20 17:46:35,259][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - ==============================
+<Syn_TP4_PP1_B32_P1024_R8192> - Completed 1 warmup iterations
+[2026-07-20 17:46:35,260][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - Completed 1 warmup iterations
+<Syn_TP4_PP1_B32_P1024_R8192> - Starting performance test phase with detailed monitoring...
+[2026-07-20 17:46:35,261][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - Starting performance test phase with detailed monitoring...
+<Syn_TP4_PP1_B32_P1024_R8192> - ==============================
+[2026-07-20 17:46:35,261][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - ==============================
+<Syn_TP4_PP1_B32_P1024_R8192> - Test iteration 1/1
+[2026-07-20 17:46:35,263][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - Test iteration 1/1
+<Syn_TP4_PP1_B32_P1024_R8192> - Iteration 1 took 76.70 seconds
+[2026-07-20 17:47:51,963][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - Iteration 1 took 76.70 seconds
+<Syn_TP4_PP1_B32_P1024_R8192> - ==================================================
+[2026-07-20 17:47:51,964][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - ==================================================
+<Syn_TP4_PP1_B32_P1024_R8192> - ROLLOUT PERFORMANCE TEST RESULTS
+[2026-07-20 17:47:51,964][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - ROLLOUT PERFORMANCE TEST RESULTS
+<Syn_TP4_PP1_B32_P1024_R8192> - ==================================================
+[2026-07-20 17:47:51,965][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - ==================================================
+<Syn_TP4_PP1_B32_P1024_R8192> - Test mode: synthetic
+[2026-07-20 17:47:51,965][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - Test mode: synthetic
+<Syn_TP4_PP1_B32_P1024_R8192> - Batch size: 32
+[2026-07-20 17:47:51,965][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - Batch size: 32
+<Syn_TP4_PP1_B32_P1024_R8192> - Test iterations: 1
+[2026-07-20 17:47:51,966][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - Test iterations: 1
+<Syn_TP4_PP1_B32_P1024_R8192> - Average time per iteration: 76.70 ± 0.00 seconds
+[2026-07-20 17:47:51,966][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - Average time per iteration: 76.70 ± 0.00 seconds
+<Syn_TP4_PP1_B32_P1024_R8192> - Min time: 76.70 seconds
+[2026-07-20 17:47:51,967][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - Min time: 76.70 seconds
+<Syn_TP4_PP1_B32_P1024_R8192> - Max time: 76.70 seconds
+[2026-07-20 17:47:51,967][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - Max time: 76.70 seconds
+<Syn_TP4_PP1_B32_P1024_R8192> - Throughput: 0.42 samples/second
+[2026-07-20 17:47:51,968][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - Throughput: 0.42 samples/second
+<Syn_TP4_PP1_B32_P1024_R8192> - ==============================
+[2026-07-20 17:47:51,968][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - ==============================
+<Syn_TP4_PP1_B32_P1024_R8192> - VLLM ENGINE STATISTICS
+[2026-07-20 17:47:51,968][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - VLLM ENGINE STATISTICS
+<Syn_TP4_PP1_B32_P1024_R8192> - ==============================
+[2026-07-20 17:47:51,969][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - ==============================
+<Syn_TP4_PP1_B32_P1024_R8192> - total_preempts: 0
+[2026-07-20 17:47:51,984][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - total_preempts: 0
+<Syn_TP4_PP1_B32_P1024_R8192> - avg_waiting_requests: 0.0
+[2026-07-20 17:47:51,984][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - avg_waiting_requests: 0.0
+<Syn_TP4_PP1_B32_P1024_R8192> - max_waiting_requests: 0
+[2026-07-20 17:47:51,985][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - max_waiting_requests: 0
+<Syn_TP4_PP1_B32_P1024_R8192> - avg_running_requests: 31.980358667805294
+[2026-07-20 17:47:51,985][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - avg_running_requests: 31.980358667805294
+<Syn_TP4_PP1_B32_P1024_R8192> - max_running_requests: 32
+[2026-07-20 17:47:51,985][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - max_running_requests: 32
+<Syn_TP4_PP1_B32_P1024_R8192> - avg_kv_cache_usage: 0.1409049810929242
+[2026-07-20 17:47:51,986][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - avg_kv_cache_usage: 0.1409049810929242
+<Syn_TP4_PP1_B32_P1024_R8192> - max_kv_cache_usage: 0.25343746562534375
+[2026-07-20 17:47:51,986][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - max_kv_cache_usage: 0.25343746562534375
+<Syn_TP4_PP1_B32_P1024_R8192> - avg_pure_generation_latency: 0.008864650761356372
+[2026-07-20 17:47:51,987][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - avg_pure_generation_latency: 0.008864650761356372
+<Syn_TP4_PP1_B32_P1024_R8192> - avg_prompt_throughput: 2.8935777964372478
+[2026-07-20 17:47:51,987][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - avg_prompt_throughput: 2.8935777964372478
+<Syn_TP4_PP1_B32_P1024_R8192> - avg_generation_throughput: 3796.665076977957
+[2026-07-20 17:47:51,987][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - avg_generation_throughput: 3796.665076977957
+<Syn_TP4_PP1_B32_P1024_R8192> - avg_total_throughput: 3799.558654774394
+[2026-07-20 17:47:51,988][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - avg_total_throughput: 3799.558654774394
+<Syn_TP4_PP1_B32_P1024_R8192> - avg_prefix_cache_hit_rate: 0.0
+[2026-07-20 17:47:51,988][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - avg_prefix_cache_hit_rate: 0.0
+<Syn_TP4_PP1_B32_P1024_R8192> - total_measurements: 8197
+[2026-07-20 17:47:51,988][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - total_measurements: 8197
+<Syn_TP4_PP1_B32_P1024_R8192> - duration: 76.72667503356934
+[2026-07-20 17:47:51,989][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - duration: 76.72667503356934
+<Syn_TP4_PP1_B32_P1024_R8192> - ==============================
+[2026-07-20 17:47:51,989][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - ==============================
+<Syn_TP4_PP1_B32_P1024_R8192> - ==================================================
+[2026-07-20 17:47:51,990][/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/bench/rollout/main_rollout.py][INFO] - ==================================================
+(EngineCore pid=1446816) INFO 07-20 17:47:52 [core.py:1201] Shutdown initiated (timeout=0)
+(EngineCore pid=1446816) INFO 07-20 17:47:52 [core.py:1224] Shutdown complete
+(Worker_TP2 pid=1447368) (Worker_TP0 pid=1447366) INFO 07-20 17:47:52 [multiproc_executor.py:759] Parent process exited, terminating worker queues
+INFO 07-20 17:47:52 [multiproc_executor.py:759] Parent process exited, terminating worker queues
+(Worker_TP1 pid=1447367) INFO 07-20 17:47:52 [multiproc_executor.py:759] Parent process exited, terminating worker queues
+(Worker_TP3 pid=1447369) INFO 07-20 17:47:52 [multiproc_executor.py:759] Parent process exited, terminating worker queues
+(Worker_TP1 pid=1447367) INFO 07-20 17:47:52 [multiproc_executor.py:854] WorkerProc shutting down.
+(Worker_TP2 pid=1447368) (Worker_TP0 pid=1447366) (Worker_TP3 pid=1447369) INFO 07-20 17:47:52 [multiproc_executor.py:854] WorkerProc shutting down.
+INFO 07-20 17:47:52 [multiproc_executor.py:854] WorkerProc shutting down.
+INFO 07-20 17:47:52 [multiproc_executor.py:854] WorkerProc shutting down.
+/apdcephfs_zwfy10/share_303541817/yfzhao/miniconda/envs/zyf-psrl-311/lib/python3.11/multiprocessing/resource_tracker.py:254: UserWarning: resource_tracker: There appear to be 1 leaked shared_memory objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '

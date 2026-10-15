@@ -20,7 +20,7 @@ from psrl.utils.common.http_utils import (
     is_distributed_post_enabled,
     request_json_maybe_distributed,
 )
-from psrl.utils.dataset.utils import _pre_process_inputs
+from psrl.utils.dataset.utils import _pre_process_inputs, as_object_sample
 from psrl.utils.rollout.gateway_multimodal import GatewayMultimodalPayloadBuilder
 from psrl.utils.rollout.loop_timer import LoopTimer
 from psrl.utils.rollout.trajectory_writer import TrajectoryWriter
@@ -231,7 +231,7 @@ class AgentLoopBase(ABC):
             "data_source": np.array([kwargs.get("data_source", "unknown")]),
             "reward_model": np.array([kwargs.get("reward_model", {})], dtype=object),
             "extra_info": np.array([kwargs.get("extra_info", {})], dtype=object),
-            "reward_model_dicts": np.array([kwargs.get("reward_model_dicts", [])], dtype=object),
+            "reward_model_dicts": as_object_sample(kwargs.get("reward_model_dicts", [])),
         }
         if kwargs.get("parent_id") is not None:
             tensor_dict["parent_id"] = np.array([kwargs.get("parent_id")])
@@ -243,7 +243,7 @@ class AgentLoopBase(ABC):
             },
         )
 
-        reward_result = await self.reward_manager.compute_score.remote(reward_requests)
+        reward_result = await self.reward_manager.compute_score(reward_requests)
         if not self.config.reward.launch_reward_fn_async:
             if not reward_result:
                 return None

@@ -6,6 +6,8 @@ import torch
 from psrl.trainer.ppo.utils import _compute_termination_metrics
 from psrl.workers.agent_loop.loops.utils import TerminateReason
 
+pytestmark = pytest.mark.cpu_test
+
 
 class TestBudgetTruncatedClassification:
     """Test which terminations count as a harness budget cutoff."""
@@ -106,11 +108,13 @@ class TestTokenMeanHandlesAnEmptyBatch:
         # division returned 0/0, which propagates nan through every parameter.
         from verl.trainer.ppo.core_algos import agg_loss
 
-        loss_mat = torch.randn(4, 16)
+        loss_mat = torch.randn(4, 16, requires_grad=True)
         loss_mask = torch.zeros(4, 16)
         loss = agg_loss(loss_mat=loss_mat, loss_mask=loss_mask, loss_agg_mode="token-mean")
         assert torch.isfinite(loss)
-        assert loss.item() == pytest.approx(0.0)
+        assert loss.item() == pytest.approx(0.0), "A fully masked batch must have zero loss."
+        loss.backward()
+        assert torch.equal(loss_mat.grad, torch.zeros_like(loss_mat)), "Filtered tokens must have zero gradients."
 
     def test_a_normal_batch_is_unchanged_by_the_guard(self):
         from verl.trainer.ppo.core_algos import agg_loss

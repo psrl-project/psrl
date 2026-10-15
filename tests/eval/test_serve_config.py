@@ -9,6 +9,8 @@ import pytest
 from hydra import compose, initialize_config_module
 from psrl.eval.serve import build_fleet_spec
 
+pytestmark = pytest.mark.cpu_test
+
 
 def _compose(*overrides):
     with initialize_config_module(config_module="psrl.eval.config", version_base=None):

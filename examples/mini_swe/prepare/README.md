@@ -182,7 +182,7 @@ On many clusters the docker daemon itself cannot reach `registry-1.docker.io`
 (user-space proxy env vars like `http_proxy` are **not** inherited by
 `dockerd`). `prefetch_images.sh` sidesteps this by using **skopeo** — a
 user-space tool that honours `$http_proxy` / `$https_proxy` from
-`${PSRL_WORKSPACE}/env/psrl.sh` and writes straight to a local `docker-archive`
+`${PSRL_WORKSPACE}/env/env_311.sh` and writes straight to a local `docker-archive`
 tar (or directly into `dockerd` via the Unix socket). No daemon proxy config
 needed.
 

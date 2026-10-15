@@ -1359,3 +1359,19 @@ index c865b9dd..21b0e2e8 100644
      # compute policy loss
      old_log_prob = data["old_log_probs"]
      advantages = data["advantages"]
+diff --git a/verl/trainer/ppo/core_algos.py b/verl/trainer/ppo/core_algos.py
+index 5e6a19a1..3d7cfbce 100644
+--- a/verl/trainer/ppo/core_algos.py
++++ b/verl/trainer/ppo/core_algos.py
+@@ -1170,7 +1170,10 @@ def agg_loss(
+             if dp_size > 1:
+                 raise ValueError("(global) batch_num_tokens is required when dp_size > 1")
+             batch_num_tokens = loss_mask.sum()
+-        loss = verl_F.masked_sum(loss_mat, loss_mask) / batch_num_tokens * dp_size
++        denominator = (
++            batch_num_tokens.clamp_min(1) if isinstance(batch_num_tokens, torch.Tensor) else max(batch_num_tokens, 1)
++        )
++        loss = verl_F.masked_sum(loss_mat, loss_mask) / denominator * dp_size
+     elif loss_agg_mode in ["seq-mean-token-sum", "seq-mean-token-sum-norm"]:
+         seq_losses = torch.sum(loss_mat * loss_mask, dim=-1)  # token-sum
+         seq_mask = (torch.sum(loss_mask, dim=-1) > 0).float()  # exclude fully masked sequences

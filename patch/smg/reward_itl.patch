@@ -1,0 +1,887 @@
+diff --git a/bindings/python/src/lib.rs b/bindings/python/src/lib.rs
+index 3f5069f4..4f08358c 100644
+--- a/bindings/python/src/lib.rs
++++ b/bindings/python/src/lib.rs
+@@ -21,6 +21,7 @@ pub enum PolicyType {
+     ConsistentHashing,
+     PrefixHash,
+     RequestNumBalance,
++    Itl,
+     ThroughputOptimal,
+     ThroughputOptimalWithBudget,
+ }
+@@ -396,6 +397,7 @@ struct Router {
+     request_budget: usize,
+     max_num_waiting_reqs_after_preemption: usize,
+     cost_model_path: Option<String>,
++    itl_max_latency: Option<f64>,
+     max_idle_secs: u64,
+     assignment_mode: String,
+     max_payload_size: usize,
+@@ -641,6 +643,11 @@ impl Router {
+                     load_factor: 1.25,
+                 },
+                 PolicyType::RequestNumBalance => ConfigPolicyConfig::RequestNumBalance,
++                PolicyType::Itl => ConfigPolicyConfig::Itl {
++                    cost_model_path: self.cost_model_path.clone().unwrap_or_default(),
++                    max_concurrent_seqs_per_instance: self.max_concurrent_seqs_per_instance,
++                    max_itl: self.itl_max_latency,
++                },
+                 PolicyType::ThroughputOptimal => ConfigPolicyConfig::ThroughputOptimal {
+                     cost_model_path: self.cost_model_path.clone().unwrap_or_default(),
+                     max_concurrent_seqs_per_instance: self.max_concurrent_seqs_per_instance,
+@@ -987,6 +994,7 @@ impl Router {
+         request_budget = 1024,
+         max_num_waiting_reqs_after_preemption = 1000,
+         cost_model_path = None,
++        itl_max_latency = None,
+         max_idle_secs = 14400,
+         assignment_mode = String::from("random"),
+         max_payload_size = 512 * 1024 * 1024,
+@@ -1144,6 +1152,7 @@ impl Router {
+         request_budget: usize,
+         max_num_waiting_reqs_after_preemption: usize,
+         cost_model_path: Option<String>,
++        itl_max_latency: Option<f64>,
+         max_idle_secs: u64,
+         assignment_mode: String,
+         max_payload_size: usize,
+@@ -1327,6 +1336,7 @@ impl Router {
+             request_budget,
+             max_num_waiting_reqs_after_preemption,
+             cost_model_path,
++            itl_max_latency,
+             max_idle_secs,
+             assignment_mode,
+             max_payload_size,
+diff --git a/bindings/python/src/smg/router.py b/bindings/python/src/smg/router.py
+index a167d707..5ce41907 100644
+--- a/bindings/python/src/smg/router.py
++++ b/bindings/python/src/smg/router.py
+@@ -33,6 +33,7 @@ def policy_from_str(policy_str: str | None) -> PolicyType:
+         "consistent_hashing": PolicyType.ConsistentHashing,
+         "prefix_hash": PolicyType.PrefixHash,
+         "request_num_balance": PolicyType.RequestNumBalance,
++        "itl": PolicyType.Itl,
+         "throughput_optimal": PolicyType.ThroughputOptimal,
+         "throughput_optimal_with_budget": PolicyType.ThroughputOptimalWithBudget,
+     }
+diff --git a/bindings/python/src/smg/router_args.py b/bindings/python/src/smg/router_args.py
+index 4a0adc4c..8c448169 100644
+--- a/bindings/python/src/smg/router_args.py
++++ b/bindings/python/src/smg/router_args.py
+@@ -20,6 +20,7 @@ COMMON_POLICY_CHOICES = [
+     "least_load",
+     "manual",
+     "request_num_balance",
++    "itl",
+     "throughput_optimal",
+     "throughput_optimal_with_budget",
+     "consistent_hashing",
+@@ -72,6 +73,7 @@ class RouterArgs:
+     assignment_mode: str = "random"  # Mode for manual policy new routing key assignment
+     max_payload_size: int = 512 * 1024 * 1024  # 512MB default for large batches
+     bucket_adjust_interval_secs: int = 5
++    itl_max_latency: float | None = None
+     cost_model_path: str | None = None  # Path to cost model JSON for throughput_optimal / throughput_optimal_with_budget policy
+     max_concurrent_seqs_per_instance: int = 100  # Max concurrent sequences per instance (throughput_optimal policy)
+     delta_throughput_threshold: float = 0.5  # Throughput delta threshold for throughput_optimal policy
+@@ -365,7 +367,7 @@ class RouterArgs:
+             type=str,
+             default=RouterArgs.policy,
+             choices=["random", "round_robin", "cache_aware", "cache_aware_v1", "power_of_two", "manual",
+-                     "request_num_balance", "throughput_optimal", "throughput_optimal_with_budget"],
++                     "request_num_balance", "itl", "throughput_optimal", "throughput_optimal_with_budget"],
+             help=(
+                 "Load balancing policy to use. In PD mode, this is used for both prefill and decode"
+                 " unless overridden"
+@@ -469,6 +471,12 @@ class RouterArgs:
+             default=RouterArgs.bucket_adjust_interval_secs,
+             help="Interval in seconds between bucket boundary adjustment operations",
+         )
++        routing_group.add_argument(
++            f"--{prefix}itl-max-latency",
++            type=float,
++            default=None,
++            help="Maximum predicted inter-token latency in seconds for ITL admission.",
++        )
+         routing_group.add_argument(
+             f"--{prefix}cost-model-path",
+             type=str,
+diff --git a/crates/protocols/src/completion.rs b/crates/protocols/src/completion.rs
+index bb26f596..02737f9f 100644
+--- a/crates/protocols/src/completion.rs
++++ b/crates/protocols/src/completion.rs
+@@ -14,6 +14,16 @@ use crate::validated::Normalizable;
+ // Completions API (v1/completions) - DEPRECATED but still supported
+ // ============================================================================
+ 
++/// Completion prompts may contain text or pretokenized inputs.
++#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, schemars::JsonSchema)]
++#[serde(untagged)]
++pub enum CompletionPrompt {
++    String(String),
++    Array(Vec<String>),
++    TokenIds(Vec<u32>),
++    TokenIdBatch(Vec<Vec<u32>>),
++}
++
+ #[serde_with::skip_serializing_none]
+ #[derive(Debug, Clone, Deserialize, Serialize, Validate, schemars::JsonSchema)]
+ #[validate(schema(function = "validate_completion_cross_parameters"))]
+@@ -23,7 +33,7 @@ pub struct CompletionRequest {
+ 
+     /// The prompt(s) to generate completions for
+     #[validate(custom(function = "validate_completion_prompt"))]
+-    pub prompt: StringOrArray,
++    pub prompt: CompletionPrompt,
+ 
+     /// Generates `best_of` completions server-side and returns the "best"
+     #[validate(range(min = 0, max = 20))]
+@@ -147,16 +157,25 @@ pub struct CompletionRequest {
+ 
+ impl Normalizable for CompletionRequest {}
+ 
+-fn validate_completion_prompt(prompt: &StringOrArray) -> Result<(), validator::ValidationError> {
++fn validate_completion_prompt(prompt: &CompletionPrompt) -> Result<(), validator::ValidationError> {
+     match prompt {
+-        StringOrArray::String(_) => {}
+-        StringOrArray::Array(arr) => {
++        CompletionPrompt::String(_) => {}
++        CompletionPrompt::Array(arr) => {
+             if arr.is_empty() {
+                 let mut error = validator::ValidationError::new("prompt_empty");
+                 error.message = Some("prompt array cannot be empty".into());
+                 return Err(error);
+             }
+         }
++        CompletionPrompt::TokenIds(ids) if ids.is_empty() => {
++            return Err(validator::ValidationError::new("prompt_empty"));
++        }
++        CompletionPrompt::TokenIdBatch(batch)
++            if batch.is_empty() || batch.iter().any(Vec::is_empty) =>
++        {
++            return Err(validator::ValidationError::new("prompt_empty"));
++        }
++        CompletionPrompt::TokenIds(_) | CompletionPrompt::TokenIdBatch(_) => {}
+     }
+ 
+     Ok(())
+@@ -219,8 +238,9 @@ impl GenerationRequest for CompletionRequest {
+ 
+     fn extract_text_for_routing(&self) -> String {
+         match &self.prompt {
+-            StringOrArray::String(s) => s.clone(),
+-            StringOrArray::Array(v) => v.join(" "),
++            CompletionPrompt::String(s) => s.clone(),
++            CompletionPrompt::Array(v) => v.join(" "),
++            CompletionPrompt::TokenIds(_) | CompletionPrompt::TokenIdBatch(_) => String::new(),
+         }
+     }
+ }
+@@ -280,3 +300,32 @@ pub struct CompletionStreamChoice {
+     #[serde(skip_serializing_if = "Option::is_none")]
+     pub routed_experts: Option<String>,
+ }
++
++#[cfg(test)]
++mod token_prompt_tests {
++    use super::*;
++
++    #[test]
++    fn completion_token_prompt_preserves_ids_and_sampling() {
++        let value = serde_json::json!({
++            "model": "test-rm", "prompt": [1000, 1, 5, 2],
++            "max_tokens": 20480, "temperature": 1.0, "top_p": 1.0, "top_k": -1
++        });
++        let request: CompletionRequest = serde_json::from_value(value.clone()).unwrap();
++        request.validate().unwrap();
++        assert_eq!(
++            request.prompt,
++            CompletionPrompt::TokenIds(vec![1000, 1, 5, 2])
++        );
++        assert_eq!(
++            serde_json::to_value(request).unwrap()["prompt"],
++            value["prompt"]
++        );
++    }
++
++    #[test]
++    fn invalid_token_ids_are_rejected() {
++        let value = serde_json::json!({"model": "test-rm", "prompt": [-1, 2]});
++        assert!(serde_json::from_value::<CompletionRequest>(value).is_err());
++    }
++}
+diff --git a/model_gateway/benches/request_processing.rs b/model_gateway/benches/request_processing.rs
+index 65a093d6..69a27b8f 100644
+--- a/model_gateway/benches/request_processing.rs
++++ b/model_gateway/benches/request_processing.rs
+@@ -9,7 +9,6 @@ use std::{hint::black_box, time::Instant};
+ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+ use openai_protocol::{
+     chat::{ChatCompletionRequest, ChatMessage, MessageContent},
+-    common::StringOrArray,
+     completion::CompletionRequest,
+     generate::GenerateRequest,
+     sampling_params::SamplingParams,
+@@ -97,7 +96,7 @@ fn default_chat_completion_request() -> ChatCompletionRequest {
+ fn default_completion_request() -> CompletionRequest {
+     CompletionRequest {
+         model: String::new(),
+-        prompt: StringOrArray::String(String::new()),
++        prompt: openai_protocol::completion::CompletionPrompt::String(String::new()),
+         suffix: None,
+         max_tokens: None,
+         temperature: None,
+@@ -184,7 +183,7 @@ fn create_sample_chat_completion_request() -> ChatCompletionRequest {
+ fn create_sample_completion_request() -> CompletionRequest {
+     CompletionRequest {
+         model: "text-davinci-003".to_string(),
+-        prompt: StringOrArray::String("Complete this sentence: The future of AI is".to_string()),
++        prompt: openai_protocol::completion::CompletionPrompt::String("Complete this sentence: The future of AI is".to_string()),
+         max_tokens: Some(50),
+         temperature: Some(0.8),
+         top_p: Some(1.0),
+diff --git a/model_gateway/src/config/types.rs b/model_gateway/src/config/types.rs
+index 23b44bc7..6d71a728 100644
+--- a/model_gateway/src/config/types.rs
++++ b/model_gateway/src/config/types.rs
+@@ -761,6 +761,16 @@ pub enum PolicyConfig {
+     #[serde(rename = "request_num_balance")]
+     RequestNumBalance,
+ 
++    /// Minimize predicted inter-token latency after admitting the next request.
++    #[serde(rename = "itl")]
++    Itl {
++        cost_model_path: String,
++        #[serde(default = "default_max_concurrent_seqs_per_instance")]
++        max_concurrent_seqs_per_instance: usize,
++        #[serde(default)]
++        max_itl: Option<f64>,
++    },
++
+     /// Throughput-optimal policy.
+     ///
+     /// Selects the healthy worker with the lowest total token count
+@@ -912,6 +922,7 @@ impl PolicyConfig {
+             PolicyConfig::ConsistentHashing => "consistent_hashing",
+             PolicyConfig::PrefixHash { .. } => "prefix_hash",
+             PolicyConfig::RequestNumBalance => "request_num_balance",
++            PolicyConfig::Itl { .. } => "itl",
+             PolicyConfig::ThroughputOptimal { .. } => "throughput_optimal",
+             PolicyConfig::ThroughputOptimalWithBudget { .. } => "throughput_optimal_with_budget",
+         }
+@@ -1440,8 +1451,8 @@ mod tests {
+             lmcache_overlap_weight: 0.5,
+             balance_token_usage_threshold: 1.0,
+             overload_token_usage_threshold: 1.0,
+-        enable_kv_admission_control: false,
+-                kv_capacity_threshold: 1.0,
++            enable_kv_admission_control: false,
++            kv_capacity_threshold: 1.0,
+         };
+         assert_eq!(cache_aware.name(), "cache_aware");
+ 
+@@ -1468,8 +1479,8 @@ mod tests {
+             lmcache_overlap_weight: 0.5,
+             balance_token_usage_threshold: 1.0,
+             overload_token_usage_threshold: 1.0,
+-        enable_kv_admission_control: false,
+-                kv_capacity_threshold: 1.0,
++            enable_kv_admission_control: false,
++            kv_capacity_threshold: 1.0,
+         };
+         let json = serde_json::to_string(&cache_aware).unwrap();
+         assert!(json.contains("\"type\":\"cache_aware\""));
+@@ -1497,8 +1508,8 @@ mod tests {
+             lmcache_overlap_weight: 0.5,
+             balance_token_usage_threshold: 1.0,
+             overload_token_usage_threshold: 1.0,
+-        enable_kv_admission_control: false,
+-                kv_capacity_threshold: 1.0,
++            enable_kv_admission_control: false,
++            kv_capacity_threshold: 1.0,
+         };
+ 
+         match cache_aware {
+@@ -1912,7 +1923,7 @@ mod tests {
+                 lmcache_overlap_weight: 0.5,
+                 balance_token_usage_threshold: 1.0,
+                 overload_token_usage_threshold: 1.0,
+-            enable_kv_admission_control: false,
++                enable_kv_admission_control: false,
+                 kv_capacity_threshold: 1.0,
+             }),
+             decode_policy: Some(PolicyConfig::PowerOfTwo {
+@@ -1949,7 +1960,7 @@ mod tests {
+                 lmcache_overlap_weight: 0.5,
+                 balance_token_usage_threshold: 1.0,
+                 overload_token_usage_threshold: 1.0,
+-            enable_kv_admission_control: false,
++                enable_kv_admission_control: false,
+                 kv_capacity_threshold: 1.0,
+             }),
+             decode_policy: None,
+@@ -2012,8 +2023,8 @@ mod tests {
+             lmcache_overlap_weight: 0.5,
+             balance_token_usage_threshold: 1.0,
+             overload_token_usage_threshold: 1.0,
+-        enable_kv_admission_control: false,
+-                kv_capacity_threshold: 1.0,
++            enable_kv_admission_control: false,
++            kv_capacity_threshold: 1.0,
+         };
+ 
+         match pd.get_prefill_policy(&main_policy) {
+diff --git a/model_gateway/src/config/validation.rs b/model_gateway/src/config/validation.rs
+index c124d07e..e47e9cf0 100644
+--- a/model_gateway/src/config/validation.rs
++++ b/model_gateway/src/config/validation.rs
+@@ -471,6 +471,20 @@ impl ConfigValidator {
+                     });
+                 }
+             }
++            PolicyConfig::Itl {
++                cost_model_path,
++                max_concurrent_seqs_per_instance,
++                max_itl,
++            } => {
++                if cost_model_path.is_empty()
++                    || *max_concurrent_seqs_per_instance == 0
++                    || max_itl.is_some_and(|value| !value.is_finite() || value <= 0.0)
++                {
++                    return Err(ConfigError::ValidationFailed {
++                        reason: "ITL requires a cost model, positive concurrency and a positive finite latency limit.".to_string(),
++                    });
++                }
++            }
+             PolicyConfig::RequestNumBalance | PolicyConfig::ThroughputOptimal { .. } => {}
+             PolicyConfig::ThroughputOptimalWithBudget { request_budget, .. } => {
+                 if *request_budget == 0 {
+diff --git a/model_gateway/src/policies/factory.rs b/model_gateway/src/policies/factory.rs
+index 8a8b233a..e2e11151 100644
+--- a/model_gateway/src/policies/factory.rs
++++ b/model_gateway/src/policies/factory.rs
+@@ -4,10 +4,10 @@ use std::sync::Arc;
+ 
+ use super::{
+     BucketConfig, BucketPolicy, CacheAwareConfig, CacheAwarePolicy, CacheAwareV1Policy,
+-    ConsistentHashingPolicy, LeastLoadPolicy, LoadBalancingPolicy, ManualConfig, ManualPolicy,
+-    PassthroughPolicy, PowerOfTwoPolicy, PrefixHashConfig, PrefixHashPolicy, RandomPolicy,
+-    RequestNumBalancePolicy, RoundRobinPolicy, ThroughputOptimalConfig, ThroughputOptimalPolicy,
+-    ThroughputOptimalWithBudgetPolicy,
++    ConsistentHashingPolicy, ItlConfig, ItlPolicy, LeastLoadPolicy, LoadBalancingPolicy,
++    ManualConfig, ManualPolicy, PassthroughPolicy, PowerOfTwoPolicy, PrefixHashConfig,
++    PrefixHashPolicy, RandomPolicy, RequestNumBalancePolicy, RoundRobinPolicy,
++    ThroughputOptimalConfig, ThroughputOptimalPolicy, ThroughputOptimalWithBudgetPolicy,
+ };
+ use crate::config::{ConfigError, ConfigResult, PolicyConfig};
+ 
+@@ -128,6 +128,19 @@ impl PolicyFactory {
+                 Ok(Arc::new(PrefixHashPolicy::new(config)))
+             }
+             PolicyConfig::RequestNumBalance => Ok(Arc::new(RequestNumBalancePolicy::new())),
++            PolicyConfig::Itl {
++                cost_model_path,
++                max_concurrent_seqs_per_instance,
++                max_itl,
++            } => {
++                let policy = ItlPolicy::with_config(ItlConfig {
++                    cost_model_path: cost_model_path.clone(),
++                    max_concurrent_seqs_per_instance: *max_concurrent_seqs_per_instance,
++                    max_itl: *max_itl,
++                })
++                .map_err(|reason| ConfigError::ValidationFailed { reason })?;
++                Ok(Arc::new(policy))
++            }
+             PolicyConfig::ThroughputOptimal {
+                 cost_model_path,
+                 max_concurrent_seqs_per_instance,
+@@ -241,8 +254,8 @@ mod tests {
+             lmcache_overlap_weight: 0.5,
+             balance_token_usage_threshold: 1.0,
+             overload_token_usage_threshold: 1.0,
+-        enable_kv_admission_control: false,
+-                kv_capacity_threshold: 1.0,
++            enable_kv_admission_control: false,
++            kv_capacity_threshold: 1.0,
+         })
+         .unwrap();
+         assert_eq!(policy.name(), "cache_aware");
+diff --git a/model_gateway/src/policies/mod.rs b/model_gateway/src/policies/mod.rs
+index 3692ac47..090e2f5c 100644
+--- a/model_gateway/src/policies/mod.rs
++++ b/model_gateway/src/policies/mod.rs
+@@ -16,6 +16,7 @@ mod consistent_hashing;
+ pub(crate) mod cost_model_utils;
+ mod dp_min_token;
+ mod factory;
++mod itl;
+ mod least_load;
+ mod manual;
+ mod passthrough;
+@@ -34,6 +35,7 @@ pub use cache_aware_v1::CacheAwareV1Policy;
+ pub use consistent_hashing::ConsistentHashingPolicy;
+ pub use dp_min_token::MinimumTokensPolicy;
+ pub use factory::PolicyFactory;
++pub use itl::{ItlConfig, ItlPolicy};
+ // Re-export PrefixMatchResult from kv_index for production use
+ pub use kv_index::PrefixMatchResult;
+ pub use least_load::LeastLoadPolicy;
+diff --git a/model_gateway/src/routers/grpc/regular/stages/completion/preparation.rs b/model_gateway/src/routers/grpc/regular/stages/completion/preparation.rs
+index 19a25ac4..598674f6 100644
+--- a/model_gateway/src/routers/grpc/regular/stages/completion/preparation.rs
++++ b/model_gateway/src/routers/grpc/regular/stages/completion/preparation.rs
+@@ -5,10 +5,12 @@
+ //! `CompletionRequest` native in the request context instead of laundering it
+ //! through `GenerateRequest`.
+ 
++use std::sync::Arc;
++
+ use async_trait::async_trait;
+ use axum::response::Response;
+-use openai_protocol::common::StringOrArray;
+-use tracing::error;
++use llm_tokenizer::traits::Tokenizer;
++use openai_protocol::completion::CompletionPrompt;
+ 
+ use crate::routers::{
+     error,
+@@ -29,26 +31,10 @@ impl PipelineStage for CompletionPreparationStage {
+         let tokenizer =
+             utils::resolve_tokenizer(ctx, "CompletionPreparationStage::execute").map_err(|e| *e)?;
+ 
+-        let prompt_text = match &request.prompt {
+-            StringOrArray::String(text) => text.clone(),
+-            StringOrArray::Array(_) => {
+-                return Err(error::bad_request(
+-                    "batch_prompts_not_supported",
+-                    "Batched prompt arrays are not supported for gRPC /v1/completions yet",
+-                ));
+-            }
+-        };
+-
+-        let encoding = utils::encode_blocking(tokenizer.clone(), prompt_text.clone(), false)
+-            .await
+-            .map_err(|e| {
+-                error!(
+-                    function = "CompletionPreparationStage::execute",
+-                    error = %e,
+-                    "Tokenization failed"
+-                );
+-                error::bad_request("tokenization_failed", format!("Tokenization failed: {e}"))
+-            })?;
++        let (prompt_text, token_ids) =
++            resolve_completion_prompt(tokenizer.clone(), &request.prompt)
++                .await
++                .map_err(|message| error::bad_request("invalid_prompt", message))?;
+ 
+         let stop_decoder = utils::create_stop_decoder(
+             &tokenizer,
+@@ -61,7 +47,7 @@ impl PipelineStage for CompletionPreparationStage {
+ 
+         ctx.state.preparation = Some(PreparationOutput::Completion {
+             original_text: prompt_text,
+-            token_ids: encoding.token_ids().to_vec(),
++            token_ids,
+         });
+ 
+         ctx.state.response.stop_decoder = Some(stop_decoder);
+@@ -77,3 +63,60 @@ impl PipelineStage for CompletionPreparationStage {
+         StagePhase::Preparation
+     }
+ }
++
++async fn resolve_completion_prompt(
++    tokenizer: Arc<dyn Tokenizer>,
++    prompt: &CompletionPrompt,
++) -> Result<(String, Vec<u32>), String> {
++    match prompt {
++        CompletionPrompt::String(text) => {
++            let encoding = utils::encode_blocking(tokenizer, text.clone(), false)
++                .await
++                .map_err(|error| format!("Tokenization failed: {error}"))?;
++            Ok((text.clone(), encoding.token_ids().to_vec()))
++        }
++        CompletionPrompt::TokenIds(ids) => {
++            let token_ids = ids.clone();
++            tokio::task::spawn_blocking(move || {
++                let text = tokenizer
++                    .decode(&token_ids, false)
++                    .map_err(|error| format!("Prompt decoding failed: {error}"))?;
++                Ok((text, token_ids))
++            })
++            .await
++            .map_err(|error| format!("Prompt decoding task failed: {error}"))?
++        }
++        CompletionPrompt::Array(_) | CompletionPrompt::TokenIdBatch(_) => {
++            Err("Batched prompts are not supported for gRPC /v1/completions.".into())
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use llm_tokenizer::MockTokenizer;
++
++    use super::*;
++
++    #[tokio::test]
++    async fn completion_preparation_preserves_special_and_space_tokens() {
++        let tokenizer: Arc<dyn Tokenizer> = Arc::new(MockTokenizer::new());
++        let ids = vec![1000, 1, 5, 2, 1002];
++        let (_, prepared) =
++            resolve_completion_prompt(tokenizer, &CompletionPrompt::TokenIds(ids.clone()))
++                .await
++                .unwrap();
++        assert_eq!(prepared, ids);
++    }
++
++    #[tokio::test]
++    async fn completion_preparation_keeps_text_tokenization() {
++        let tokenizer: Arc<dyn Tokenizer> = Arc::new(MockTokenizer::new());
++        let (text, ids) =
++            resolve_completion_prompt(tokenizer, &CompletionPrompt::String("Hello world".into()))
++                .await
++                .unwrap();
++        assert_eq!(text, "Hello world");
++        assert_eq!(ids, vec![1, 2]);
++    }
++}
+diff --git a/model_gateway/src/routers/grpc/regular/streaming.rs b/model_gateway/src/routers/grpc/regular/streaming.rs
+index 4fab8d73..d75f5871 100644
+--- a/model_gateway/src/routers/grpc/regular/streaming.rs
++++ b/model_gateway/src/routers/grpc/regular/streaming.rs
+@@ -20,7 +20,7 @@ use openai_protocol::{
+     common::{
+         FunctionCallDelta, StringOrArray, Tool, ToolCallDelta, ToolChoice, ToolChoiceValue, Usage,
+     },
+-    completion::{CompletionRequest, CompletionStreamChoice, CompletionStreamResponse},
++    completion::{CompletionPrompt, CompletionRequest, CompletionStreamChoice, CompletionStreamResponse},
+     generate::GenerateRequest,
+     messages::{
+         self, ContentBlock, ContentBlockDelta, CreateMessageRequest, Message, MessageDelta,
+@@ -2449,19 +2449,17 @@ impl StreamingProcessor {
+         let system_fingerprint = dispatch.weight_version.as_deref();
+ 
+         let echo = completion_request.echo;
+-        let prompt_text: &str = if echo {
++        let prompt_text = if echo {
+             match &completion_request.prompt {
+-                StringOrArray::String(s) => s.as_str(),
+-                // Array prompts are rejected by CompletionPreparationStage (Stage 1).
+-                // If this arm is ever reached, it means a new code path bypassed Stage 1.
+-                StringOrArray::Array(_) => {
+-                    debug_assert!(false, "Array prompt reached streaming — CompletionPreparationStage should have rejected it");
+-                    warn!("Array prompt reached completion streaming — CompletionPreparationStage should have rejected it");
+-                    ""
++                CompletionPrompt::String(text) => text.clone(),
++                CompletionPrompt::TokenIds(ids) => tokenizer.decode(ids, false)
++                    .map_err(|error| format!("Prompt decoding failed: {error}"))?,
++                CompletionPrompt::Array(_) | CompletionPrompt::TokenIdBatch(_) => {
++                    return Err("Batched prompts are not supported for gRPC completions.".into());
+                 }
+             }
+         } else {
+-            ""
++            String::new()
+         };
+         let suffix = completion_request.suffix.as_deref();
+         // TODO: wire per-token logprob streaming when backend support is available
+@@ -2527,7 +2525,7 @@ impl StreamingProcessor {
+ 
+                     if *is_first {
+                         if echo {
+-                            chunk_text.insert_str(0, prompt_text);
++                            chunk_text.insert_str(0, &prompt_text);
+                         }
+                         *is_first = false;
+                     }
+diff --git a/model_gateway/src/routers/http/pd_router.rs b/model_gateway/src/routers/http/pd_router.rs
+index e6d32fea..83ece987 100644
+--- a/model_gateway/src/routers/http/pd_router.rs
++++ b/model_gateway/src/routers/http/pd_router.rs
+@@ -12,8 +12,8 @@ use futures_util::StreamExt;
+ use memchr::memmem;
+ use openai_protocol::{
+     chat::{ChatCompletionRequest, ChatMessage, MessageContent},
+-    common::{InputIds, StringOrArray},
+-    completion::CompletionRequest,
++    common::InputIds,
++    completion::{CompletionPrompt, CompletionRequest},
+     generate::GenerateRequest,
+     rerank::RerankRequest,
+ };
+@@ -205,12 +205,11 @@ impl PDRouter {
+     }
+ 
+     fn get_completion_batch_size(req: &CompletionRequest) -> Option<usize> {
+-        if let StringOrArray::Array(arr) = &req.prompt {
+-            if !arr.is_empty() {
+-                return Some(arr.len());
+-            }
++        match &req.prompt {
++            CompletionPrompt::Array(values) if !values.is_empty() => Some(values.len()),
++            CompletionPrompt::TokenIdBatch(values) if !values.is_empty() => Some(values.len()),
++            _ => None,
+         }
+-        None
+     }
+ 
+     // Static key strings to avoid per-request allocations
+@@ -1489,8 +1488,9 @@ impl RouterTrait for PDRouter {
+ 
+         let request_text = if self.policies_need_request_text() {
+             match &body.prompt {
+-                StringOrArray::String(s) => Some(s.clone()),
+-                StringOrArray::Array(v) => v.first().map(|s| s.to_string()),
++                CompletionPrompt::String(s) => Some(s.clone()),
++                CompletionPrompt::Array(v) => v.first().map(|s| s.to_string()),
++                CompletionPrompt::TokenIds(_) | CompletionPrompt::TokenIdBatch(_) => None,
+             }
+         } else {
+             None
+diff --git a/model_gateway/tests/routing/test_openai_routing.rs b/model_gateway/tests/routing/test_openai_routing.rs
+index 52be6ccc..8bf79386 100644
+--- a/model_gateway/tests/routing/test_openai_routing.rs
++++ b/model_gateway/tests/routing/test_openai_routing.rs
+@@ -18,7 +18,6 @@ use axum::{
+ };
+ use openai_protocol::{
+     chat::{ChatCompletionRequest, ChatMessage, MessageContent},
+-    common::StringOrArray,
+     completion::CompletionRequest,
+     generate::GenerateRequest,
+     responses::{ResponseInput, ResponsesRequest},
+@@ -62,7 +61,7 @@ fn create_minimal_chat_request() -> ChatCompletionRequest {
+ fn create_minimal_completion_request() -> CompletionRequest {
+     CompletionRequest {
+         model: "gpt-3.5-turbo".to_string(),
+-        prompt: StringOrArray::String("Hello".to_string()),
++        prompt: openai_protocol::completion::CompletionPrompt::String("Hello".to_string()),
+         suffix: None,
+         max_tokens: Some(100),
+         temperature: None,
+diff --git a/model_gateway/src/policies/itl.rs b/model_gateway/src/policies/itl.rs
+new file mode 100644
+index 00000000..cb0aa661
+--- /dev/null
++++ b/model_gateway/src/policies/itl.rs
+@@ -0,0 +1,217 @@
++//! Admission and selection by predicted inter-token latency.
++
++use std::sync::Arc;
++
++use super::{
++    cost_model_utils::CostModel, get_healthy_worker_indices, LoadBalancingPolicy, SelectWorkerInfo,
++};
++use crate::worker::Worker;
++
++#[derive(Debug)]
++pub struct ItlConfig {
++    pub cost_model_path: String,
++    pub max_concurrent_seqs_per_instance: usize,
++    pub max_itl: Option<f64>,
++}
++
++#[derive(Debug)]
++pub struct ItlPolicy {
++    model: CostModel,
++    cfg: ItlConfig,
++}
++
++impl ItlPolicy {
++    pub fn with_config(cfg: ItlConfig) -> Result<Self, String> {
++        if cfg.max_concurrent_seqs_per_instance == 0
++            || cfg
++                .max_itl
++                .is_some_and(|value| !value.is_finite() || value <= 0.0)
++        {
++            return Err(
++                "ITL requires positive concurrency and a positive finite latency limit.".into(),
++            );
++        }
++        let model =
++            CostModel::load_from_file(&cfg.cost_model_path).map_err(|error| error.to_string())?;
++        Ok(Self { model, cfg })
++    }
++
++    fn next_itl(&self, worker: &Arc<dyn Worker>, load: usize) -> Option<f64> {
++        let metadata = worker.metadata();
++        let tp = metadata.spec.labels.get("tp_size")?;
++        let pp = metadata.spec.labels.get("pp_size")?;
++        let entry = self.model.get(&format!("TP{tp}_PP{pp}"))?;
++        // RM ITL models use request count with a zero token term.
++        let itl = (entry
++            .other_threshold
++            .max(entry.other_latency_k * (load + 1) as f64)
++            + entry.attn_latency_b)
++            .max(1e-9);
++        itl.is_finite().then_some(itl)
++    }
++}
++
++impl LoadBalancingPolicy for ItlPolicy {
++    fn select_worker(
++        &self,
++        workers: &[Arc<dyn Worker>],
++        _info: &SelectWorkerInfo,
++    ) -> Option<usize> {
++        get_healthy_worker_indices(workers)
++            .into_iter()
++            .filter_map(|index| {
++                let load = workers[index].load();
++                if load >= self.cfg.max_concurrent_seqs_per_instance {
++                    return None;
++                }
++                let itl = self.next_itl(&workers[index], load)?;
++                if self.cfg.max_itl.is_some_and(|limit| itl > limit) {
++                    return None;
++                }
++                Some((index, itl, load))
++            })
++            .min_by(|a, b| a.1.total_cmp(&b.1).then(a.2.cmp(&b.2)).then(a.0.cmp(&b.0)))
++            .map(|candidate| candidate.0)
++    }
++
++    fn name(&self) -> &'static str {
++        "itl"
++    }
++
++    fn needs_load_guard(&self) -> bool {
++        true
++    }
++
++    fn as_any(&self) -> &dyn std::any::Any {
++        self
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use std::collections::HashMap;
++
++    use openai_protocol::worker::{HealthCheckConfig, WorkerStatus};
++
++    use super::*;
++    use crate::worker::{BasicWorkerBuilder, WorkerType};
++
++    fn policy(limit: usize, max_itl: Option<f64>) -> ItlPolicy {
++        let model = CostModel::load_from_str(
++            r#"{
++            "TP1_PP1": {"other_threshold": 0.01, "other_latency_b": 1.0,
++                "other_latency_k": 0.001, "attn_latency_b": 0.002, "attn_latency_k": 0.1},
++            "TP2_PP1": {"other_threshold": 0.005, "other_latency_b": 1.0,
++                "other_latency_k": 0.0005, "attn_latency_b": 0.001, "attn_latency_k": 0.1}
++        }"#,
++        )
++        .unwrap();
++        ItlPolicy {
++            model,
++            cfg: ItlConfig {
++                cost_model_path: String::new(),
++                max_concurrent_seqs_per_instance: limit,
++                max_itl,
++            },
++        }
++    }
++
++    fn worker(tp: usize, load: usize) -> Arc<dyn Worker> {
++        let worker: Arc<dyn Worker> = Arc::new(
++            BasicWorkerBuilder::new(format!("http://worker{tp}:8000"))
++                .worker_type(WorkerType::Regular)
++                .labels(HashMap::from([
++                    ("tp_size".into(), tp.to_string()),
++                    ("pp_size".into(), "1".into()),
++                ]))
++                .health_config(HealthCheckConfig {
++                    disable_health_check: true,
++                    ..Default::default()
++                })
++                .build(),
++        );
++        for _ in 0..load {
++            worker.increment_load();
++        }
++        worker
++    }
++
++    #[test]
++    fn heterogeneous_worker_selected_by_next_itl() {
++        let policy = policy(128, None);
++        let slow = worker(1, 0);
++        let fast = worker(2, 5);
++        assert_eq!(policy.next_itl(&slow, 0), Some(0.012));
++        assert_eq!(
++            policy.select_worker(&[slow, fast], &SelectWorkerInfo::default()),
++            Some(1)
++        );
++    }
++
++    #[test]
++    fn threshold_ties_use_load_then_index() {
++        let policy = policy(128, None);
++        assert_eq!(
++            policy.select_worker(&[worker(1, 3), worker(1, 1)], &SelectWorkerInfo::default()),
++            Some(1)
++        );
++        assert_eq!(
++            policy.select_worker(&[worker(1, 1), worker(1, 1)], &SelectWorkerInfo::default()),
++            Some(0)
++        );
++    }
++
++    #[test]
++    fn saturated_workers_wait_until_a_request_departs() {
++        let policy = policy(2, None);
++        let w = worker(1, 2);
++        assert_eq!(
++            policy.select_worker(&[w.clone()], &SelectWorkerInfo::default()),
++            None
++        );
++        w.decrement_load();
++        assert_eq!(
++            policy.select_worker(&[w], &SelectWorkerInfo::default()),
++            Some(0)
++        );
++    }
++
++    #[test]
++    fn latency_limit_rejects_next_request() {
++        assert_eq!(
++            policy(128, Some(0.012)).select_worker(&[worker(1, 11)], &SelectWorkerInfo::default()),
++            None
++        );
++        assert_eq!(
++            policy(128, Some(0.012)).select_worker(&[worker(1, 0)], &SelectWorkerInfo::default()),
++            Some(0)
++        );
++    }
++
++    #[test]
++    fn unavailable_and_missing_model_workers_are_excluded() {
++        let sleeping = worker(2, 0);
++        sleeping.set_status(WorkerStatus::NotReady);
++        assert_eq!(
++            policy(128, None)
++                .select_worker(&[sleeping, worker(4, 0)], &SelectWorkerInfo::default()),
++            None
++        );
++    }
++
++    #[test]
++    fn invalid_configuration_fails_before_routing() {
++        assert!(ItlPolicy::with_config(ItlConfig {
++            cost_model_path: String::new(),
++            max_concurrent_seqs_per_instance: 0,
++            max_itl: None,
++        })
++        .is_err());
++        assert!(ItlPolicy::with_config(ItlConfig {
++            cost_model_path: String::new(),
++            max_concurrent_seqs_per_instance: 128,
++            max_itl: None,
++        })
++        .is_err());
++    }
++}

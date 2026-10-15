@@ -5,7 +5,6 @@ from dataclasses import dataclass, field
 from typing import Any, Generic, TypeVar
 
 import numpy as np
-import ray
 import torch
 from omegaconf import DictConfig
 from PIL import Image
@@ -13,7 +12,9 @@ from verl.utils import tensordict_utils as tu
 from verl.utils.ray_utils import get_event_loop
 
 from psrl.environments.base import ConversationType, Environment
+from psrl.utils.dataset.utils import as_object_sample
 from psrl.workers.gen.utils import RolloutInstanceId, TokenOutput
+from psrl.workers.reward.client import RewardSubmissionClient
 
 psrl_logger = logging.getLogger(__name__)
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
@@ -201,7 +202,7 @@ class AgentData(ABC, Generic[ObsType, ActType]):
     def __init__(
         self,
         config: DictConfig,
-        reward_manager: ray.actor.ActorHandle,
+        reward_manager: RewardSubmissionClient,
         env: Environment,
         **kwargs,
     ):
@@ -209,7 +210,7 @@ class AgentData(ABC, Generic[ObsType, ActType]):
 
         Args:
             config: Configuration object containing training settings
-            reward_manager: Ray actor handle for computing rewards
+            reward_manager: Shared client for submitting reward requests.
             env: Environment instance this agent interacts with
             **kwargs: Additional keyword arguments from configuration
         """
@@ -669,7 +670,7 @@ class AgentData(ABC, Generic[ObsType, ActType]):
                 "reward_model": np.array([self.session_data.reward_model], dtype=object),
                 "extra_info": np.array([self.session_data.extra_info], dtype=object),
                 "agent_reward_info": np.array([self.session_data.agent_reward_info], dtype=object),
-                "reward_model_dicts": np.array([self.session_data.reward_model_dicts], dtype=object),
+                "reward_model_dicts": as_object_sample(self.session_data.reward_model_dicts),
             }
             if self.session_data.parent_id is not None:
                 tensor_dict["parent_id"] = np.array([self.session_data.parent_id])
@@ -681,7 +682,7 @@ class AgentData(ABC, Generic[ObsType, ActType]):
                 },
             )
 
-            reward_result = await self.reward_manager.compute_score.remote(reward_data)
+            reward_result = await self.reward_manager.compute_score(reward_data)
             if not self.config.reward.launch_reward_fn_async:
                 if not reward_result:
                     return None

@@ -13,14 +13,10 @@ import ray
 from ray.actor import ActorHandle
 
 from psrl.utils.common.http_utils import find_available_port, get_host_info
-from psrl.utils.elastic_rm.diagnostics import log_elastic_rm_backlog_diag
+from psrl.utils.elastic.diagnostics import log_elastic_rm_backlog_diag
 from psrl.utils.logger import DualOutputHandler
 from psrl.utils.server.command import CommandExtension
-from psrl.workers.gen.smg_adapter import (
-    ROUTING_LOOP_STATUS_PATH,
-    WORKERS_STATS_PATH,
-    build_weight_version_updates,
-)
+from psrl.workers.gen.smg_adapter import build_weight_version_updates
 from psrl.workers.gen.stats_collector import EngineStats
 from psrl.workers.gen.utils import DEFAULT_MAX_CONNECTIONS, DEFAULT_TIMEOUT, RolloutInstanceId
 from psrl.workers.gen.zmq_queue import ZMQPullQueue
@@ -99,6 +95,8 @@ class RolloutCoordinator(
         # Rollout replica tracking
         self.rollout_replicas = {}
         self.server_handles = {}
+        self.replica_operation_locks: dict[str, asyncio.Lock] = {}
+        self.routing_operation_lock = asyncio.Lock()
         self.replica_ids = set()
         self.instance_ids = set()
         # For convenience, maintain separate lists for rollout and validate instances
@@ -145,8 +143,6 @@ class RolloutCoordinator(
         self._is_init_nixl_client = asyncio.Event()
 
         # Version tracking
-        # The latest stale model version of each instance
-        self.instance_to_latest_stale_model_version: dict[RolloutInstanceId, int] = {}
         # Track the model version of each instance
         self.instance_to_model_version: dict[RolloutInstanceId, int] = {}
         # Tracks model version each instance will have after its next sync.
@@ -158,6 +154,7 @@ class RolloutCoordinator(
         # Engine status tracking
         # Track the latest engine stats of each instance
         self.instance_to_engine_status: dict[RolloutInstanceId, EngineStats] = {}
+        self.sleeping_replica_ids: set[str] = set()
         # Absolute KV-cache token capacity per instance (max_concurrency * max_model_len,
         # obtained via get_total_kv_cache_tokens). Used by the hang/continue scheduler.
         self.instance_to_total_kv_tokens: dict[RolloutInstanceId, int] = {}
@@ -280,8 +277,15 @@ class RolloutCoordinator(
         await self.server_handles[replica_id].nixl_sleep.remote(level=self._get_sleep_level())
 
     async def _do_wake_up_instance(self, replica_id: str) -> None:
-        """Execute wake_up on one replica. Rollout path uses nixl_wake_up. Subclasses may override."""
-        await self.server_handles[replica_id].nixl_wake_up.remote()
+        """Restore memory and committed weights before publishing the replica version."""
+        server = self.server_handles[replica_id]
+        await server.nixl_wake_up.remote()
+        actual_version = await server.pull_model_for_sync.remote(self.ps_model_version)
+        instance_ids = sorted(instance_id for instance_id in self.instance_ids if instance_id[0] == replica_id)
+        await self._publish_weight_version_updates(build_weight_version_updates(instance_ids, actual_version))
+        for instance_id in instance_ids:
+            self.set_rollout_instance_model_version(instance_id, actual_version)
+            self.instance_to_version_after_sync[instance_id] = actual_version
 
     def world_size(self):
         """Get the total world size (number of rollout and validate instances)."""
@@ -341,6 +345,9 @@ class RolloutCoordinator(
         elif full_tag == "rollout":
             rollout_tag = "full"
             validate_tag = "meta"
+        elif full_tag == "meta":
+            rollout_tag = "meta"
+            validate_tag = "meta"
         elif full_tag == "validate":
             rollout_tag = "meta"
             validate_tag = "full"
@@ -386,11 +393,8 @@ class RolloutCoordinator(
         Args:
             tag (str): Tag to specify which instances to sleep ('rollout', 'validate', 'all')
         """
-        server_handles = self._tag_to_server(tag)
-        futures = []
-        for server_handle in server_handles:
-            futures.append(server_handle.sleep.remote(level=2))
-        await asyncio.gather(*futures)
+        replica_ids = self.replica_ids if tag == "all" else self.tag_to_replica_ids[tag]
+        await self._sleep_replicas([iid for iid in self.instance_ids if iid[0] in replica_ids])
 
     async def start_busy_loop(self):
         """
@@ -459,9 +463,6 @@ class RolloutCoordinator(
         - Engine status sync task
         - Stats recorder task (if enabled)
         """
-        if self.command_handler_task is None or self.command_handler_task.done():
-            return
-
         # Stop the background tasks
         self.stop_command_handler = True
         self.stop_sync_and_migrate = True
@@ -470,25 +471,16 @@ class RolloutCoordinator(
         self.stop_stats_recorder = True
         self.stop_thunder_agent = True
 
-        psrl_logger.info("Before waiting for all background tasks")
-        await self.command_handler_task
-        if self.process_status_queue_task is not None:
-            await self.process_status_queue_task
-            psrl_logger.info("Finished process status queue task.")
-        if self.sync_status_to_router_task is not None:
-            await self.sync_status_to_router_task
-            psrl_logger.info("Finished syncing status to router.")
-        if self.sync_task is not None:
-            await self.sync_task
-            psrl_logger.info("Finished sync task.")
-        if self.stats_recorder_task is not None:
-            await self.stats_recorder_task
-            psrl_logger.info("Finished stats recorder task.")
-        if self.thunder_agent_task is not None:
-            await self.thunder_agent_task
-            psrl_logger.info("Finished thunder agent task.")
-        if self.model_sync_tasks:
-            await asyncio.gather(*self.model_sync_tasks, return_exceptions=True)
+        tasks = [
+            self.command_handler_task,
+            self.process_status_queue_task,
+            self.sync_status_to_router_task,
+            self.sync_task,
+            self.stats_recorder_task,
+            self.thunder_agent_task,
+            *self.model_sync_tasks,
+        ]
+        results = await asyncio.gather(*(task for task in tasks if task is not None), return_exceptions=True)
         if self._stats_recorder is not None:
             self._stats_recorder.close()
         psrl_logger.info("All background tasks have been stopped.")
@@ -498,9 +490,14 @@ class RolloutCoordinator(
         if self._session_client is not None and not self._session_client.closed:
             await self._session_client.close()
         psrl_logger.info("Cleaned up resources in RolloutCoordinator.")
+        failures = [result for result in results if isinstance(result, Exception)]
+        if failures:
+            raise RuntimeError(f"Coordinator background tasks failed during shutdown: {failures!r}.") from failures[0]
 
     async def get_router_backlog_size(self) -> int:
-        """Return pending request count in rollout router queue."""
+        """
+        Return queued training demand for elastic rollout capacity.
+        """
         t_enter = time.monotonic()
         model_tag = str(self.config.gen_actor_rollout_ref.model.path).rstrip("/").split("/")[-1]
         log_elastic_rm_backlog_diag(
@@ -515,14 +512,7 @@ class RolloutCoordinator(
             time.monotonic() - t_enter,
         )
         t_rpc = time.monotonic()
-        status = await self._gateway_get_json(ROUTING_LOOP_STATUS_PATH)
-        pending_value = status.get("pending_request_num", status.get("queue_len"))
-        if pending_value is None:
-            worker_stats = await self._gateway_get_json(WORKERS_STATS_PATH)
-            stats = worker_stats if isinstance(worker_stats, list) else worker_stats.get("workers", [])
-            pending = sum(int(item.get("running_requests", 0)) for item in stats if isinstance(item, dict))
-        else:
-            pending = int(pending_value)
+        pending = len(await self._get_training_request_snapshot())
         log_elastic_rm_backlog_diag(
             psrl_logger,
             "stage=RolloutCoordinator_after_router_rpc model=%s pending=%d router_rpc_s=%.3f since_enter_s=%.3f",

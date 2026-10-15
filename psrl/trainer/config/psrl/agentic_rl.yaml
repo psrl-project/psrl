@@ -2,18 +2,12 @@
 # `request` keeps sibling trajectories in one optimizer step.
 batch_agg_mode: trajectory
 
-# How a harness that drops `reasoning_content` on replay is handled.
-# `multi_traj` trains every fork, `longest_traj` keeps the deepest one.
-# `multi_thinking` keeps CoT inline and requires rollout.chat_template to be an
-# accumulating template. `disable_thinking` turns CoT off and forbids that override,
-# because an accumulating template renders an unterminated `<think>` without CoT.
+# `multi_traj` trains all forks, `longest_traj` keeps the deepest. `multi_thinking` needs an accumulating chat template.
+# `disable_thinking` forbids that override because it leaves `<think>` unclosed when CoT is off.
 thinking_template: multi_traj
 
-# How many rollout groups may fail back to back, with none succeeding in between,
-# before training aborts. Each failure is replaced by a fresh prompt, so a
-# deterministic fault (unreachable registry, broken task image) otherwise churns
-# refills forever at zero progress instead of failing. Any group that completes
-# resets the count, so sporadic failures never accumulate into a trip.
+# Abort after this many consecutive failed rollout groups. Each failure refills from a fresh prompt.
+# Any completed group resets the counter, so intermittent failures do not accumulate.
 refill_failure_threshold: 32
 
 # Per-trajectory text dump written by all agent loops via TrajectoryWriter.

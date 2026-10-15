@@ -1,0 +1,16 @@
+{
+    "TP4_PP1": {
+        "other_threshold": 0.0059309,
+        "other_latency_b": 0.0066605,
+        "other_latency_k": 0.0002116,
+        "attn_latency_b": 0.0016772031,
+        "attn_latency_k": 2.84e-08
+    },
+    "TP8_PP1": {
+        "other_threshold": 0.0054186,
+        "other_latency_b": 0.005886,
+        "other_latency_k": 0.0001419,
+        "attn_latency_b": 0.0012331249,
+        "attn_latency_k": 2e-08
+    }
+}

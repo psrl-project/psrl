@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import threading
@@ -11,6 +12,13 @@ from omegaconf import DictConfig
 
 from psrl.utils.converter.param_sync import ParamSyncPlan
 from psrl.utils.logger import DualOutputHandler
+from psrl.utils.nixl import (
+    assert_positive_standard_gamma_mean,
+    fingerprint_log_record,
+    report_precision_sensitive_parameters,
+    resolve_weight_fingerprint_options,
+    weight_fingerprint_flow_enabled,
+)
 
 psrl_logger = logging.getLogger(__file__)
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "INFO"))
@@ -123,6 +131,11 @@ class PSRL_BaseTrainWorker:
         psrl_logger.debug("Getting the current PS model version...")
         curr_ps_model_version = ray.get(ps_manager_handle.get_ps_model_version.remote(debug_info="base_train_worker"))
         next_ps_model_version = curr_ps_model_version + 1
+        self.capture_weight_fingerprint(
+            stage="trainer_before_push",
+            model_version=next_ps_model_version,
+            flow="transfer_chain",
+        )
         if self._cached_ps_nixl_agent_names is None:
             self._cached_ps_nixl_agent_names = ray.get(ps_manager_handle.get_ps_nixl_agent_names.remote())
         if self._cached_ps_nixl_train_storage_client_names is None:
@@ -221,6 +234,25 @@ class PSRL_BaseTrainWorker:
                 dist.barrier()
                 psrl_logger.debug("Barrier done, now pushing model tag to the PS on the representative rank...")
                 if self.worker_rank == 0:
+                    fingerprint_options = resolve_weight_fingerprint_options(
+                        self.psrl_config,
+                        flow="transfer_chain",
+                        model_version=next_ps_model_version,
+                    )
+                    if fingerprint_options is not None:
+                        fingerprint_futures = []
+                        for client_name in self._cached_ps_nixl_train_storage_client_names:
+                            if client_name not in self._cached_ps_worker_handles:
+                                self._cached_ps_worker_handles[client_name] = ray.get(
+                                    ps_manager_handle.get_ps_worker_handle.remote(client_name)
+                                )
+                            fingerprint_futures.append(
+                                self._cached_ps_worker_handles[client_name].log_weight_fingerprints.remote(
+                                    next_ps_model_version
+                                )
+                            )
+                        ray.get(fingerprint_futures)
+                    # Only the representative rank pushes the model tag to the PS
                     ray.get(ps_manager_handle.push_model_state_dict_nixl.remote(next_ps_model_version))
                 self.nixl_storage_client.clear_intermediate_cached_data()
                 self.nixl_wait_completed.set()
@@ -291,9 +323,14 @@ class PSRL_BaseTrainWorker:
             self.ray_push_model()
         elif self.psrl_config.ps_mode == "nixl_cpu" or self.psrl_config.ps_mode == "nixl_gpu":
             self.param_sync_plan.before_push(self.unified_state_dict)
+
+            # ---- DEBUG: log train info BEFORE push ----
+            # self._debug_log_train_info(label=f"TRAIN_BEFORE_PUSH_R{self.worker_rank}")
             self.nixl_push_model()
             self.wait_for_nixl_push_completion()
             self.param_sync_plan.after_push(self.unified_state_dict)
+            # ---- DEBUG: log PS info AFTER push completes ----
+            # self._debug_log_ps_info(label=f"PS_AFTER_PUSH_R{self.worker_rank}")
         else:
             raise NotImplementedError(f"PSRL TrainWorker does not support PS mode '{self.psrl_config.ps_mode}' yet.")
 
@@ -322,6 +359,16 @@ class PSRL_BaseTrainWorker:
             "pull_model_state_dict_nixl should only be used in 'nixl_cpu' or 'nixl_gpu' mode."
         )
         ps_manager_handle = self.train_interface.ps_manager_handle
+        verify_sleep_wake = weight_fingerprint_flow_enabled(
+            self.psrl_config,
+            flow="trainer_sleep_wake",
+        )
+        model_version = (
+            int(ray.get(ps_manager_handle.get_ps_model_version.remote(debug_info="trainer_weight_fingerprint")))
+            if verify_sleep_wake
+            else -1
+        )
+        # Cache the agent and client names to avoid redundant ray calls
         if self._cached_ps_nixl_agent_names is None:
             self._cached_ps_nixl_agent_names = ray.get(ps_manager_handle.get_ps_nixl_agent_names.remote())
         if self._cached_ps_nixl_train_storage_client_names is None:
@@ -329,7 +376,42 @@ class PSRL_BaseTrainWorker:
                 ps_manager_handle.get_ps_nixl_train_storage_client_names.remote()
             )
         self.nixl_pull_model_core(self._cached_ps_nixl_agent_names, self._cached_ps_nixl_train_storage_client_names)
+        raw_fingerprint = (
+            self.capture_weight_fingerprint(
+                stage="trainer_after_raw_pull",
+                model_version=model_version,
+                flow="trainer_sleep_wake",
+            )
+            if verify_sleep_wake
+            else None
+        )
         self.param_sync_plan.after_pull(self.unified_state_dict)
+        final_fingerprint = (
+            self.capture_weight_fingerprint(
+                stage="trainer_after_param_sync",
+                model_version=model_version,
+                flow="trainer_sleep_wake",
+            )
+            if verify_sleep_wake
+            else None
+        )
+        precision_stats = report_precision_sensitive_parameters(
+            self.unified_state_dict,
+            logger=psrl_logger,
+            role="actor",
+            rank=self.worker_rank,
+            pull_times=self.pull_times,
+        )
+        uses_zero_centered_gamma = any(
+            type(action).__name__ == "ZeroCenteredGammaSync" for action in self.param_sync_plan.actions
+        )
+        if self.pull_times == 1 and not uses_zero_centered_gamma:
+            assert_positive_standard_gamma_mean(precision_stats, rank=self.worker_rank)
+        return {
+            "model_version": model_version,
+            "raw_fingerprint": raw_fingerprint,
+            "final_fingerprint": final_fingerprint,
+        }
 
     def nixl_pull_model_core(self, ps_nixl_agent_names: list[str], ps_nixl_train_storage_client_names: list[str]):
         """
@@ -372,15 +454,16 @@ class PSRL_BaseTrainWorker:
         if self.psrl_config.ps_mode == "cpu" or self.psrl_config.ps_mode == "cpu_ref":
             raise RuntimeError("ray_pull_model is not supported for TrainWorker in 'cpu' or 'cpu_ref' mode.")
         elif self.psrl_config.ps_mode == "nixl_cpu" or self.psrl_config.ps_mode == "nixl_gpu":
-            self.nixl_pull_model()
-            self._debug_log_train_info(label=f"TRAIN_AFTER_PULL_R{self.worker_rank}")
-            # NOTE(linsh): Reload after the first pull because empty initialization leaves
-            # optimizer master parameters stale, while later optimizer state remains local.
+            # ---- DEBUG: log PS info BEFORE pull ----
+            # self._debug_log_ps_info(label=f"PS_BEFORE_PULL_R{self.worker_rank}")
+            fingerprint_result = self.nixl_pull_model()
+            # NOTE(linsh): Reload optimizer master parameters after the first pull from empty initialization.
             if self.pull_times == 1:
                 self.reload_optimizer_after_pull()
         else:
             raise NotImplementedError(f"PSRL GenWorker does not support PS mode '{self.psrl_config.ps_mode}' yet.")
         self._restore_non_persistent_buffers_from_ps()
+        return fingerprint_result
 
     def _restore_non_persistent_buffers_from_ps(self) -> None:
         """Restore non-persistent buffers from the parameter server after pull."""
@@ -442,6 +525,85 @@ class PSRL_BaseTrainWorker:
     def reload_optimizer_after_pull(self):
         """Reload optimizer master parameters from the current model weights."""
         pass
+
+    def capture_weight_fingerprint(
+        self,
+        stage: str,
+        model_version: int,
+        flow: str,
+    ) -> dict | None:
+        """Capture and log the registered trainer weights for one diagnostic stage."""
+        options = resolve_weight_fingerprint_options(
+            self.psrl_config,
+            flow=flow,
+            model_version=model_version,
+        )
+        if options is None:
+            return None
+        if self.nixl_storage_client is None or self.nixl_storage_client.local_client_info is None:
+            psrl_logger.warning(
+                "[WEIGHT_FINGERPRINT] flow=%s stage=%s model_version=%d rank=%d status=skipped_not_registered",
+                flow,
+                stage,
+                model_version,
+                self.worker_rank,
+            )
+            return None
+        fingerprint = self.nixl_storage_client.get_weight_fingerprint(
+            mode=options["mode"],
+            sample_count=options["sample_count"],
+            chunk_bytes=options["chunk_bytes"],
+        )
+        record = fingerprint_log_record(
+            fingerprint,
+            flow=flow,
+            stage=stage,
+            role="trainer",
+            model_version=model_version,
+            rank=self.worker_rank,
+            client_name=self.nixl_storage_client.client_name,
+            include_tensor_digests=options["include_tensor_digests"],
+        )
+        psrl_logger.warning("[WEIGHT_FINGERPRINT] %s", json.dumps(record, sort_keys=True))
+        return {**record, "tensor_digests": fingerprint["tensor_digests"]}
+
+    def capture_weight_mapping_signature(
+        self,
+        stage: str,
+        model_version: int,
+        flow: str,
+    ) -> dict | None:
+        """Log trainer NIXL registration metadata without reading weight contents."""
+        options = resolve_weight_fingerprint_options(
+            self.psrl_config,
+            flow=flow,
+            model_version=model_version,
+        )
+        if options is None:
+            return None
+        if self.nixl_storage_client is None or self.nixl_storage_client.local_client_info is None:
+            return None
+        signature = self.nixl_storage_client.get_tensor_mapping_signature()
+        record = fingerprint_log_record(
+            signature,
+            flow=flow,
+            stage=stage,
+            role="trainer",
+            model_version=model_version,
+            rank=self.worker_rank,
+            client_name=self.nixl_storage_client.client_name,
+            include_tensor_digests=False,
+        )
+        psrl_logger.warning("[WEIGHT_MAPPING] %s", json.dumps(record, sort_keys=True))
+        return record
+
+    def get_nixl_weight_fingerprint(self, chunk_bytes: int = 64 * 1024**2) -> dict:
+        """Return an exact fingerprint of every logical tensor registered for NIXL."""
+        fingerprint = self.nixl_storage_client.get_weight_fingerprint(
+            mode="full",
+            chunk_bytes=chunk_bytes,
+        )
+        return {"rank": self.worker_rank, **fingerprint}
 
     def _debug_log_train_model_info(self, label: str):
         """Debug log the train model info."""

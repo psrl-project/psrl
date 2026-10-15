@@ -1,18 +1,30 @@
 import argparse
 import logging
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any
+
+from psrl.utils.cost_model_path import require_cost_model_json_path
 
 psrl_logger = logging.getLogger(__name__)
 
 WORKERS_UPDATE_STATS_PATH = "/workers/update_stats"
 WORKERS_UPDATE_WEIGHT_VERSION_PATH = "/workers/update_weight_version"
 WORKERS_STATS_PATH = "/workers/stats"
+WORKERS_PAUSE_PATH = "/workers/pause"
+WORKERS_RESUME_PATH = "/workers/resume"
 ROUTING_LOOP_STATUS_PATH = "/routing_loop/status"
 TITO_SESSIONS_PATH = "tito/sessions"
 TRAJECTORY_ID_STRATEGIES = frozenset({"auto", "manual"})
 
 CACHE_AWARE_METHODS = frozenset({"cache_aware", "cache_aware_v1"})
+
+
+class ReplicaRoutingStatus(str, Enum):
+    """Routing eligibility state for one rollout replica."""
+
+    ACTIVE = "active"
+    PAUSED = "paused"
 
 
 def is_cache_aware_method(method: str) -> bool:
@@ -44,6 +56,24 @@ def _cache_aware_cfg(config: Any, key: str, default: Any = None) -> Any:
     return default
 
 
+def _first_nonempty(*values: Any) -> str:
+    for value in values:
+        if value:
+            return str(value)
+    return ""
+
+
+def resolve_router_cost_model_path(cost_model_path: Any, model_name: Any) -> str | None:
+    """
+    Resolve a router cost-model JSON from a file path or a directory.
+    """
+    if not cost_model_path:
+        return None
+    resolved = require_cost_model_json_path(str(cost_model_path), str(model_name or ""))
+    psrl_logger.info(f"Resolved cost_model_path {cost_model_path!r} for model {model_name!r} to {resolved!r}.")
+    return resolved
+
+
 def build_rollout_router_args(config: Any, host: str, port: int, ps_manager_addr: str):
     from smg.launch_router import RouterArgs
 
@@ -66,6 +96,12 @@ def build_rollout_router_args(config: Any, host: str, port: int, ps_manager_addr
         enable_group_sticky,
         kv_transfer_enable,
         kv_transfer_mode,
+    )
+
+    model_path = cfg_get(config, "train_actor_rollout_ref.model.path", None)
+    cost_model_path = resolve_router_cost_model_path(
+        cfg_get(config, "psrl.rollout_coordination.routing_strategy.cost_model_path", None),
+        _first_nonempty(cfg_get(config, "gen_actor_rollout_ref.model.path", None), model_path),
     )
 
     cli_args = argparse.Namespace(
@@ -99,7 +135,7 @@ def build_rollout_router_args(config: Any, host: str, port: int, ps_manager_addr
         max_concurrent_seqs_per_instance=int(
             cfg_get(config, "psrl.rollout_coordination.routing_strategy.max_concurrent_seqs_per_instance", 1024)
         ),
-        cost_model_path=cfg_get(config, "psrl.rollout_coordination.routing_strategy.cost_model_path", None),
+        cost_model_path=cost_model_path,
         max_num_waiting_reqs_after_preemption=int(
             cfg_get(config, "psrl.rollout_coordination.routing_strategy.max_num_waiting_reqs_after_preemption", 1000)
         ),
@@ -138,7 +174,7 @@ def build_rollout_router_args(config: Any, host: str, port: int, ps_manager_addr
             cfg_get(config, "psrl.rollout_gateway.multimodal_tensor_transport", "auto")
         ).lower(),
         multimodal_shm_min_bytes=int(cfg_get(config, "psrl.rollout_gateway.multimodal_shm_min_bytes", 64 * 1024)),
-        model_path=cfg_get(config, "train_actor_rollout_ref.model.path", None),
+        model_path=model_path,
         chat_template=cfg_get(config, "gen_actor_rollout_ref.rollout.chat_template", None),
         service_discovery=False,
         prometheus_port=None,
@@ -151,35 +187,62 @@ def build_rollout_router_args(config: Any, host: str, port: int, ps_manager_addr
     return RouterArgs.from_cli_args(cli_args, use_router_prefix=False)
 
 
-def build_reward_router_args(config: Any, host: str, port: int, prometheus_port: int | None):
+def build_reward_router_args(config: Any, host: str, port: int, prometheus_port: int | None, *, rm_config: Any):
     from smg.launch_router import RouterArgs
+
+    model_path = cfg_get(rm_config, "model.path", None)
+    if not model_path:
+        raise ValueError("Reward gateway requires model.path to load its tokenizer.")
+    tokenizer_path = cfg_get(rm_config, "model.tokenizer_path", model_path)
+    routing_method = str(cfg_get(rm_config, "routing_strategy.method", "round_robin"))
+    max_concurrent_seqs = int(cfg_get(rm_config, "routing_strategy.max_concurrent_seqs_per_instance", 1024))
+    request_limit = cfg_get(rm_config, "max_concurrent_requests_per_instance", None)
+    if request_limit is not None:
+        max_concurrent_seqs = min(max_concurrent_seqs, int(request_limit))
+    if max_concurrent_seqs <= 0:
+        raise ValueError("Reward routing concurrency must be positive.")
+    cost_model_path = cfg_get(rm_config, "routing_strategy.cost_model_path", None)
+    if routing_method in {"itl", "throughput_optimal", "throughput_optimal_with_budget"} and not cost_model_path:
+        raise ValueError(f"Reward routing policy {routing_method!r} requires routing_strategy.cost_model_path.")
+    cost_model_path = resolve_router_cost_model_path(
+        cost_model_path,
+        _first_nonempty(cfg_get(rm_config, "reward_model_name", None), model_path),
+    )
 
     cli_args = argparse.Namespace(
         host=host,
         port=port,
-        dp_aware=False,
+        dp_aware=True,
         connection_mode="grpc",
         pd_disaggregation=False,
         prefill=None,
         decode=None,
-        policy="round_robin",
+        policy=routing_method,
         prefill_policy=None,
         decode_policy=None,
         disable_retries=True,
-        max_concurrent_seqs_per_instance=int(
-            cfg_get(config, "psrl.rollout_coordination.routing_strategy.max_concurrent_seqs_per_instance", 1024)
-        ),
-        cost_model_path=None,
+        max_concurrent_seqs_per_instance=max_concurrent_seqs,
+        cost_model_path=cost_model_path,
+        itl_max_latency=cfg_get(config, "psrl.deployment.elastic.throughput_optimal.rm_router_max_itl", None),
         max_num_waiting_reqs_after_preemption=int(
-            cfg_get(config, "psrl.rollout_coordination.routing_strategy.max_num_waiting_reqs_after_preemption", 1000)
+            cfg_get(rm_config, "routing_strategy.max_num_waiting_reqs_after_preemption", 1000)
         ),
-        delta_throughput_threshold=float(
-            cfg_get(config, "psrl.rollout_coordination.routing_strategy.delta_throughput_threshold", 0.5)
+        delta_throughput_threshold=float(cfg_get(rm_config, "routing_strategy.delta_throughput_threshold", 0.5)),
+        max_prompt_length=int(cfg_get(rm_config, "rollout.max_model_len", 32768)),
+        request_budget=int(cfg_get(rm_config, "routing_strategy.request_budget", 1024)),
+        enable_routing_loop=True,
+        routing_loop_check_interval_ms=int(cfg_get(rm_config, "routing_strategy.check_interval_in_ms", 10)),
+        routing_loop_request_sort_key=str(cfg_get(rm_config, "routing_strategy.request_sort_indicator", "small_id")),
+        routing_loop_multi_priority_queue=bool(
+            cfg_get(rm_config, "routing_strategy.enable_multi_priority_queue", False)
         ),
-        max_prompt_length=32768,
-        request_budget=1024,
-        enable_routing_loop=False,
+        routing_loop_dispatch_batch_size=1,
         worker_selection_strategy="naive",
+        model_path=model_path,
+        tokenizer_path=tokenizer_path,
+        chat_template=cfg_get(rm_config, "rollout.chat_template", None),
+        # The gateway registers its tokenizer under `reward_model_name` before accepting requests.
+        disable_tokenizer_autoload=True,
         service_discovery=False,
         prometheus_port=prometheus_port,
         request_timeout_secs=2**64 - 1,
@@ -195,6 +258,8 @@ def build_worker_registration_payload(
     *,
     url: str,
     model_id: str,
+    role: str,
+    fuse_rollout_with_validate: bool,
     max_model_len: int,
     dp_size: int,
     tp_size: int,
@@ -203,7 +268,14 @@ def build_worker_registration_payload(
     lmcache_instance_id: str | None = None,
     worker_id: str | None = None,
 ) -> dict[str, Any]:
+    if role in ("rollout", "validate"):
+        request_scope = "all" if fuse_rollout_with_validate else ("validate" if role == "validate" else "train")
+    elif role.startswith("reward_model_"):
+        request_scope = "train"
+    else:
+        raise ValueError(f"Unsupported inference worker role {role!r}.")
     labels = {
+        "psrl_request_scope": request_scope,
         "max_model_len": str(max_model_len),
         "dp_size": str(dp_size),
         "tp_size": str(tp_size),

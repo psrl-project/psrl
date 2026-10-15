@@ -1,21 +1,23 @@
-from .dapo import DAPORewardManager
-from .gdpo import GDPORewardManager
-from .gen import GenRewardManager
-from .naive import NaiveRewardManager
-from .prime import PrimeRewardManager
+from .dapo import DAPORewardLoop
+from .gdpo import GDPORewardLoop
+from .gen import GenRewardLoop
+from .naive import NaiveRewardLoop
+from .opd import OPDRewardLoop
+from .prime import PrimeRewardLoop
 from .registry import (
-    get_reward_manager_cls,
-    load_reward_manager,
+    get_reward_loop_cls,
+    load_reward_loop,
     register,
 )
 
 __all__ = [
-    "DAPORewardManager",
-    "GDPORewardManager",
-    "NaiveRewardManager",
-    "PrimeRewardManager",
-    "GenRewardManager",
+    "DAPORewardLoop",
+    "GDPORewardLoop",
+    "NaiveRewardLoop",
+    "OPDRewardLoop",
+    "PrimeRewardLoop",
+    "GenRewardLoop",
     "register",
-    "get_reward_manager_cls",
-    "load_reward_manager",
+    "get_reward_loop_cls",
+    "load_reward_loop",
 ]

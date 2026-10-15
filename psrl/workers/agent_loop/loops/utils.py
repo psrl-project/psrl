@@ -1,8 +1,18 @@
 from enum import Enum
+from importlib import import_module
 
 from omegaconf import DictConfig
 
 AGENT_LOOP_REGISTRY: dict[str, dict] = {}
+
+# Lookup imports the module so `@register` runs without pulling optional loops at worker start.
+_BUILTIN_AGENT_LOOP_MODULES = {
+    "generate_only_agent": "psrl.workers.agent_loop.loops.generate_agent_loop",
+    "multi_turn_agent": "psrl.workers.agent_loop.loops.multi_turn_agent_loop",
+    "multi_turn_completion_agent": "psrl.workers.agent_loop.loops.multi_turn_completion_agent_loop",
+    "mini_swe_agent": "psrl.workers.agent_loop.loops.mini_swe_agent_loop_v1",
+    "mlgym_agent": "psrl.workers.agent_loop.loops.mlgym_agent_loop",
+}
 
 
 def register(agent_name: str):
@@ -22,6 +32,33 @@ def register(agent_name: str):
         return subclass
 
     return decorator
+
+
+def get_agent_loop_config(agent_name: str) -> dict:
+    """
+    Return the Hydra config for a named agent loop.
+
+    Built-in loops are imported on first lookup so `@register` can populate
+    `AGENT_LOOP_REGISTRY` without loading optional implementations at import time.
+
+    Args:
+        agent_name (str): Registered agent loop name.
+
+    Returns:
+        dict: Hydra config containing `_target_` and any YAML overlays.
+
+    Raises:
+        ValueError: If the name is not a built-in loop and was not loaded from YAML.
+    """
+    if agent_name not in AGENT_LOOP_REGISTRY:
+        module_name = _BUILTIN_AGENT_LOOP_MODULES.get(agent_name)
+        if module_name is not None:
+            import_module(module_name)
+    if agent_name not in AGENT_LOOP_REGISTRY:
+        raise ValueError(
+            f"Unregistered agent loop: name={agent_name!r}, available={list(AGENT_LOOP_REGISTRY.keys())!r}."
+        )
+    return AGENT_LOOP_REGISTRY[agent_name]
 
 
 class DictConfigWrap:

@@ -4,81 +4,41 @@ import pytest
 pytestmark = pytest.mark.cpu_test
 
 
-def test_psrl_reward_config_is_subclass_of_verl():
-    from psrl.workers.config.reward import PSRLRewardConfig
-    from verl.workers.config.reward import RewardConfig
+def test_reward_model_config_defaults():
+    from psrl.workers.config.reward_model import RewardModelConfig
 
-    assert issubclass(PSRLRewardConfig, RewardConfig)
-
-
-def test_psrl_reward_config_defaults():
-    from psrl.workers.config.reward import (
-        PSRLRewardConfig,
-    )
-
-    cfg = PSRLRewardConfig()
-    # veRL base fields
-    assert cfg.num_workers == 8
-    assert cfg.reward_manager.name == "naive"
-    assert cfg.reward_model.enable is False
-    # PSRL extension fields
-    assert cfg.managers == {}
-    assert cfg.active_managers == []
-    assert cfg.reward_normalization.enable is False
-    assert cfg.reward_normalization.level == "batch"
-    assert cfg.launch_reward_fn_async is False
-    assert cfg.data_processor.path is None
-
-
-def test_psrl_reward_model_config_is_subclass_of_verl():
-    from psrl.workers.config.reward import PSRLRewardModelConfig
-    from verl.workers.config.reward import RewardModelConfig
-
-    assert issubclass(PSRLRewardModelConfig, RewardModelConfig)
-
-
-def test_psrl_reward_model_config_defaults():
-    from psrl.workers.config.reward import PSRLRewardModelConfig
-
-    cfg = PSRLRewardModelConfig()
-    # veRL base fields
+    cfg = RewardModelConfig()
     assert cfg.enable is False
+    assert cfg.reward_manager == "naive"
     assert cfg.n_gpus_per_node == 0
-    # PSRL additions
-    assert cfg.strategy == "fsdp"
-    assert cfg.micro_batch_size_per_gpu is None
-    assert cfg.use_dynamic_bsz is False
+    assert cfg.max_new_tokens == 4096
 
 
 def test_single_reward_model_config_defaults():
-    from psrl.workers.config.reward import SingleRewardModelConfig
+    from psrl.workers.config.reward_model import SingleRewardModelConfig
 
     cfg = SingleRewardModelConfig()
-    assert cfg.reward_model_name == "default"
-    assert cfg.reward_loop_type == "naive"
-    assert cfg.reward_fn == "default"
-    assert cfg.reward_coef == 1.0
+    assert cfg.reward_model_name is None
+    assert cfg.reward_loop_type is None
+    assert cfg.reward_fn is None
+    assert cfg.num_replicas == 1
     assert cfg.reward_loop_kwargs == {}
 
 
-def test_reward_data_processor_config_no_path():
-    from psrl.workers.config.reward import RewardDataProcessorConfig
+def test_reward_loop_worker_config_defaults():
+    from psrl.workers.config.reward_model import RewardLoopWorkerConfig
 
-    cfg = RewardDataProcessorConfig()
-    pre, post = cfg.get_process_fn()
-    assert pre is None
-    assert post is None
+    cfg = RewardLoopWorkerConfig()
+    assert cfg.num_workers == 8
+    assert cfg.max_concurrency_per_worker == 256
 
 
-def test_new_dataclasses_exported_from_workers_config():
-    """Verify that the new dataclasses are accessible from psrl.workers.config."""
-    from psrl.workers.config import (  # noqa: F401
-        PSRLRewardConfig,
-        PSRLRewardModelConfig,
-        RewardDataProcessorConfig,
-        RewardNormalizationConfig,
-        SingleRewardModelConfig,
-    )
+def test_reward_model_configs_are_exported_from_workers_config():
+    from psrl.workers.config import MultiRewardModelConfig, RewardModelConfig, SingleRewardModelConfig
+
+    assert MultiRewardModelConfig is not None
+    assert RewardModelConfig is not None
+    assert SingleRewardModelConfig is not None
 
 
 def test_multi_reward_model_config_has_managers():
@@ -89,6 +49,16 @@ def test_multi_reward_model_config_has_managers():
     assert cfg.managers == {}
     assert cfg.active_managers == []
     assert cfg.launch_reward_fn_async is False
+
+
+def test_validation_reward_pool_has_independent_defaults():
+    from psrl.workers.config.reward_model import MultiRewardModelConfig, RewardLoopWorkerConfig
+
+    cfg = MultiRewardModelConfig()
+    assert cfg.validation_reward_loop_worker.num_workers == 2, "Validation must have its own worker count."
+    assert cfg.validation_reward_loop_worker.max_concurrency_per_worker == 256, "Validation must bound concurrency."
+    overridden = MultiRewardModelConfig(reward_loop_worker=RewardLoopWorkerConfig(num_workers=16))
+    assert overridden.validation_reward_loop_worker.num_workers == 2, "Training overrides must not change validation."
 
 
 def test_resolve_active_managers():

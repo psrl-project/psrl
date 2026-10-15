@@ -28,7 +28,7 @@ Run the three stages in order. Each stage is idempotent. Re-running skips comple
 **Stages 1-3: Download and prepare AIRS-Bench datasets**
 
 ```bash
-source /apdcephfs_zwfy10/share_303541817/lhy/env/psrl.sh
+source ${PSRL_WORKSPACE}/env/psrl.sh
 python -m examples.airs_bench.prepare.prepare_airs_data \
     --airs-repo "${AIRS_REPO}" \
     --data-root /apdcephfs_zwfy10/share_303541817/lhy/airs_bench_data
@@ -130,7 +130,7 @@ The scripted episode runs one AIRS-Bench episode with fixed actions and no LLM. 
 here is infrastructure (container, shell protocol, data mounts, or grading), not policy.
 
 ```bash
-source /apdcephfs_zwfy10/share_303541817/lhy/env/psrl.sh
+source ${PSRL_WORKSPACE}/env/psrl.sh
 python -m examples.airs_bench.scripted_episode \
     --task-id TextualClassificationSickAccuracy
 ```

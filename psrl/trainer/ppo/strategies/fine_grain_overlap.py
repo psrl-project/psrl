@@ -37,6 +37,11 @@ class FineGrainOverlapStrategy(StepStrategy):
             cfg: The ``psrl.fine_grain_overlap`` config sub-tree (OmegaConf node).
         """
         super().__init__(trainer)
+        if trainer.elastic_mode:
+            raise ValueError(
+                "FineGrainOverlapStrategy cannot run with elastic deployments. "
+                "Set psrl.fine_grain_overlap.granularity=none."
+            )
         t = trainer
         dp_size = t._get_dp_size(t.actor_wg, "actor")
         self.effective_granularity, self.chunk_groups = resolve_fine_grain_chunk_size(t.config, dp_size)
@@ -76,9 +81,7 @@ class FineGrainOverlapStrategy(StepStrategy):
             KVBatchMeta: The concatenated full batch after all phases complete.
         """
         t = self.trainer
-
         # Switch before GPU work so chunks can arrive while rollout progresses.
-        t.switch_to_trainer_mode()
 
         chunks: list[KVBatchMeta] = []
         chunk_idx = 0
@@ -91,6 +94,8 @@ class FineGrainOverlapStrategy(StepStrategy):
                 chunk_idx,
             )
             chunk_meta, is_last = ray.get(t.agent_loop_manager.wait_for_training_chunk.remote(buffer_id, chunk_idx))
+            if chunk_idx == 0:
+                t.switch_to_trainer_mode()
             psrl_logger.warning(
                 "FineGrainOverlap: got buffer=%d chunk=%d size=%d is_last=%s. Sampling replay buffer",
                 buffer_id,

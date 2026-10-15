@@ -4,11 +4,13 @@ on:
   pull_request:
     paths:
       - "**/*.py"
+      - "pyproject.toml"
       - ".github/workflows/cpu_unit_tests.yml"
   push:
     branches: [main, base_agentic_rl]
     paths:
       - "**/*.py"
+      - "pyproject.toml"
       - ".github/workflows/cpu_unit_tests.yml"
 
 concurrency:
@@ -27,17 +29,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install psrl with test dependencies
+      - name: Install CPU test dependencies
         run: |
-          pip install --no-deps -e .
-          pip install "pytest>=8.0" "pytest-asyncio>=0.23" "pytest-mock>=3.12" "pytest-cov>=5.0" aiohttp cachetools numpy omegaconf
+          python -m pip install "pytest>=8.0" "pytest-asyncio>=0.23" "pytest-mock>=3.12" "pytest-cov>=5.0" numpy
       - name: Run cpu_test suite
         run: |
-          pytest -m cpu_test \
+          python -m pytest -m cpu_test \
             --cov=psrl \
             --cov-report=xml \
             tests/staleness/test_staleness_controller.py \
-            tests/elastic_rm/test_scaling_policy_instance_id.py
+            tests/elastic/test_scaling_policy_instance_id.py \
+            tests/utils/test_cpu_imports.py
       - name: Upload coverage report
         uses: codecov/codecov-action@v4
         with:

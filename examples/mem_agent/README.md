@@ -99,8 +99,8 @@ handles session IDs or PSRL HTTP headers.
 Native HotpotQA parquet can be evaluated directly by setting `data.val_files`:
 
 ```text
-data.train_files=/data/hotpotqa_train_32k.parquet
-data.val_files=examples/mem_agent/hotpotqa_dev.parquet
++data.train_files=/data/hotpotqa_train_32k.parquet
++data.val_files=examples/mem_agent/hotpotqa_dev.parquet
 trainer.val_before_train=True
 trainer.test_freq=10
 ```
@@ -112,7 +112,7 @@ documents. These raw files contain `input`, `answers`, `context`, and
 conversion step by enabling the dataset adapter:
 
 ```text
-data.val_files=/data/hotpotqa/eval_200.json
++data.val_files=/data/hotpotqa/eval_200.json
 data.custom_cls.path=examples/mem_agent/dataset.py
 data.custom_cls.name=MemAgentDataset
 data.filter_overlong_prompts=False

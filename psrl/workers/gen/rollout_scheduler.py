@@ -101,6 +101,23 @@ class RolloutScheduler(AsyncScheduler):
 
         self._pcomp_logger.info("\n".join(lines))  # type: ignore[union-attr]
 
+    def psrl_get_runtime_stats(
+        self,
+    ) -> dict:
+        """
+        Read live queue state without draining iteration metrics or preemption events.
+        """
+        waiting = [*self.waiting, *self.skipped_waiting]
+        requests = [*self.running, *waiting]
+        return {
+            "req_id_to_prompt_token_num": {req.request_id: req.num_prompt_tokens for req in requests},
+            "req_id_to_response_token_num": {req.request_id: req.num_output_tokens for req in requests},
+            "req_id_in_waiting": [req.request_id for req in waiting],
+            "num_running_reqs": len(self.running),
+            "num_waiting_reqs": len(waiting),
+            "kv_cache_usage": self.kv_cache_manager.usage,
+        }
+
     def make_stats(
         self,
         spec_decoding_stats: SpecDecodingStats | None = None,
@@ -121,13 +138,15 @@ class RolloutScheduler(AsyncScheduler):
         connector_stats_payload = kv_connector_stats.data if kv_connector_stats else None
         req_id_to_prompt_token_num = {req_id: req.num_prompt_tokens for req_id, req in self.requests.items()}
         req_id_to_response_token_num = {req_id: req.num_output_tokens for req_id, req in self.requests.items()}
-        # NOTE(lhy): PSRL adds per-request prompt and response token counts to `SchedulerStats`.
-        # Preserve and clear `preemption_req_ids` after each statistics snapshot.
+        req_id_in_waiting = [req.request_id for req in self.waiting]
+        # NOTE(lhy): Add abort IDs, per-request token counts, and waiting IDs to `SchedulerStats`. Clear preemption IDs
+        # per snapshot.
         preemption_req_ids = self.preemption_req_ids
         self.preemption_req_ids = []
         return SchedulerStats(
             req_id_to_prompt_token_num=req_id_to_prompt_token_num,
             req_id_to_response_token_num=req_id_to_response_token_num,
+            req_id_in_waiting=req_id_in_waiting,
             num_running_reqs=len(self.running),
             num_waiting_reqs=len(self.waiting),
             num_skipped_waiting_reqs=len(self.skipped_waiting),

@@ -6,12 +6,13 @@ from typing import TYPE_CHECKING
 import ray
 import torch
 from omegaconf import DictConfig, OmegaConf, open_dict
-from verl import DataProto
+from tensordict import TensorDict
 from verl.single_controller.base.decorator import (
     Dispatch,
     make_nd_compute_dataproto_dispatch_fn,
     register,
 )
+from verl.utils import tensordict_utils as tu
 from verl.utils.device import get_device_id
 from verl.utils.fs import copy_to_local
 from verl.utils.memory_utils import aggressive_empty_cache
@@ -37,6 +38,7 @@ from psrl.utils.nixl import (
     NIXLInterface,
     NIXLStorageClient,
 )
+from psrl.utils.optimizer_state import assert_optimizer_state_offloaded
 from psrl.utils.ray import exclusive_push_model_context
 from psrl.workers.train import PSRL_BaseTrainWorker, TrainInterface
 
@@ -52,7 +54,7 @@ if TYPE_CHECKING:
     )
 
     from psrl.utils.converter.megatron_converter import convert_megatron_inplace
-    from psrl.utils.megatron.router_replay_patch import (
+    from verl.utils.megatron.router_replay_patch import (
         RouterReplay,
         RouterReplayAction,
     )
@@ -85,8 +87,10 @@ class PSRL_MegatronTrainWorker(ActorRolloutRefWorker, PSRL_BaseTrainWorker):
         psrl_config: DictConfig,
         train_interface: TrainInterface,
         nixl_interface: NIXLInterface,
+        distillation_config: DictConfig | None = None,
     ) -> None:
         ActorRolloutRefWorker.__init__(self, config, role)
+        self.distillation_config = distillation_config
         PSRL_BaseTrainWorker.__init__(
             self,
             self.rank,
@@ -171,9 +175,10 @@ class PSRL_MegatronTrainWorker(ActorRolloutRefWorker, PSRL_BaseTrainWorker):
             trust_remote_code=self.config.model.get("trust_remote_code", False),
         )
         parameter_mapping = create_parameter_mapping("Megatron", model_config)
-        self.unified_state_dict, self.local_sharding_dict = convert_megatron_inplace(
+        self.unified_state_dict, self.local_sharding_dict, self.param_sync_plan = convert_megatron_inplace(
             parameter_mapping,
             self.actor_module,
+            return_sync_plan=True,
         )
 
     def nixl_protocol(self, mode: str = "full"):
@@ -216,8 +221,30 @@ class PSRL_MegatronTrainWorker(ActorRolloutRefWorker, PSRL_BaseTrainWorker):
 
     def nixl_sleep(self, mode: str = "full"):
         """Deregister local tensors and put model weights to sleep state."""
+        full_sleep = mode != "meta"
+        if full_sleep:
+            if not self._is_offload_optimizer:
+                raise RuntimeError(
+                    "Full trainer sleep requires train_actor_rollout_ref.actor.megatron."
+                    "optimizer_offload=True so optimizer state survives TMS pause/resume."
+                )
+            torch.cuda.synchronize()
+            optimizer_summary = assert_optimizer_state_offloaded(
+                self.actor_optimizer,
+                stage="before_sleep",
+                rank=self.rank,
+            )
+            psrl_logger.info(
+                "[TRAINER_OPTIMIZER_OFFLOAD_CHECK] stage=before_sleep rank=%d summary=%s",
+                self.rank,
+                optimizer_summary,
+            )
+        self._psrl_full_sleep_active = full_sleep
         self.sleep_megatron_model()
         if mode == "meta":
+            return
+        if self.nixl_storage_client.local_client_info is None:
+            psrl_logger.warning("Skip NIXL deregistration because local tensors are not registered.")
             return
         self.nixl_storage_client.deregister_local_tensors()
 
@@ -290,8 +317,20 @@ class PSRL_MegatronTrainWorker(ActorRolloutRefWorker, PSRL_BaseTrainWorker):
         to handle memory changes after sleep/wake_up cycle.
         """
         self.wake_up_megatron_model()
+        if getattr(self, "_psrl_full_sleep_active", False):
+            optimizer_summary = assert_optimizer_state_offloaded(
+                self.actor_optimizer,
+                stage="after_wake",
+                rank=self.rank,
+            )
+            psrl_logger.info(
+                "[TRAINER_OPTIMIZER_OFFLOAD_CHECK] stage=after_wake rank=%d summary=%s",
+                self.rank,
+                optimizer_summary,
+            )
         # Re-register the state dict and sharding dict to the NIXL client
         self.nixl_storage_client.register_local_tensors(self.unified_state_dict, self.unified_sharding_dict)
+        self._psrl_full_sleep_active = False
 
     def wake_up_megatron_model(self):
         """
@@ -493,21 +532,22 @@ class PSRL_MegatronTrainWorker(ActorRolloutRefWorker, PSRL_BaseTrainWorker):
     # The log_prob in training side may need to be recomputed
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @gpu_memory_logger_decorator(log_only_rank_0=False)
-    def compute_log_prob(self, data: DataProto):
+    def compute_log_prob(self, data: TensorDict) -> TensorDict:
         with log_dual_events("Recompute log_prob", psrl_logger, event_type=EventType.OTHER):
             assert self._is_actor
             if self._is_offload_param:
                 load_megatron_model_to_gpu(self.actor_module, load_grad=False)
 
-            data.meta_info["micro_batch_size"] = self.config.rollout.log_prob_micro_batch_size_per_gpu
-            data.meta_info["max_token_len"] = self.config.rollout.log_prob_max_token_len_per_gpu
-            data.meta_info["use_dynamic_bsz"] = self.config.rollout.log_prob_use_dynamic_bsz
+            tu.assign_non_tensor(
+                data,
+                micro_batch_size=self.config.rollout.log_prob_micro_batch_size_per_gpu,
+                max_token_len=self.config.rollout.log_prob_max_token_len_per_gpu,
+                use_dynamic_bsz=self.config.rollout.log_prob_use_dynamic_bsz,
+            )
 
-            for k, v in data.batch.items():
-                if k != "routed_experts":
-                    data.batch[k] = v.to(get_device_id())
-                else:
-                    data.batch[k] = v
+            for key, value in list(data.items()):
+                if key != "routed_experts" and isinstance(value, torch.Tensor):
+                    data[key] = value.to(get_device_id())
 
             if self.enable_routing_replay and self.config.actor.router_replay.mode == "R2":
                 RouterReplay.set_global_router_replay_action(RouterReplayAction.RECORD)
@@ -516,15 +556,15 @@ class PSRL_MegatronTrainWorker(ActorRolloutRefWorker, PSRL_BaseTrainWorker):
                 RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
 
             output, entropys, layers_topk_idx = self.actor.compute_log_prob(data=data, calculate_entropy=True)
-            output = DataProto.from_dict(tensors={"recomputed_log_probs": output, "entropys": entropys})
+            output = tu.get_tensordict({"recomputed_log_probs": output, "entropys": entropys})
 
             if self.config.actor.router_replay.mode == "R2":
-                output.batch["routed_experts"] = layers_topk_idx
+                output["routed_experts"] = layers_topk_idx
             if self.config.actor.router_replay.mode in ["R2", "R3"]:
                 RouterReplay.clear_global_indices()
                 RouterReplay.clear_global_router_replay_action()
 
-            output = output.to("cpu")
+            output = output.cpu()
             if self._is_offload_param:
                 offload_megatron_model_to_cpu(self.actor_module)
             aggressive_empty_cache(force_sync=True)
@@ -532,7 +572,7 @@ class PSRL_MegatronTrainWorker(ActorRolloutRefWorker, PSRL_BaseTrainWorker):
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @gpu_memory_logger_decorator(log_only_rank_0=False)
-    def update_actor(self, data: DataProto):
+    def update_actor(self, data: TensorDict) -> TensorDict:
         with log_dual_events("Train actor", psrl_logger, event_type=EventType.TRAIN):
             output = ActorRolloutRefWorker.update_actor(self, data)
         torch.cuda.synchronize()

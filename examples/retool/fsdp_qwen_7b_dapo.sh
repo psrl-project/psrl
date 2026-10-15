@@ -88,7 +88,7 @@ offload=False
 # gen_actor_rollout_ref.rollout.trace.backend=weave
 # gen_actor_rollout_ref.rollout.trace.token2text=True
 
-PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config --config-name='ppo_trainer' \
+PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path="${PSRL_PATH}/psrl/trainer/config" --config-name='ppo_trainer' \
     psrl.ps_manager_ip=${LOCAL_IP} \
     psrl.rollout_n=${n_resp_per_prompt} \
     psrl.staleness=${staleness} \
@@ -171,19 +171,19 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config --conf
     reward.managers.naive.reward_fn.0.path=${PSRL_PATH}/examples/retool/retool.py \
     reward.managers.naive.reward_fn.0.name=compute_score \
     \
-    data.train_files="$train_files" \
+    +data.train_files="$train_files" \
     data.reward_model_dicts.0.reward_loop_type=naive \
     data.reward_model_dicts.0.reward_fn=compute_score \
-    data.val_files="$test_files" \
-    data.prompt_key=prompt \
+    +data.val_files="$test_files" \
+    +data.prompt_key=prompt \
     data.truncation='error' \
     data.max_prompt_length=${max_prompt_length} \
     data.max_response_length=${max_response_length} \
     data.train_batch_size=${train_prompt_bsz} \
     data.return_raw_chat=True \
     data.filter_overlong_prompts=True \
-    data.custom_cls.path=${PSRL_PATH}/examples/retool/retool.py \
-    data.custom_cls.name=CustomRLHFDataset \
+    +data.custom_cls.path=${PSRL_PATH}/examples/retool/retool.py \
+    +data.custom_cls.name=CustomRLHFDataset \
     \
     algorithm.adv_estimator=${adv_estimator} \
     algorithm.use_kl_in_reward=${use_kl_in_reward} \

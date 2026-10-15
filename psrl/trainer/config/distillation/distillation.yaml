@@ -1,0 +1,47 @@
+# Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+_target_: psrl.workers.config.DistillationConfig
+
+# Whether to enable on-policy distillation.
+enabled: false
+
+# Reward-loop key used when multiple OPD teachers are present.
+teacher_key: default
+
+# Distillation loss config.
+distillation_loss:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: psrl.workers.config.DistillationLossConfig
+
+  # Loss function mode: k1, k2, k3, kl, abs, mse, low_var_kl, or forward_kl_topk.
+  loss_mode: k3
+
+  # Number of teacher top-k tokens requested when loss_mode uses top-k.
+  topk: 32
+
+  # Whether to keep task rewards alongside distillation.
+  use_task_rewards: true
+
+  # Coefficient of the distillation loss when task rewards are also used.
+  distillation_loss_coef: 1.0
+
+  # Optional max clamp value for distillation loss. Null disables clamping.
+  loss_max_clamp: 10.0
+
+  # Optional min clamp value for log probabilities. Null disables clamping.
+  log_prob_min_clamp: -10.0
+
+  # Whether to incorporate distillation loss as a policy-gradient reward.
+  use_policy_gradient: true
+
+  # Policy loss used when use_policy_gradient is true.
+  policy_loss_mode: vanilla
+
+  # PPO clipping ratio for distillation policy-gradient loss.
+  clip_ratio: 0.2
+
+  # Lower clipping ratio bound.
+  clip_ratio_low: 0.2
+
+  # Upper clipping ratio bound.
+  clip_ratio_high: 0.2

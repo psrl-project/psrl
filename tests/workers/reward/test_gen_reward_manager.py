@@ -1,100 +1,15 @@
-"""CPU tests for GenRewardManager endpoint dispatch and response parsers."""
-
-import importlib.util
-import pathlib as _p
-import sys
-import types as _types
 from unittest.mock import MagicMock
 
 import pytest
 from omegaconf import OmegaConf
+from psrl.workers.reward.gen_reward_function.default_gen_rm import DefaultGenRewardFunction
+from psrl.workers.reward.reward_loop.gen import GenRewardLoop
 
 pytestmark = pytest.mark.cpu_test
 
-# Pre-import mocking
-_MOCKED = [
-    "ray",
-    "ray.actor",
-    "ray.util",
-    "ray.util.queue",
-    "torch",
-    "aiohttp",
-    "grpc",
-    "tensordict",
-    "numpy",
-    "verl",
-    "verl.single_controller",
-    "verl.single_controller.ray",
-    "verl.utils",
-    "verl.utils.device",
-    "verl.workers",
-    "verl.workers.config",
-    "verl.workers.rollout",
-    "verl.workers.rollout.replica",
-    "verl.workers.rollout.vllm_rollout",
-    "verl.workers.rollout.vllm_rollout.vllm_async_server",
-    "verl.workers.rollout.utils",
-    "psrl.utils.logger",
-    "psrl.utils.common",
-    "psrl.utils.common.http_utils",
-    "psrl.utils.dataset",
-    "psrl.utils.dataset.utils",
-    "psrl.workers.reward.reward_model.manager",
-    "psrl.workers.reward.reward_loop",
-    "psrl.workers.reward.reward_loop.base",
-]
-for _m in _MOCKED:
-    if _m not in sys.modules:
-        sys.modules[_m] = MagicMock()
-sys.modules["ray"].remote = lambda cls=None, **kw: (cls if cls is not None else lambda c: c)
-sys.modules["ray"].actor.ActorHandle = object
-sys.modules["verl.workers.rollout.vllm_rollout.vllm_async_server"].vLLMHttpServer = object
-sys.modules["verl.workers.rollout.vllm_rollout.vllm_async_server"].vLLMReplica = object
-
-_grf_mod = _types.ModuleType("psrl.workers.reward.gen_reward_function")
-_grf_pkg = _types.ModuleType("psrl.workers.reward")
-sys.modules.setdefault("psrl.workers.reward", _grf_pkg)
-sys.modules.setdefault("psrl.workers.reward.gen_reward_function", _grf_mod)
-
-
-class _DefaultGenRewardFunction:
-    using_sys_prompt = True
-
-    def prompt_constructor(self, prompt_str, response_str):
-        return f"Q: {prompt_str}\nA: {response_str}"
-
-    def compute_score(self, **kwargs):
-        return 1.0
-
-
-_grf_mod.DefaultGenRewardFunction = _DefaultGenRewardFunction
-_grf_mod.GenRewardFunctionBase = object
-
-# Stub register decorator for reward_loop __init__
-sys.modules["psrl.workers.reward.reward_loop"].register = lambda name: (lambda cls: cls)
-
-
-# Stub RewardManagerBase
-class _RewardManagerBase:
-    def __init__(self, config, tokenizer):
-        self.config = config
-        self.tokenizer = tokenizer
-
-    def _format_request_uid(self, uid):
-        return "test-uid"
-
-
-sys.modules["psrl.workers.reward.reward_loop.base"].RewardManagerBase = _RewardManagerBase
-
-_gen_path = _p.Path("/Users/linsh/Desktop/verl_align/psrl") / "psrl/workers/reward/reward_loop/gen.py"
-_spec = importlib.util.spec_from_file_location("psrl.workers.reward.reward_loop.gen", _gen_path)
-_gen_mod = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_gen_mod)
-GenRewardManager = _gen_mod.GenRewardManager
-
 
 def _make_manager(runner: str, task: str):
-    """Construct a GenRewardManager with a mock reward_model_manager."""
+    """Construct a GenRewardLoop with a mock reward_model_manager."""
     cfg = OmegaConf.create(
         {
             "psrl": {"logging_path": "/tmp"},
@@ -112,15 +27,17 @@ def _make_manager(runner: str, task: str):
         }
     )
 
-    manager = GenRewardManager.__new__(GenRewardManager)
+    manager = GenRewardLoop.__new__(GenRewardLoop)
     manager.config = cfg
     manager.tokenizer = MagicMock()
     manager.reward_model_manager = rm_mgr
     manager.reward_model_tokenizer = MagicMock()
-    manager.reward_function = _DefaultGenRewardFunction()
+    manager._model_name = "TestRM"
+    manager.reward_function = DefaultGenRewardFunction()
     manager._sampling_config = {"temperature": 1.0, "top_p": -1}
     manager._http_client = None
     manager._rm_response_length = 512
+    manager._rm_max_model_len = 40960
     manager.reward_kwargs = {}
     manager._smg_endpoint, manager._parse_response = manager._resolve_endpoint_and_parser(runner, task)
     return manager
@@ -142,7 +59,7 @@ def test_endpoint_dispatch_embeddings():
 
 
 def test_endpoint_dispatch_unknown_raises():
-    mgr = GenRewardManager.__new__(GenRewardManager)
+    mgr = GenRewardLoop.__new__(GenRewardLoop)
     with pytest.raises(ValueError, match="Unsupported"):
         mgr._resolve_endpoint_and_parser("unknown", "task")
 
@@ -192,4 +109,30 @@ def test_build_request_payload_completions():
 def test_build_request_payload_classify():
     mgr = _make_manager("pooling", "classify")
     payload = mgr._build_request_payload([10, 20])
-    assert payload == {"input": [10, 20]}
+    assert payload == {"model": "TestRM", "input": [10, 20]}
+
+
+def test_runtime_info_preserves_rm_sampling_and_length():
+    from psrl.workers.reward.reward_protocol import RewardModelRuntimeInfo
+
+    rm_config = OmegaConf.create(
+        {
+            "reward_model_name": "GLM-Z1-9B-0414",
+            "rollout": {
+                "runner": "generate",
+                "task": "generate",
+                "response_length": 20480,
+                "max_model_len": 40960,
+            },
+            "sampling_config": {"temperature": 0.8, "top_p": 0.7, "top_k": -1},
+        }
+    )
+    runtime = RewardModelRuntimeInfo("http://127.0.0.1:8200", MagicMock(), rm_config)
+    loop = GenRewardLoop(OmegaConf.create({"psrl": {"logging_path": "/tmp"}}), MagicMock(), runtime)
+    assert loop.compute_score is None
+    payload = loop._build_request_payload([1, 2, 3])
+    assert payload["model"] == "GLM-Z1-9B-0414"
+    assert payload["max_tokens"] == 20480
+    assert payload["temperature"] == 0.8
+    assert payload["top_p"] == 0.7
+    assert payload["top_k"] == -1

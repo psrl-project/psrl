@@ -1,9 +1,11 @@
-import logging
-from typing import Any
+from __future__ import annotations
 
-import numpy as np
-import torch
-from verl.protocol import DataProto
+import logging
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    import torch
+    from verl.protocol import DataProto
 
 
 def log_tensor(
@@ -16,6 +18,8 @@ def log_tensor(
     extra_fields: dict[str, Any] | None = None,
     **kwargs: Any,
 ):
+    import torch
+
     assert isinstance(tensor, torch.Tensor), f"{tensor} is not a torch.Tensor, got {type(tensor)}"
 
     def _safe_value(expr):
@@ -87,6 +91,9 @@ def log_data_protocol(
     log_prefix: str,
     level: int = logging.INFO,
 ):
+    import numpy as np
+    import torch
+
     input_tensor_types = {}
     if inputs.batch is not None:
         for k, v in inputs.batch.items():

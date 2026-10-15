@@ -302,13 +302,12 @@ PYTHONUNBUFFERED=1 python3 -m psrl.trainer.main_ppo \
     reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.enable=False \
     reward.managers.dapo.reward_kwargs.max_resp_len=${max_response_length} \
     \
-    data.train_files=${train_files} \
-    data.val_files=${val_files} \
+    +data.train_files=${train_files} \
+    +data.val_files=${val_files} \
     data.train_batch_size=${train_batch_size} \
     `# The bank is grouped by category on disk and verl's vendored default is shuffle=False.` \
     data.shuffle=True \
-    data.seed=${DATA_SEED:-1} \
-    data.prompt_key=prompt \
+    +data.prompt_key=prompt \
     data.max_prompt_length=${max_prompt_length} \
     data.max_response_length=${max_response_length} \
     data.return_raw_chat=True \

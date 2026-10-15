@@ -21,7 +21,6 @@ defaults:
   # Model config.
   - model@train_actor_rollout_ref.model: hf_model
 
-  # data: trainer/config/data/data.yaml
   - data@data: data
 
   # Reference model config.
@@ -31,6 +30,12 @@ defaults:
   # Critic model config.
   - critic@critic: ${model_engine}_critic
   - model@critic.model: hf_model
+
+  # Gen reward models share the HuggingFace and rollout schemas with train.
+  - model@reward.managers.gen_qwen3_8b.model: hf_model
+  - model@reward.managers.gen_skywork.model: hf_model
+  - rollout@reward.managers.gen_qwen3_8b.rollout: psrl_rollout
+  - rollout@reward.managers.gen_skywork.rollout: psrl_rollout
 
   # Reward config.
   - reward@reward: reward
@@ -52,7 +57,11 @@ actor_rollout_ref: ${train_actor_rollout_ref}
 train_actor_rollout_ref:
 
   # Timeout for operations executed against the process group
-  nccl_timeout: 600
+  nccl_timeout: 3600
+
+  # NIXL rejects FSDP1 `flat_param`. FSDP2 is the FSDP default for this trainer.
+  actor:
+    strategy: fsdp2
 
 # gen_actor_rollout_ref has its own overrides for the generation side.
 gen_actor_rollout_ref:
@@ -61,7 +70,7 @@ gen_actor_rollout_ref:
   hybrid_engine: true
 
   # Timeout for operations executed against the process group
-  nccl_timeout: 600
+  nccl_timeout: 3600
 
   # Share model config from actor_rollout_ref
   model: ${oc.select:train_actor_rollout_ref.model}

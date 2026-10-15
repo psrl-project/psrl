@@ -1,0 +1,108 @@
+# configs for the reward model
+
+# whether to launch the reward function asynchronously
+launch_reward_fn_async: True
+
+# way to normalize the reward, choices: group, batch, none
+reward_normalization: none
+
+# list of reward models
+reward_models:
+  - reward_loop_type: naive
+    reward_fn: 
+      - default
+
+  - reward_loop_type: dapo
+    reward_fn: 
+      - default
+    reward_loop_kwargs:
+      max_resp_len: 5120
+      overlong_buffer_cfg:
+        enable: True
+        len: 3072
+        penalty_factor: 1.0
+        log: False
+
+  - reward_loop_type: opd
+    reward_fn: 
+      - default
+    reward_model_name: Qwen2.5-3B-Instruct
+    # Optional cap for concurrently occupied requests per RM instance.
+    # null means unlimited (backward-compatible behavior).
+    max_concurrent_requests_per_instance: null
+    # reward_model_name: DeepSeek-R1-Distill-Qwen-32B
+    # reward_model_name: Qwen3-30B-A3B-Instruct
+  
+    enable_resource_pool: True
+    n_gpus_per_node: 4
+    num_replicas: 4
+    nnodes: 1
+    # rollout_ngpus_per_instance_per_node: 2
+    rollout_ngpus_per_instance_per_node: 1
+    rollout_nnodes_per_instance: 1
+  
+    model:
+      path: Qwen/Qwen2.5-3B-Instruct
+      use_shm: False
+      # path: /jizhicfs/pkuhetu/yfzhao/psrl/models/DeepSeek-R1-Distill-Qwen-32B
+      # path: models/Qwen3-30B-A3B-Instruct
+      external_lib: ${oc.select:train_actor_rollout_ref.model.external_lib,null}
+      trust_remote_code: False
+  
+    rollout:
+      _target_: psrl.workers.config.RolloutConfig
+      name: vllm
+      mode: psrl_async
+      disable_attn: False
+      dtype: bfloat16
+      gpu_memory_utilization: 0.3
+      enforce_eager: true
+      cudagraph_capture_sizes: null
+      free_cache_engine: true
+      data_parallel_size: 1
+      expert_parallel_size: 1
+      # expert_parallel_size: 2
+      # tensor_model_parallel_size: 2
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      max_num_batched_tokens: 769
+      max_num_seqs: 769
+      load_format: auto
+      engine_kwargs: {}
+      limit_images: null
+      enable_chunked_prefill: false
+      enable_prefix_caching: false
+      disable_kv_cache: false
+      disable_log_stats: false
+      skip_tokenizer_init: false
+  
+      prompt_length: 256
+      response_length: 512
+      max_model_len: 769
+  
+      runner: generate
+      task: generate
+  
+    sampling_config:
+      temperature: 1.0
+      top_p: 1.0
+      top_k: -1
+    reward_loop_kwargs:
+      topk: 64
+
+profiler:
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.utils.profiler.ProfilerConfig
+  # profiler tool, default same as profiler.tool in global config
+  # choices: nsys, npu, torch
+  tool: ${oc.select:global_profiler.tool,null}
+  # whether enable profile on ref
+  enable: False
+  # Whether to profile all ranks.
+  all_ranks: False
+  # The ranks that will be profiled. [] or [0,1,...]
+  ranks: []
+  # profile results saving path
+  save_path: ${oc.select:global_profiler.save_path,null}
+  # specific tool config
+  tool_config: ${oc.select:train_actor_rollout_ref.actor.profiler.tool_config,null}

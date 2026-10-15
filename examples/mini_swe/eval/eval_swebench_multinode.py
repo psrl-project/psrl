@@ -176,7 +176,7 @@ def _build_remote_command(
         repo_root (str): Absolute path to the psrl_agent repo on the shared FS.
         env_script (str): Path to a shared-FS env script that performs
             ``conda activate`` and exports the NCCL / UCX / vLLM /
-            LD_LIBRARY_PATH knobs (typical: ``${PSRL_WORKSPACE}/env/psrl.sh``).
+            LD_LIBRARY_PATH knobs (typical: ``${PSRL_WORKSPACE}/env/env_311.sh``).
             Pass ``""`` to skip sourcing entirely.
         dataset_path (str): Absolute path to the per-host shard parquet.
         output_dir (str): Absolute path to the per-host output directory.
@@ -732,7 +732,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--env-script",
-        default="${PSRL_WORKSPACE}/env/psrl.sh",
+        default="${PSRL_WORKSPACE}/env/env_311.sh",
         help=(
             "Path on the shared FS to an env script sourced on every remote "
             "host before invoking eval_swebench.  It must perform `conda "

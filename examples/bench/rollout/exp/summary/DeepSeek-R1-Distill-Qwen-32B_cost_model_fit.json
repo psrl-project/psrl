@@ -1,0 +1,82 @@
+{
+  "TP2_PP1": {
+    "other_threshold": 0.0118792,
+    "other_latency_b": 0.011626,
+    "other_latency_k": 7.08e-05,
+    "other_r_squared": 0.9955361989853535,
+    "attn_latency_k": 9.03e-08,
+    "attn_latency_b": 0.0010677702,
+    "attn_r_squared": 0.9854031861509891,
+    "attn_points_total": 54779,
+    "attn_points_used": 54566,
+    "other_fit_points": [
+      {
+        "batch": 16,
+        "path": "/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/examples/bench/rollout/exp/details/DeepSeek-R1-Distill-Qwen-32B_Syn_TP2_PP1_B16_P1024_R8192_disable_attn_true.jsonl",
+        "summary": {
+          "mean_latency": 0.012658035554813369,
+          "median_latency": 0.012658171355724335,
+          "p95_latency": 0.012723894417285919,
+          "count": 8189
+        },
+        "representative_latency": 0.012658171355724335
+      },
+      {
+        "batch": 1,
+        "path": "/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/examples/bench/rollout/exp/details/DeepSeek-R1-Distill-Qwen-32B_Syn_TP2_PP1_B1_P1024_R8192_disable_attn_true.jsonl",
+        "summary": {
+          "mean_latency": 0.011865012219428143,
+          "median_latency": 0.011865304782986641,
+          "p95_latency": 0.011912532150745392,
+          "count": 8190
+        },
+        "representative_latency": 0.011865304782986641
+      },
+      {
+        "batch": 2,
+        "path": "/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/examples/bench/rollout/exp/details/DeepSeek-R1-Distill-Qwen-32B_Syn_TP2_PP1_B2_P1024_R8192_disable_attn_true.jsonl",
+        "summary": {
+          "mean_latency": 0.011894520992124328,
+          "median_latency": 0.011893125250935555,
+          "p95_latency": 0.011947579681873322,
+          "count": 8190
+        },
+        "representative_latency": 0.011893125250935555
+      },
+      {
+        "batch": 32,
+        "path": "/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/examples/bench/rollout/exp/details/DeepSeek-R1-Distill-Qwen-32B_Syn_TP2_PP1_B32_P1024_R8192_disable_attn_true.jsonl",
+        "summary": {
+          "mean_latency": 0.0139375143785905,
+          "median_latency": 0.01393304392695427,
+          "p95_latency": 0.014087721332907676,
+          "count": 8188
+        },
+        "representative_latency": 0.01393304392695427
+      },
+      {
+        "batch": 4,
+        "path": "/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/examples/bench/rollout/exp/details/DeepSeek-R1-Distill-Qwen-32B_Syn_TP2_PP1_B4_P1024_R8192_disable_attn_true.jsonl",
+        "summary": {
+          "mean_latency": 0.011950003520986425,
+          "median_latency": 0.011948689818382263,
+          "p95_latency": 0.01200707107782364,
+          "count": 8188
+        },
+        "representative_latency": 0.011948689818382263
+      },
+      {
+        "batch": 8,
+        "path": "/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/examples/bench/rollout/exp/details/DeepSeek-R1-Distill-Qwen-32B_Syn_TP2_PP1_B8_P1024_R8192_disable_attn_true.jsonl",
+        "summary": {
+          "mean_latency": 0.012215771197337287,
+          "median_latency": 0.012214237824082375,
+          "p95_latency": 0.012273491173982621,
+          "count": 8188
+        },
+        "representative_latency": 0.012214237824082375
+      }
+    ],
+    "attn_fit_point_count": 54781
+  }
+}

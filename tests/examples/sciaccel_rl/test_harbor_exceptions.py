@@ -7,6 +7,7 @@ their in-flight turns with `request_aborted`, litellm re-raises it as a bare
 group a second time. One slow episode then discards seven healthy trajectories.
 """
 
+import pytest
 from examples.sciaccel_rl.exceptions import HarborExceptionClassifier
 from psrl.utils.agent.exceptions import AgentExceptionClassifier, is_prompt_overflow
 from psrl.utils.common.http_utils import (
@@ -14,6 +15,8 @@ from psrl.utils.common.http_utils import (
     RequestAbortedByGatewayError,
 )
 from psrl.workers.agent_loop.loops.utils import TerminateReason
+
+pytestmark = pytest.mark.cpu_test
 
 CLASSIFIER = HarborExceptionClassifier()
 

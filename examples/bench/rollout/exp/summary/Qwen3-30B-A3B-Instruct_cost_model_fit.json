@@ -1,0 +1,104 @@
+{
+  "TP2_PP1": {
+    "other_threshold": 0.0037829,
+    "other_latency_b": 0.0045191,
+    "other_latency_k": 4.55e-05,
+    "other_r_squared": 0.9432893581061145,
+    "attn_latency_k": 3.58e-08,
+    "attn_latency_b": 0.001517061,
+    "attn_r_squared": 0.9781658154531194,
+    "attn_points_total": 64345,
+    "attn_points_used": 64345,
+    "other_fit_points": [
+      {
+        "batch": 128,
+        "path": "/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/examples/bench/rollout/exp/details/Qwen3-30B-A3B-Instruct_Syn_TP2_PP1_B128_P1024_R8192_disable_attn_true.jsonl",
+        "summary": {
+          "mean_latency": 0.010051586989704552,
+          "median_latency": 0.010050427168607712,
+          "p95_latency": 0.010419097542762757,
+          "count": 7247
+        },
+        "representative_latency": 0.010050427168607712
+      },
+      {
+        "batch": 16,
+        "path": "/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/examples/bench/rollout/exp/details/Qwen3-30B-A3B-Instruct_Syn_TP2_PP1_B16_P1024_R8192_disable_attn_true.jsonl",
+        "summary": {
+          "mean_latency": 0.005660751690741393,
+          "median_latency": 0.005653763189911842,
+          "p95_latency": 0.006127200834453106,
+          "count": 8188
+        },
+        "representative_latency": 0.005653763189911842
+      },
+      {
+        "batch": 1,
+        "path": "/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/examples/bench/rollout/exp/details/Qwen3-30B-A3B-Instruct_Syn_TP2_PP1_B1_P1024_R8192_disable_attn_true.jsonl",
+        "summary": {
+          "mean_latency": 0.0037829968191328504,
+          "median_latency": 0.00378287211060524,
+          "p95_latency": 0.0038138866424560548,
+          "count": 8190
+        },
+        "representative_latency": 0.00378287211060524
+      },
+      {
+        "batch": 2,
+        "path": "/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/examples/bench/rollout/exp/details/Qwen3-30B-A3B-Instruct_Syn_TP2_PP1_B2_P1024_R8192_disable_attn_true.jsonl",
+        "summary": {
+          "mean_latency": 0.004074154858631971,
+          "median_latency": 0.00407075509428978,
+          "p95_latency": 0.004172318428754806,
+          "count": 8189
+        },
+        "representative_latency": 0.00407075509428978
+      },
+      {
+        "batch": 32,
+        "path": "/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/examples/bench/rollout/exp/details/Qwen3-30B-A3B-Instruct_Syn_TP2_PP1_B32_P1024_R8192_disable_attn_true.jsonl",
+        "summary": {
+          "mean_latency": 0.006608027539888882,
+          "median_latency": 0.006616557016968727,
+          "p95_latency": 0.00703077744692564,
+          "count": 8188
+        },
+        "representative_latency": 0.006616557016968727
+      },
+      {
+        "batch": 4,
+        "path": "/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/examples/bench/rollout/exp/details/Qwen3-30B-A3B-Instruct_Syn_TP2_PP1_B4_P1024_R8192_disable_attn_true.jsonl",
+        "summary": {
+          "mean_latency": 0.004782698174067748,
+          "median_latency": 0.0047809407114982605,
+          "p95_latency": 0.0048764564096927645,
+          "count": 8188
+        },
+        "representative_latency": 0.0047809407114982605
+      },
+      {
+        "batch": 64,
+        "path": "/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/examples/bench/rollout/exp/details/Qwen3-30B-A3B-Instruct_Syn_TP2_PP1_B64_P1024_R8192_disable_attn_true.jsonl",
+        "summary": {
+          "mean_latency": 0.007585289517283789,
+          "median_latency": 0.007587216794490814,
+          "p95_latency": 0.008029095456004142,
+          "count": 8188
+        },
+        "representative_latency": 0.007587216794490814
+      },
+      {
+        "batch": 8,
+        "path": "/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/examples/bench/rollout/exp/details/Qwen3-30B-A3B-Instruct_Syn_TP2_PP1_B8_P1024_R8192_disable_attn_true.jsonl",
+        "summary": {
+          "mean_latency": 0.0052162014675004986,
+          "median_latency": 0.0052214860916137695,
+          "p95_latency": 0.005447371304035187,
+          "count": 8188
+        },
+        "representative_latency": 0.0052214860916137695
+      }
+    ],
+    "attn_fit_point_count": 64742
+  }
+}

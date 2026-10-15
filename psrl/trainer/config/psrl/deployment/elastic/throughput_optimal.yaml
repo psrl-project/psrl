@@ -1,0 +1,57 @@
+# `ITL = A * total_token_num + max(B, C * running_queue_num) + D`. Migration time uses observed sleep and wake EWMA.
+decision_window_s: 60.0
+migrate_time_s_initial: 5.0
+migrate_time_ewma_alpha: 0.2
+min_gain: 0.05
+# Experimental request-snapshot evaluator. False preserves candidate
+# scoring and the existing post-scale-up rebalance path byte-for-byte.
+enable_request_level_candidate_evaluation: true
+# Skip all post-scale-up ABORT when false, including the older ratio-based
+# waiting-queue interrupt used when request-level evaluation is off.
+rebalance_after_scale_up: true
+# Pause normal dispatch during rebalance. Redispatch interrupted requests FIFO to their simulated destinations.
+exclusive_rebalance_migration_queue: false
+candidate_evaluation_max_workers: 64
+# Candidate simulation implementation: python or cpp. The C++ backend
+# keeps one JSONL evaluator process alive for the policy lifetime.
+candidate_evaluation_backend: python
+# null resolves to build/elastic_simulator/elastic_simulator under the
+# repository root. An explicit path may be used for packaged binaries.
+candidate_evaluation_cpp_binary: null
+candidate_evaluation_cpp_timeout_s: 30.0
+# False uses the standard harmonic denominator sum.
+# true uses max(w_rollout / rollout_tp, w_rm / rm_tp).
+harmonic_denominator_use_max: false
+# Use `balanced_min` for balanced role load or `sum` for summed per-instance throughput.
+throughput_objective: sum
+# `running_waiting` counts both vLLM queues. `running` counts only running requests, plus separate router demand.
+vllm_current_queue_scope: running
+# Wake or sleep at most this many same-role instances per decision. Set to -1 for no per-action cap.
+max_scale_instances_per_action: -1
+# Allow GPU bundle plans for roles with different power-of-two parallel sizes. Equal-size roles use count prefixes.
+enable_heterogeneous_parallelism_candidates: false
+# Number of leading router waiting sequences to include in ITL F/F' estimates.
+# -1 includes all router waiting requests. 0 disables router-waiting load in the objective.
+router_waiting_top_t: -1
+# Whether current-state F includes router waiting load distributed over awake instances.
+current_state_include_router_waiting: false
+# Weight throughput by router and engine pressure: `(w_rollout + w_rm) / (w_rollout / rollout_tp + w_rm / rm_tp)`.
+role_throughput_weight_enable: true
+# Choose pressure from `request_count` or `token_count`. `none` disables weighting.
+role_throughput_weight_basis: request_count
+# `share` normalizes role pressure, using equal weights when idle. `raw` uses pressure directly, or one when zero.
+role_throughput_weight_mode: raw
+# JSON file, or a directory of {model_stem}.json files. Stem is derived from the model name.
+# Independent of psrl.rollout_coordination.routing_strategy.cost_model_path.
+cost_model_path: psrl/trainer/config/cost_model
+model_params: {}
+rm_router_enable: true
+# Queue requests when every available RM worker exceeds this ITL threshold. Null disables the threshold.
+rm_router_max_itl: null
+
+# Rebalance donor requests after scale-up. Score donors by request and length excess with the weights below.
+post_scale_up_rebalance_request_weight: 0.6
+post_scale_up_rebalance_length_weight: 0.4
+
+# EWMA alpha for arrival rate estimation
+lambda_ewma_alpha: 0.2

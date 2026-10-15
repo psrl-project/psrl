@@ -1,10 +1,13 @@
 import sys
 from types import ModuleType, SimpleNamespace
 
+import pytest
 import torch.nn as nn
 from vllm_patches.interfaces import SupportsWeightLayout, supports_weight_layout
 from vllm_patches.weight_layout import WeightLayoutPlan
 from vllm_patches.weight_layouts import _LAYOUTS, register_weight_layouts_for_module
+
+pytestmark = pytest.mark.cpu_test
 
 EXPECTED_LAYOUT_TARGETS = {
     "deepseek_v2.DeepseekV2Model",

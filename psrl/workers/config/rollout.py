@@ -4,7 +4,7 @@
 # You may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -23,15 +23,13 @@ from verl.workers.config.rollout import (
     AgentLoopConfig as _VeRLAgentLoopConfig,
 )
 from verl.workers.config.rollout import (
-    CheckpointEngineConfig,
-    CustomAsyncServerConfig,
+    MultiTurnConfig as _VeRLMultiTurnConfig,
+)
+from verl.workers.config.rollout import (
     PrometheusConfig,
     SamplingConfig,
     ServerConfig,
     TraceConfig,
-)
-from verl.workers.config.rollout import (
-    MultiTurnConfig as _VeRLMultiTurnConfig,
 )
 from verl.workers.config.rollout import (
     RolloutConfig as _VeRLRolloutConfig,
@@ -42,8 +40,15 @@ from verl.workers.config.rollout import (
 class PoolingConfig(BaseConfig):
     """Configuration for vLLM pooling models (e.g., reward/embedding models)."""
 
-    normalize: bool = False
+    normalize: bool = True
     use_activation: bool = False
+    task: str = "classify"
+
+
+@dataclass
+class CustomAsyncServerConfig(BaseConfig):
+    path: str | None = None
+    name: str | None = None
 
 
 @dataclass
@@ -87,17 +92,9 @@ class AgentLoopConfig(_VeRLAgentLoopConfig):
     reward_bonus_coeff: float = 0.0
     traj_reward_mode: str = "traj"
     default_agent_loop: str = "generate_only_agent"
-    # Node IPs allowed to host agent loop workers. Empty means every alive node, which is
-    # the default round-robin placement. Naming a subset keeps container-backed rollout
-    # off a node whose Docker daemon has degraded, since such a node still accepts actors
-    # and then hangs every episode it is handed.
+    # Limit agent workers to these node IPs. An empty list permits every live node, including nodes with broken Docker.
     node_ips: list[str] = field(default_factory=list)
-    # DAPO Overlong Filtering. Zero the loss mask of every trajectory a harness budget
-    # cut off, so its tokens carry no gradient while its reward still moves the GRPO
-    # group baseline. This is the DAPO mechanism verl does NOT ship: its
-    # `overlong_buffer_cfg` is Soft Overlong Punishment, a length-proportional reward
-    # penalty that shapes the score rather than the mask. SkyRL enables the filtering
-    # variant for its Harbor recipes.
+    # Zero loss masks for truncated trajectories while retaining their rewards in the GRPO baseline.
     #
     # Off by default because it discards real rollout tokens, which is the right call
     # only for a workload whose truncation rate is high enough to distort the gradient.
@@ -112,15 +109,18 @@ class RolloutConfig(_VeRLRolloutConfig):
     runner: str = "generate"
     task: str = "generate"
     reward_kwargs: PoolingConfig = field(default_factory=PoolingConfig)
-
+    pooling_config: PoolingConfig = field(default_factory=PoolingConfig)
     enable_weights_cpu_backup: bool = False
-
     multi_turn: MultiTurnConfig = field(default_factory=MultiTurnConfig)
-
     agent: AgentLoopConfig = field(default_factory=AgentLoopConfig)
-
     # The SMG router uses this template to render TITO session prompts.
     chat_template: str | None = None
+    skip_rollout: bool = False
+    skip_dump_dir: str = "/tmp/rollout_dump"
+    use_psrl_scheduler: bool = True
+    disable_kv_cache: bool = False
+    task: str = "generate"
+    runner: str = "generate"
 
 
 __all__ = [
@@ -133,7 +133,6 @@ __all__ = [
     "PrometheusConfig",
     "RolloutConfig",
     "PoolingConfig",
-    "CheckpointEngineConfig",
     "EnvironmentConfig",
     "AgentDataConfig",
 ]

@@ -3,6 +3,10 @@
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
+pytestmark = pytest.mark.cpu_test
+
 
 class TestHarborEpisodeResult:
     """Test the result dataclass."""

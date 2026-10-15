@@ -1,3 +1,5 @@
+# TODO(zyf): check the newest data-tructs used instead of `DataProto`
+
 import json
 import logging
 import os
@@ -8,6 +10,10 @@ from math import ceil
 
 import numpy as np
 
+from psrl.utils.cost_model_path import resolve_cost_model_json_path
+from psrl.workers.elastic.candidate_routing import (
+    select_throughput_optimal_candidate,
+)
 from psrl.workers.gen.stats_collector import EngineStats
 from psrl.workers.gen.utils import RolloutInstanceId, TokenInput
 
@@ -140,6 +146,10 @@ class RouteStrategyBase(ABC):
         """
         self.instance_to_time_record[instance_id] = datetime.now()
 
+    def force_route_unchecked(self, request: TokenInput, instance_id: RolloutInstanceId) -> RolloutInstanceId:
+        """Record a simulation-selected route without applying admission rules."""
+        return int(instance_id)
+
     def pop_request(self, request: TokenInput, instance_id: RolloutInstanceId):
         """Pop a request from a specific worker instance.
 
@@ -262,6 +272,10 @@ class RequestNumBalanceRouteStrategy(RouteStrategyBase):
         self.instance_request_counts[candidates[idx]] += 1
         return candidates[idx]
 
+    def force_route_unchecked(self, request: TokenInput, instance_id: RolloutInstanceId) -> RolloutInstanceId:
+        self.instance_request_counts[instance_id] += 1
+        return instance_id
+
     def update_instance_to_engine_status(self, instance_to_engine_status: dict[RolloutInstanceId, EngineStats]):
         super().update_instance_to_engine_status(instance_to_engine_status)
         for instance_id, engine_stats in instance_to_engine_status.items():
@@ -273,18 +287,19 @@ class RequestNumBalanceRouteStrategy(RouteStrategyBase):
 
     def pop_request(self, request: TokenInput, instance_id: RolloutInstanceId):
         super().pop_request(request, instance_id)
-        self.instance_request_counts[instance_id] -= 1
+        self.instance_request_counts[instance_id] = max(0, self.instance_request_counts[instance_id] - 1)
 
     def is_staled(self, instance_id: RolloutInstanceId, engine_status: EngineStats) -> bool:
         if super().is_staled(instance_id, engine_status):
             return True
         if engine_status.get_waiting_and_running_queue_size() != self.instance_request_counts[instance_id]:
             self.logger.debug(
-                f"Instance {instance_id} collected engine status is stale, "
-                f"waiting and running queue size {engine_status.get_waiting_and_running_queue_size()} "
-                f"is not equal to the recorded request count {self.instance_request_counts[instance_id]}"
+                f"Instance {instance_id} engine queue size "
+                f"{engine_status.get_waiting_and_running_queue_size()} "
+                f"differs from router recorded request count "
+                f"{self.instance_request_counts[instance_id]} "
+                f"(expected due to snapshot lag, not gating engine-status resync)"
             )
-            return True
         return False
 
     def calculate_routing_benefit(self, request: TokenInput, instance_id: RolloutInstanceId) -> float:
@@ -325,8 +340,12 @@ class CostModelBasedRouteStrategy(RouteStrategyBase):
         self.last_logging_time = {}
         self.logging_interval_in_ms = strategy_kwargs["logging_interval_in_ms"]
         cost_model_path = strategy_kwargs["cost_model_path"]
-        assert os.path.exists(cost_model_path), f"cost_model_path {cost_model_path} does not exist"
-        with open(cost_model_path) as f:
+        model_name = strategy_kwargs.get("model_name", "")
+        resolved_cost_model_path = resolve_cost_model_json_path(cost_model_path, model_name)
+        assert resolved_cost_model_path is not None, (
+            f"cost_model_path {cost_model_path} does not resolve to a JSON for model {model_name!r}"
+        )
+        with open(resolved_cost_model_path, encoding="utf-8") as f:
             self.cost_model = json.load(f)
         self.instance_to_tp_pp = strategy_kwargs["instance_to_tp_pp"]
         for tp_pp in self.instance_to_tp_pp.values():
@@ -371,6 +390,12 @@ class CostModelBasedRouteStrategy(RouteStrategyBase):
                 f"{response_token_num} response tokens"
             )
         return prompt_token_num + response_token_num
+
+    def force_route_unchecked(self, request: TokenInput, instance_id: RolloutInstanceId) -> RolloutInstanceId:
+        self.instance_to_request_num[instance_id] += 1
+        self.instance_to_running_request_num[instance_id] += 1
+        self.instance_to_token_num[instance_id] += self._get_request_token_num(request)
+        return instance_id
 
     def _can_run_directly(self, request: TokenInput, instance_id: RolloutInstanceId) -> bool:
         if self.instance_to_waiting_request_num[instance_id] > 0:
@@ -485,22 +510,40 @@ class CostModelBasedRouteStrategy(RouteStrategyBase):
 
     def pop_request(self, request: TokenInput, instance_id: RolloutInstanceId):
         super().pop_request(request, instance_id)
-        self.instance_to_request_num[instance_id] -= 1
-        self.instance_to_running_request_num[instance_id] -= 1
-        self.instance_to_token_num[instance_id] -= self._get_request_token_num(request)
+        _old_request_num = self.instance_to_request_num[instance_id]
+        _new_request_num = max(0, _old_request_num - 1)
+        self.instance_to_request_num[instance_id] = _new_request_num
+        if _old_request_num <= 0:
+            self.logger.warning(
+                f"request {request.non_tensor_batch['uid'][0]} finished from "
+                f"instance {instance_id}, but instance_to_request_num was already "
+                f"{_old_request_num}; clamped to 0 to avoid negative drift "
+                f"(inflight count may be desynced from engine)"
+            )
+        else:
+            self.logger.debug(
+                f"request {request.non_tensor_batch['uid'][0]} finished from "
+                f"instance {instance_id}, instance_to_request_num turning from "
+                f"{_old_request_num} to {_new_request_num}"
+            )
+        self.instance_to_running_request_num[instance_id] = max(
+            0, self.instance_to_running_request_num[instance_id] - 1
+        )
+        self.instance_to_token_num[instance_id] = max(
+            0, self.instance_to_token_num[instance_id] - self._get_request_token_num(request)
+        )
 
     def is_staled(self, instance_id: RolloutInstanceId, engine_status: EngineStats) -> bool:
         if super().is_staled(instance_id, engine_status):
             return True
         if engine_status.get_waiting_and_running_queue_size() != self.instance_to_request_num[instance_id]:
             self.logger.debug(
-                f"Instance {instance_id} collected engine status is stale, "
-                f"waiting and running queue size "
+                f"Instance {instance_id} engine queue size "
                 f"{engine_status.get_waiting_and_running_queue_size()} "
-                f"is not equal to the recorded request count "
-                f"{self.instance_to_request_num[instance_id]}"
+                f"differs from router recorded request count "
+                f"{self.instance_to_request_num[instance_id]} "
+                f"(expected due to snapshot lag, not gating engine-metric resync)"
             )
-            return True
         return False
 
 
@@ -516,6 +559,14 @@ class ThroughputOptimalRouteStrategy(CostModelBasedRouteStrategy):
     # as the throughput after routing a request to an empty instance
     def _estimate_baseline_delta_throughput(self, request: TokenInput, instance_id: RolloutInstanceId) -> float:
         return 1 / self._estimate_latency(instance_id, 1, self._get_request_token_num(request))
+
+    def force_route(self, request: TokenInput, instance_id: RolloutInstanceId) -> RolloutInstanceId | None:
+        """Commit a prepared migration to one target after hard-cap checks."""
+        if not self._can_run_directly(request, instance_id):
+            return None
+        if self.instance_to_request_num[instance_id] >= self.max_concurrent_seqs_per_instance:
+            return None
+        return self.force_route_unchecked(request, instance_id)
 
     def route(
         self,
@@ -540,6 +591,31 @@ class ThroughputOptimalRouteStrategy(CostModelBasedRouteStrategy):
             f"be the same, but have {len(candidates)} candidates and "
             f"{len(candidate_indicator_list)} candidate indicator list"
         )
+        shared_selection = select_throughput_optimal_candidate(
+            candidates=candidates,
+            candidate_indicators=candidate_indicator_list,
+            can_run_directly=lambda instance_id: self._can_run_directly(
+                request,
+                instance_id,
+            ),
+            current_throughput=self._estimate_curr_throughput,
+            next_throughput=lambda instance_id: (
+                self._estimate_curr_throughput_after_route_request(
+                    request,
+                    instance_id,
+                )
+            ),
+            baseline_delta_throughput=lambda instance_id: (
+                self._estimate_baseline_delta_throughput(request, instance_id)
+            ),
+            within_request_cap=lambda instance_id: (
+                self.instance_to_request_num[instance_id]
+                < self.max_concurrent_seqs_per_instance
+            ),
+            delta_throughput_threshold=self.delta_throughput_threshold,
+        )
+        if shared_selection is None:
+            return None
         indicator_to_candidates = {}
         for candidate, indicator in zip(candidates, candidate_indicator_list):
             if indicator not in indicator_to_candidates:
@@ -614,8 +690,19 @@ class ThroughputOptimalRouteStrategy(CostModelBasedRouteStrategy):
                 best_delta_throughput >= threshold
                 and self.instance_to_request_num[best_candidate] < self.max_concurrent_seqs_per_instance
             ):
+                assert best_candidate == shared_selection, (
+                    "shared throughput-optimal selector diverged from live route path: "
+                    f"shared={shared_selection}, live={best_candidate}"
+                )
                 # if best_delta_throughput >= threshold:
+                _old_request_num = self.instance_to_request_num[best_candidate]
                 self.instance_to_request_num[best_candidate] += 1
+                self.logger.debug(
+                    f"request {request.non_tensor_batch['uid'][0]} decided to "
+                    f"route to instance {best_candidate}, "
+                    f"instance_to_request_num turning from {_old_request_num} "
+                    f"to {self.instance_to_request_num[best_candidate]}"
+                )
                 self.instance_to_running_request_num[best_candidate] += 1
                 self.instance_to_token_num[best_candidate] += self._get_request_token_num(request)
                 if request.rollout_instance_id is not None:

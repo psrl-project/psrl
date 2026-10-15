@@ -15,9 +15,9 @@ class StatusBasedSyncMixin:
 
     Expects ``self`` to carry: ``stop_sync_and_migrate``, ``config``,
     ``instance_to_engine_status``, ``tag_to_replica_ids``,
-    ``instance_to_latest_stale_model_version``, ``instance_to_model_version``,
-    ``ps_model_version``, ``ready_buffers``, and the ``sync_with_ps`` /
-    ``check_should_sync`` / ``check_and_migrate`` / ``_is_selecting`` methods.
+    ``instance_to_model_version``,
+    ``ps_model_version``, ``ready_buffers``, ``replica_sync_tasks``, and the ``_get_awake_instance_ids`` /
+    ``sync_with_ps`` / ``check_should_sync`` / ``check_and_migrate`` / ``_is_selecting`` helpers.
     """
 
     async def _status_based_sync_and_migrate_loop(self):
@@ -28,7 +28,7 @@ class StatusBasedSyncMixin:
         1. Analyze the instance status (engine waiting & running request counts, etc.).
         2. Decide whether to synchronize with PS for each instance.
         """
-        psrl_logger.info("Starting status based model synchronization and rollout migration loop")
+        psrl_logger.info("Starting status based model synchronization and rollout migration loop.")
 
         while not self.stop_sync_and_migrate:
             # Sleep for a period of time and analyze the instance status
@@ -36,15 +36,21 @@ class StatusBasedSyncMixin:
                 self.config.psrl.rollout_coordination.sync_and_mig_strategy.check_interval_in_ms / 1000
             )
 
-            have_syncing_instance = False
+            awake_instance_ids = await self._get_awake_instance_ids(
+                [
+                    instance_id
+                    for instance_id in self.instance_to_engine_status
+                    if instance_id[0] in self.tag_to_replica_ids["rollout"]
+                ]
+            )
+            have_syncing_instance = bool(self.replica_sync_tasks)
             sync_instance_ids = []
-            for instance_id, engine_stats in self.instance_to_engine_status.items():
-                # Ignore validate instances for weight synchronization
-                replica_id, _ = instance_id
-                if replica_id not in self.tag_to_replica_ids["rollout"]:
-                    continue
-                # Check whether engine status is stale (the instance is currently being synchronized with PS)
-                if engine_stats.model_version <= self.instance_to_latest_stale_model_version.get(instance_id, -1):
+            for instance_id in awake_instance_ids:
+                engine_stats = self.instance_to_engine_status[instance_id]
+                if (
+                    instance_id[0] in self.replica_sync_tasks
+                    or engine_stats.model_version != self.instance_to_model_version[instance_id]
+                ):
                     have_syncing_instance = True
                     continue
                 # We do not synchronize with PS if the router is currently selecting workers.
@@ -53,7 +59,7 @@ class StatusBasedSyncMixin:
                     # {instance_id} because the router is currently selecting workers")
                     continue
                 # Check whether instance version lags behind PS version
-                if self.instance_to_model_version.get(instance_id, 0) == self.ps_model_version:
+                if self.instance_to_model_version.get(instance_id, 0) >= self.ps_model_version:
                     continue
                 # Check whether current instance workload is empty (forbid partial rollout)
                 # or satisfies the partial rollout policy
@@ -79,7 +85,6 @@ class StatusBasedSyncMixin:
                 """
 
             if sync_instance_ids:
-                psrl_logger.info(f"Sync with ps {sync_instance_ids}")
                 await self.sync_with_ps(sync_instance_ids)
             elif not have_syncing_instance and self.config.psrl.rollout_coordination.sync_and_mig_strategy.mig.enable:
                 # No instance is syncing with PS, check if migration is needed
