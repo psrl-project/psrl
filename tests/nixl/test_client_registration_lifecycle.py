@@ -96,8 +96,12 @@ def test_register_after_initial_sleep_and_repeated_deregistration(registration_c
         assert client._temp_tensor_mapping == {}, "Unmanaged temporary buffers must be released."
         assert client._original_tensor_mapping == {}, "Released tensor mappings must be rebuilt on wake."
 
+    client.agent.get_agent_metadata.return_value = b"refreshed-agent-metadata"
     client.register_local_tensors(state, {key: NIXLSharding.default() for key in state})
     assert client.local_client_info.is_registered, "Repeated sleep must allow another complete registration."
+    assert client.local_client_info.meta == b"refreshed-agent-metadata", (
+        "Wake must publish fresh registration metadata."
+    )
     assert client._registered_descs, "Wake must pin memory again."
     assert client.agent.register_memory.call_count == 2, "Wake must register physical memory for every cycle."
 

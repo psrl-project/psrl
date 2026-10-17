@@ -1,4 +1,4 @@
-from .base import (
+from psrl.workers.gen.session_scheduler import (
     SESSION_HUNG,
     SESSION_RUNNING,
     STATUS_ENV,
@@ -6,9 +6,11 @@ from .base import (
     InstanceCapacity,
     SessionInfo,
     SessionScheduler,
-    SessionSchedulingBase,
+    ThunderAgentScheduler,
 )
-from .thunder_agent import ThunderAgentScheduler, ThunderAgentSessionMixin
+
+from .base import SessionSchedulingBase
+from .thunder_agent import ThunderAgentSessionMixin
 
 __all__ = [
     "SESSION_HUNG",

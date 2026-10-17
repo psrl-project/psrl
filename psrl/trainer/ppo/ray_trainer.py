@@ -79,9 +79,9 @@ from psrl.trainer.ppo.utils import (
     compute_advantage_for_multi_trajectories,
     compute_rm_token_metrics,
 )
-from psrl.utils.common.nixl_names import NIXL_META_SERVER_NAME
+from psrl.utils.common.nixl_metadata import ClientInfoUpdates, merge_client_updates
 from psrl.utils.common.tms_env import build_ray_train_worker_tms_env
-from psrl.utils.common.worker_naming import WorkerKey, ps_agent_name, train_client_name
+from psrl.utils.common.worker_naming import WorkerKey, train_client_name
 from psrl.utils.dataset import DataProcessor
 from psrl.utils.logger import (
     DualOutputHandler,
@@ -104,6 +104,7 @@ from psrl.workers.gen.rollout_coordination import RolloutCoordinator
 from psrl.workers.gen.rollout_gateway import RolloutGateway
 from psrl.workers.gen.smg_adapter import build_pause_resume_payload
 from psrl.workers.gen.vllm_async_server import GenInterface, PSRL_vLLMReplica
+from psrl.workers.global_coordinator import CoordinatorClient, GlobalCoordinator
 from psrl.workers.ps.ps_manager import PSManager
 from psrl.workers.ps.ps_storage_worker import PSStoragePlan, PSStorageWorker
 from psrl.workers.ps.ps_worker_group import (
@@ -311,6 +312,7 @@ class PSRL_RayPPOTrainer(RayPPOTrainer):
         self.data_processor = None
         self.agent_loop_manager = None
         self.rollout_coordinator = None
+        self.global_coordinator = None
         self.reward_manager = None
         self.reward_loop_workers = []
         self.validation_reward_manager = None
@@ -730,8 +732,10 @@ class PSRL_RayPPOTrainer(RayPPOTrainer):
         assert self.rollout_gateway_url is not None, (
             "Rollout gateway URL must be initialized before initializing rollout coordinator."
         )
-        self.rollout_coordinator = (
-            ray.remote(RolloutCoordinator)
+        use_global = self.config.psrl.global_coordinator.enable
+        coordinator_cls = GlobalCoordinator if use_global else RolloutCoordinator
+        coordinator = (
+            ray.remote(coordinator_cls)
             .options(
                 scheduling_strategy=NodeAffinitySchedulingStrategy(
                     node_id=self.ip_to_node_id[self.config.psrl.ps_manager_ip], soft=False
@@ -744,6 +748,11 @@ class PSRL_RayPPOTrainer(RayPPOTrainer):
                 self.session_router_url,
             )
         )
+        if use_global:
+            self.global_coordinator = coordinator
+            self.rollout_coordinator = CoordinatorClient(coordinator)
+        else:
+            self.rollout_coordinator = coordinator
 
     def init_reward_gateways(self):
         """Launch one smg gateway per named generative reward model."""
@@ -774,12 +783,17 @@ class PSRL_RayPPOTrainer(RayPPOTrainer):
                 all_wg[f"reward_model_{reward_model_name}_{i}"] for i in range(rm_cfg.num_replicas)
             ]
             gateway_url = self.reward_gateway_urls[reward_model_name]
+            coordinator = None
+            if self.global_coordinator is not None:
+                ray.get(self.global_coordinator.register_reward_model.remote(rm_cfg, gateway_url))
+                coordinator = CoordinatorClient(self.global_coordinator, ("reward", reward_model_name))
             self.reward_model_to_manager[reward_model_name] = RewardModelManager(
                 reward_model_name=reward_model_name,
                 config=self.config,
                 reward_model_config=rm_cfg,
                 reward_model_wg_list=reward_model_wg_list,
                 gateway_url=gateway_url,
+                coordinator=coordinator,
             )
             psrl_logger.info("RewardModelManager for '%s' initialized.", reward_model_name)
             # When using `elastic` deployment mode, all initialized servers should be slept
@@ -833,21 +847,24 @@ class PSRL_RayPPOTrainer(RayPPOTrainer):
         ray.get(self.rollout_coordinator.start_busy_loop.remote())
 
     def stop_rollout_coordinator(self):
-        """Stop the rollout coordinator."""
+        """
+        Stop the owning actor and all model controllers it contains.
+        """
         if self.rollout_coordinator is not None:
+            coordinator = self.global_coordinator if self.global_coordinator is not None else self.rollout_coordinator
             psrl_logger.debug("Stopping rollout coordinator...")
             try:
-                ray.get(self.rollout_coordinator.stop_busy_loop.remote(), timeout=60)
-                self.rollout_coordinator = None
+                ray.get(coordinator.stop_busy_loop.remote(), timeout=60)
                 psrl_logger.debug("Rollout coordinator stopped successfully.")
             except ray.exceptions.GetTimeoutError:
                 psrl_logger.error("Timeout stopping rollout coordinator (60s), force killing.")
-                ray.kill(self.rollout_coordinator, no_restart=True)
-                self.rollout_coordinator = None
+                ray.kill(coordinator, no_restart=True)
             except Exception as e:
-                psrl_logger.error(f"Error stopping rollout coordinator: {e}", exc_info=True)
-                ray.kill(self.rollout_coordinator, no_restart=True)
+                psrl_logger.error(f"Error stopping rollout coordinator: {e!r}.", exc_info=True)
+                ray.kill(coordinator, no_restart=True)
+            finally:
                 self.rollout_coordinator = None
+                self.global_coordinator = None
         else:
             psrl_logger.warning("Rollout coordinator is not initialized, skipping stop operation.")
 
@@ -2121,7 +2138,6 @@ class PSRL_RayPPOTrainer(RayPPOTrainer):
                     self.elastic_executor.configure_trainer_pool_clients.remote(
                         self.ps_wg,
                         self.tag_to_server_handles,
-                        self.worker_to_ps_idx,
                     )
                 )
 
@@ -2194,28 +2210,21 @@ class PSRL_RayPPOTrainer(RayPPOTrainer):
             [self.tag_to_server_handles["validate"][i].nixl_wake_up.remote() for i in range(self.n_validate_instances)]
         )
 
-        psrl_logger.info("Step 3: Syncing with PS manager...")
-        # sync with server
-        updated_client_names = []  # to collect all updated client names for broadcasting
+        psrl_logger.info("Step 3: Collecting validation NIXL descriptors...")
+        updated_client_names = []
         futures = []
-        expected_update_infos = 0
         for i in range(self.n_validate_instances):
             tp_size = sum(1 for k in self.worker_to_ps_idx if k.role == "validate" and k.instance_id == i)
-            expected_update_infos += tp_size
             for rank in range(tp_size):
                 updated_client_names.append(
                     WorkerKey("validate", i, rank).to_nixl_client_name(self.n_rollout_instances)
                 )
-            futures.append(
-                self.tag_to_server_handles["validate"][i].nixl_send_local_info_to.remote(NIXL_META_SERVER_NAME)
-            )
-        # wait for ps manager to collect all infos
-        futures.append(self.ps_manager_handle.nixl_wait_for_update_infos.remote(expected_update_infos))
-        ray.get(futures)
+            futures.append(self.tag_to_server_handles["validate"][i].nixl_get_local_client_info.remote())
+        groups = [group for worker_groups in ray.get(futures) for group in worker_groups]
+        updates = merge_client_updates(groups, updated_client_names)
 
-        # broadcast to other clients
-        psrl_logger.info("Step 4: PS manager broadcasting updated client infos...")
-        self._broadcast_updated_client_infos_from_ps_manager(updated_client_names)
+        psrl_logger.info("Step 4: Installing updated validation NIXL descriptors...")
+        self._broadcast_updated_client_infos(updates)
 
         psrl_logger.info("Step 5: Syncing validation instances' model weights and status with PS...")
         # sync validation instances with ps
@@ -2293,20 +2302,12 @@ class PSRL_RayPPOTrainer(RayPPOTrainer):
         # Allocate trainer space and register
         ray.get(self.actor_wg.execute_all_async("nixl_wake_up"))
 
-        psrl_logger.info("Step 5: Syncing with PS manager...")
-        # sync with server
-        update_client_names = []  # to collect all updated client names for broadcasting
-        futures = []
-        for i in range(self.actor_wg.world_size):
-            update_client_names.append(train_client_name(i))
-        # sender side: actor workers
-        futures.extend(self.actor_wg.execute_all_async("nixl_send_local_info_to", NIXL_META_SERVER_NAME))
-        # receiver side: ps manager
-        futures.append(self.ps_manager_handle.nixl_wait_for_update_infos.remote(self.actor_wg.world_size))
-        ray.get(futures)
+        psrl_logger.info("Step 5: Collecting trainer NIXL descriptors...")
+        groups = ray.get(self.actor_wg.execute_all_async("nixl_get_local_client_info"))
+        updates = merge_client_updates(groups, (train_client_name(rank) for rank in range(self.actor_wg.world_size)))
 
-        psrl_logger.info("Step 6: PS manager broadcasting updated client infos...")
-        self._broadcast_updated_client_infos_from_ps_manager(update_client_names)
+        psrl_logger.info("Step 6: Installing updated trainer NIXL descriptors...")
+        self._broadcast_updated_client_infos(updates)
 
         psrl_logger.info("Step 7: Pulling actor model from PS...")
         # pull actor model
@@ -2331,77 +2332,17 @@ class PSRL_RayPPOTrainer(RayPPOTrainer):
 
         self.is_rollout_mode_in_actor = False
 
-    def _make_broadcast_plan(self, src_agent_names, dst_agent_names) -> dict:
-        """Create a broadcast plan mapping source agents to destination agents.
-
-        Args:
-            src_agent_names (list): List of source agent names.
-            dst_agent_names (list): List of destination agent names.
-        Returns:
-            dict: A dictionary mapping each source agent to a list of destination agents.
+    def _broadcast_updated_client_infos(self, updates: ClientInfoUpdates) -> None:
         """
-        broadcast_plan = {src_agent: [] for src_agent in src_agent_names}
-        for i, dst_agent in enumerate(dst_agent_names):
-            src_agent = src_agent_names[i % len(src_agent_names)]
-            broadcast_plan[src_agent].append(dst_agent)
-        return broadcast_plan
-
-    def _broadcast_updated_client_infos_from_ps_manager(self, updated_client_names: list):
-        """Broadcast updated client infos from PS manager to all nixl clients.
-
-        Args:
-            updated_client_names (list): List of updated client names to broadcast.
+        Wait for every PS, inference and trainer worker to install the new descriptors.
         """
-        src_agent_names = [NIXL_META_SERVER_NAME]
-        dst_agent_names = []
-        # 1. PS storage workers
-        for i in range(self.ps_wg.world_size):
-            dst_agent_names.append(ps_agent_name(i))
-        # 2. rollout workers
-        for i in range(self.n_rollout_instances):
-            tp_size = sum(1 for k in self.worker_to_ps_idx if k.role == "rollout" and k.instance_id == i)
-            for rank in range(tp_size):
-                dst_agent_names.append(WorkerKey("rollout", i, rank).to_nixl_client_name())
-        # 3. validate workers
-        for i in range(self.n_validate_instances):
-            tp_size = sum(1 for k in self.worker_to_ps_idx if k.role == "validate" and k.instance_id == i)
-            for rank in range(tp_size):
-                dst_agent_names.append(WorkerKey("validate", i, rank).to_nixl_client_name(self.n_rollout_instances))
-        # 4. actor workers
-        for i in range(self.actor_wg.world_size):
-            dst_agent_names.append(train_client_name(i))
-        psrl_logger.debug(f"Destination agent names for broadcasting: {dst_agent_names}")
-
-        broadcast_plan = self._make_broadcast_plan(src_agent_names, dst_agent_names)
-        futures = []
-        for src_agent, dst_agents in broadcast_plan.items():
-            if src_agent == NIXL_META_SERVER_NAME:
-                futures.append(
-                    self.ps_manager_handle.nixl_broadcast_update_client_infos.remote(dst_agents, updated_client_names)
-                )
-            else:
-                raise NotImplementedError(
-                    "Only meta server broadcasting is implemented in _broadcast_updated_client_infos_from_ps_manager"
-                )
-
-        # recv broadcast results by all clients
-        # 1. ps storage workers
-        futures.extend(self.ps_wg.execute_all_async("nixl_wait_for_update_infos", 1))
-        # 2. rollout workers
+        futures = self.ps_wg.execute_all_async("nixl_update_client_infos", updates)
         futures.extend(
-            [
-                self.tag_to_server_handles["rollout"][i].nixl_wait_for_update_infos.remote(1)
-                for i in range(self.n_rollout_instances)
-            ]
+            server.nixl_update_client_infos.remote(updates)
+            for servers in self.tag_to_server_handles.values()
+            for server in servers
         )
-        futures.extend(
-            [
-                self.tag_to_server_handles["validate"][i].nixl_wait_for_update_infos.remote(1)
-                for i in range(self.n_validate_instances)
-            ]
-        )
-        # 3. actor workers
-        futures.extend(self.actor_wg.execute_all_async("nixl_wait_for_update_infos", 1))
+        futures.extend(self.actor_wg.execute_all_async("nixl_update_client_infos", updates))
         ray.get(futures)
 
     def _save_checkpoint(self):

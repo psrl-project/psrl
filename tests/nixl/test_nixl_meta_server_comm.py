@@ -3,6 +3,7 @@ Exercise native NIXL metadata exchange and CPU tensor transfers.
 """
 
 import os
+import pickle
 import random
 import socket
 import subprocess
@@ -31,6 +32,7 @@ def _run_transfer_scenario():
     import torch
     from nixl._api import nixl_agent, nixl_agent_config
     from omegaconf import OmegaConf
+    from psrl.utils.common.nixl_metadata import merge_client_updates
     from psrl.utils.nixl.client import NIXLStorageClient
     from psrl.utils.nixl.nixl_spec import NIXLClientType, NIXLSharding
     from psrl.utils.nixl.server import NIXLMetaServer
@@ -92,6 +94,31 @@ def _run_transfer_scenario():
             assert shards == [(0,)], "The write plan must transfer the full tensor shard."
             source.wait(key, "write", "WRITE", target_client=target.client_name, timeout=15)
             torch.testing.assert_close(tensors[1][key], tensors[0][key])
+
+        for cycle in range(32):
+            previous_tensors = tensors
+            tensors = []
+            for index, client in enumerate(clients):
+                client.deregister_local_tensors()
+                state = {
+                    key: tensor.clone().fill_(cycle * 10 + index) for key, tensor in previous_tensors[index].items()
+                }
+                client.register_local_tensors(state, {key: NIXLSharding.default() for key in state})
+                tensors.append(state)
+            updates = merge_client_updates(
+                (client.get_local_client_info() for client in clients),
+                (client.client_name for client in clients),
+            )
+            for client in clients:
+                client.update_client_infos(pickle.loads(pickle.dumps(updates)))
+            for key in tensors[0]:
+                source.client_read(target.client_name, target.client_name, key, "wake-read")
+                source.wait(key, "wake-read", "READ", target_client=target.client_name, timeout=15)
+                torch.testing.assert_close(tensors[0][key], tensors[1][key])
+                tensors[0][key].add_(100)
+                source.client_write(target.client_name, target.client_name, key, "wake-write")
+                source.wait(key, "wake-write", "WRITE", target_client=target.client_name, timeout=15)
+                torch.testing.assert_close(tensors[1][key], tensors[0][key])
 
 
 def test_nixl_meta_comm():

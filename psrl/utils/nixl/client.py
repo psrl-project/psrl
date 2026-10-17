@@ -13,6 +13,7 @@ import torch
 from nixl._api import nixl_agent, nixl_agent_config
 from omegaconf import DictConfig
 
+from psrl.utils.common.nixl_metadata import ClientInfoUpdates
 from psrl.utils.common.patch_utils import apply_tms_patch
 from psrl.utils.logger import DualOutputHandler, deprecated, get_worker_info, log_tensor
 from psrl.utils.nixl.comm_plan import NIXLCommPlan
@@ -509,6 +510,7 @@ class NIXLStorageClient:
                 temp_serialize_descs_s += time.perf_counter() - stage_start
             stage_seconds["temp_get_xfer_descs"] = temp_get_xfer_descs_s
             stage_seconds["temp_serialize_descs"] = temp_serialize_descs_s
+            self.local_client_info.meta = self.agent.get_agent_metadata()
             stage_seconds["total"] = time.perf_counter() - total_start
             self._last_reregister_timing = {
                 **stage_seconds,
@@ -1072,72 +1074,33 @@ class NIXLStorageClient:
                 raise TimeoutError("Timeout waiting for temp mappings.")
             time.sleep(0.1)
 
-    def send_local_info_to(self, dst_agent_names: list[str]):
-        """Send local client info to specified destination agents.
-
-        Args:
-            dst_agent_names: List of destination agent names.
+    def get_local_client_info(self) -> ClientInfoUpdates:
         """
-        assert self._is_connected, "Not connected to server"
-        payload_dict = {
+        Export registered descriptors for an acknowledged metadata exchange over RPC.
+        """
+        assert self._is_connected, "Not connected to server."
+        assert self.local_client_info is not None and self.local_client_info.is_registered, (
+            f"Client {self.client_name!r} must register its tensors before exporting metadata."
+        )
+        return {
             self.client_name: {
                 "info": self.local_client_info.serialize(),
-                "temp_mapping": self._temp_desc_bytes_mapping,
+                "temp_mapping": self._temp_desc_bytes_mapping.copy(),
             }
         }
-        payload = pickle.dumps(payload_dict)
-        for dst_agent_name in dst_agent_names:
-            self.agent.send_notif(dst_agent_name, payload)
 
-    def wait_for_update_infos(self, expected_agents: int, timeout: float = 1200.0):
-        """Wait for updated client infos from other clients.
-
-        Args:
-            expected_agents: Number of expected client infos to be updated.
-            timeout: Timeout in seconds.
+    def update_client_infos(self, updates: ClientInfoUpdates) -> None:
         """
-        assert self._is_connected, "Not connected to server"
-        psrl_logger.info(f"{self.client_name}: Waiting for {expected_agents} updated client infos...")
-        start = time.time()
-        already_recved_agents = set()
-        while len(already_recved_agents) < expected_agents:
-            notifs = self.agent.get_new_notifs()
-            for agent_name, notif_list in notifs.items():
-                for notif in notif_list:
-                    try:
-                        multi_infos = pickle.loads(notif)
-                        assert isinstance(multi_infos, dict), f"Expected a dict of multi_infos, but got {multi_infos}"
-                        for client_name, info_and_temp_mapping in multi_infos.items():
-                            info = info_and_temp_mapping["info"]
-                            client_temp_mapping = info_and_temp_mapping["temp_mapping"]
-                            client_info = NIXLClientInfo.deserialize(info)
-                            self._all_client_infos[client_name] = client_info
-                            self._all_temp_mappings[client_name] = client_temp_mapping
-                        already_recved_agents.add(agent_name)
-                        psrl_logger.info(
-                            f"Already received {len(already_recved_agents)} agents: {already_recved_agents}"
-                        )
-                    except Exception:
-                        continue
-            if time.time() - start > timeout:
-                raise TimeoutError("Timeout waiting for agents.")
-            time.sleep(0.1)
-
-    def broadcast_update_client_infos(self, dst_agent_names: list[str], update_client_names: list[str]):
-        """Broadcast updated client infos to specified destination agents.
-
-        Args:
-            dst_agent_names: List of destination agent names.
-            update_client_names: List of client names whose infos are to be broadcasted.
+        Install remote descriptors before acknowledging a storage transition.
         """
-        payload_dict = {}
-        for client_name in update_client_names:
-            client_info = self._all_client_infos[client_name]
-            client_temp_mapping = self._all_temp_mappings[client_name]
-            payload_dict[client_name] = {"info": client_info.serialize(), "temp_mapping": client_temp_mapping}
-        payload = pickle.dumps(payload_dict)
-        for dst_agent_name in dst_agent_names:
-            self.agent.send_notif(dst_agent_name, payload)
+        assert self._is_connected, "Not connected to server."
+        infos = {name: NIXLClientInfo.deserialize(update["info"]) for name, update in updates.items()}
+        mappings = {name: update["temp_mapping"] for name, update in updates.items()}
+        self._all_client_infos.update(infos)
+        self._all_temp_mappings.update(mappings)
+        # Re-registration changes remote memory keys even when agent identities stay the same.
+        for name in updates:
+            self._target_client_connected.pop(name, None)
 
     def _ensure_client_info_fetched(self, target_client: str):
         """Ensure connection to target client is established."""
@@ -2058,17 +2021,18 @@ class NIXLMultiStorageClients:
             for client in self.multi_clients[1:]:
                 client._all_temp_mappings = self.multi_clients[0]._all_temp_mappings
 
-    def wait_for_update_infos(self, expected_agents: int, timeout: float = 1200.0):
-        assert self._is_connected, "Not connected to server"
-        self.multi_clients[0].wait_for_update_infos(expected_agents, timeout)
+    def update_client_infos(self, updates: ClientInfoUpdates) -> None:
+        """
+        Install updated descriptors in every client sharing this agent.
+        """
+        assert self._is_connected, "Not connected to server."
+        self.multi_clients[0].update_client_infos(updates)
         if len(self.multi_clients) > 1:
             for client in self.multi_clients[1:]:
                 client._all_client_infos = self.multi_clients[0]._all_client_infos
                 client._all_temp_mappings = self.multi_clients[0]._all_temp_mappings
-
-    def broadcast_update_client_infos(self, dst_agent_names: list[str], update_client_names: list[str]):
-        assert self._is_connected, "Not connected to server"
-        self.multi_clients[0].broadcast_update_client_infos(dst_agent_names, update_client_names)
+                for name in updates:
+                    client._target_client_connected.pop(name, None)
 
     def client_read(
         self,

@@ -1,6 +1,9 @@
+from __future__ import annotations
+
 import asyncio
 import logging
 import os
+from typing import TYPE_CHECKING
 
 import ray
 from omegaconf import DictConfig
@@ -12,6 +15,9 @@ from psrl.workers.config import RolloutConfig
 from psrl.workers.gen.vllm_async_server import GenInterface
 from psrl.workers.reward.reward_model.coordinator import RewardModelCoordinator
 from psrl.workers.reward.reward_model.replica import RewardModelReplica
+
+if TYPE_CHECKING:
+    from psrl.workers.global_coordinator import CoordinatorClient
 
 psrl_logger = logging.getLogger(__name__)
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
@@ -27,6 +33,7 @@ class RewardModelManager:
         reward_model_config: DictConfig,
         reward_model_wg_list: list[RayWorkerGroup],
         gateway_url: str,
+        coordinator: ray.actor.ActorHandle | CoordinatorClient | None = None,
     ) -> None:
         self.reward_model_name = reward_model_name
         self.config = config
@@ -43,11 +50,13 @@ class RewardModelManager:
         self.hf_model_config = model_cfg
         self.rollout_config: RolloutConfig = omega_conf_to_dataclass(reward_model_config.rollout)
 
-        self.reward_model_coordinator = ray.remote(RewardModelCoordinator).remote(
-            config,
-            reward_model_config,
-            rollout_gateway_url=self.gateway_url,
-        )
+        self.reward_model_coordinator = coordinator
+        if self.reward_model_coordinator is None:
+            self.reward_model_coordinator = ray.remote(RewardModelCoordinator).remote(
+                config,
+                reward_model_config,
+                rollout_gateway_url=self.gateway_url,
+            )
 
         self.reward_model_wg_list = reward_model_wg_list
         self.replicas: list[RewardModelReplica] = []

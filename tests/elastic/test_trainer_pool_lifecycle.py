@@ -279,36 +279,107 @@ def test_validation_waits_for_scaling_then_reserves_pool_until_release(modules):
 
 def test_trainer_metadata_broadcast_reaches_every_nixl_client(modules):
     async def scenario():
-        from psrl.utils.common.worker_naming import WorkerKey, ps_agent_name, train_client_name
+        from psrl.utils.common.worker_naming import train_client_name
 
         executor, _ = _trainer_pool_executor(modules)
         del executor._broadcast_trainer_client_infos
         executor.actor_wg.world_size = 2
         executor.ps_wg = SimpleNamespace(world_size=2, execute_all_async=Mock(return_value=[]))
-        servers = [SimpleNamespace(nixl_wait_for_update_infos=SimpleNamespace(remote=AsyncMock())) for _ in range(2)]
-        keys = {WorkerKey("rollout", 0, rank): 0 for rank in range(2)}
-        keys[WorkerKey("validate", 0, 0)] = 1
-        keys[WorkerKey("actor", 0, 0)] = 0
-        executor.configure_trainer_pool_clients(
-            executor.ps_wg, {"rollout": servers[:1], "validate": servers[1:]}, keys
+        servers = [SimpleNamespace(nixl_update_client_infos=SimpleNamespace(remote=AsyncMock())) for _ in range(2)]
+        executor.configure_trainer_pool_clients(executor.ps_wg, {"rollout": servers[:1], "validate": servers[1:]})
+        updates = {train_client_name(rank): {"info": bytes([rank]), "temp_mapping": {}} for rank in range(2)}
+
+        async def execute(method, *args):
+            if method == "nixl_get_local_client_info":
+                return {train_client_name(0): updates[train_client_name(0)]}
+
+        async def second_rank():
+            return {train_client_name(1): updates[train_client_name(1)]}
+
+        executor.actor_wg.execute_all_async.side_effect = lambda method, *args: (
+            [execute(method), second_rank()] if method == "nixl_get_local_client_info" else [execute(method, *args)]
         )
-        broadcast = AsyncMock()
-        executor.ps_manager_handle.nixl_broadcast_update_client_infos = SimpleNamespace(remote=broadcast)
         await executor._broadcast_trainer_client_infos()
-        names, updated = broadcast.call_args.args
-        expected = [
-            ps_agent_name(0),
-            ps_agent_name(1),
-            *[key.to_nixl_client_name(1) for key in keys if key.role != "actor"],
-            train_client_name(0),
-            train_client_name(1),
-        ]
-        assert set(names) == set(expected), "Address updates must reach PS, rollout, validation and trainer clients."
-        assert len(names) == len(set(names)), "Each destination must receive exactly one metadata update."
-        assert updated == [train_client_name(0), train_client_name(1)], "Only trainer addresses changed."
         for server in servers:
-            server.nixl_wait_for_update_infos.remote.assert_awaited_once_with(1)
-        executor.ps_wg.execute_all_async.assert_called_once_with("nixl_wait_for_update_infos", 1)
+            server.nixl_update_client_infos.remote.assert_awaited_once_with(updates)
+        executor.ps_wg.execute_all_async.assert_called_once_with("nixl_update_client_infos", updates)
+        executor.actor_wg.execute_all_async.assert_has_calls(
+            [call("nixl_get_local_client_info"), call("nixl_update_client_infos", updates)]
+        )
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("receiver_fails", [False, True])
+def test_restore_waits_for_metadata_installation_before_pulling_weights(modules, receiver_fails):
+    async def scenario():
+        from psrl.utils.common.worker_naming import train_client_name
+
+        executor, events = _trainer_pool_executor(modules)
+        del executor._broadcast_trainer_client_infos
+        executor._trainer_state = modules.executor.TrainerState.ASLEEP
+        started = asyncio.Event()
+        installed = asyncio.Event()
+        updates = {train_client_name(0): {"info": b"descriptor", "temp_mapping": {}}}
+
+        async def execute(method, *args):
+            events.append(method)
+            if method == "nixl_get_local_client_info":
+                return updates
+
+        async def install(payload):
+            assert payload == updates, "The receiver must install the current trainer descriptors."
+            started.set()
+            await installed.wait()
+            if receiver_fails:
+                raise RuntimeError("Metadata installation failed.")
+
+        executor.actor_wg.execute_all_async.side_effect = lambda method, *args: [execute(method, *args)]
+        executor.ps_wg = SimpleNamespace(execute_all_async=Mock(return_value=[]))
+        server = SimpleNamespace(nixl_update_client_infos=SimpleNamespace(remote=AsyncMock(side_effect=install)))
+        executor.configure_trainer_pool_clients(executor.ps_wg, {"rollout": [server]})
+        restore = asyncio.create_task(executor.acquire_trainer_pool())
+        await asyncio.wait_for(started.wait(), timeout=1)
+        assert "pull_model" not in events, "Weights must wait for every receiver to install descriptors."
+        assert not restore.done(), "An unacknowledged metadata update must hold the restore operation."
+        assert executor._trainer_state == modules.executor.TrainerState.RESTORING, "Storage is not ready yet."
+        installed.set()
+        if receiver_fails:
+            with pytest.raises(RuntimeError, match="Metadata installation failed"):
+                await restore
+            assert "pull_model" not in events, "Failed metadata installation must prevent weight transfers."
+            assert executor._trainer_state == modules.executor.TrainerState.RESTORING, "Failed storage stays reserved."
+        else:
+            await restore
+            assert events[-1] == "pull_model", "Acknowledged descriptors permit weight restoration."
+            assert executor._trainer_state == modules.executor.TrainerState.AWAKE, "Restored weights permit training."
+        assert executor._trainer_pool_available is False, "Storage must stay reserved throughout trainer restore."
+
+    asyncio.run(scenario())
+
+
+def test_missing_rank_metadata_prevents_broadcast_and_weight_pull(modules):
+    async def scenario():
+        from psrl.utils.common.worker_naming import train_client_name
+
+        executor, events = _trainer_pool_executor(modules)
+        del executor._broadcast_trainer_client_infos
+        executor._trainer_state = modules.executor.TrainerState.ASLEEP
+        executor.actor_wg.world_size = 2
+
+        async def execute(method):
+            events.append(method)
+            if method == "nixl_get_local_client_info":
+                return {train_client_name(0): {"info": b"descriptor", "temp_mapping": {}}}
+
+        executor.actor_wg.execute_all_async.side_effect = lambda method, *args: [execute(method)]
+        executor.ps_wg = SimpleNamespace(execute_all_async=Mock(return_value=[]))
+        executor.configure_trainer_pool_clients(executor.ps_wg, {})
+        with pytest.raises(ValueError, match="missing=.*NIXLTrainClient_1"):
+            await executor.acquire_trainer_pool()
+        executor.ps_wg.execute_all_async.assert_not_called()
+        assert "pull_model" not in events, "Missing ranks must prevent weight transfers."
+        assert executor._trainer_state == modules.executor.TrainerState.RESTORING, "Incomplete restore stays reserved."
 
     asyncio.run(scenario())
 

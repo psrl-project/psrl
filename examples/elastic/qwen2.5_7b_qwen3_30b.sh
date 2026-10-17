@@ -31,10 +31,10 @@ export PSRL_DEPLOY_RM_MAX_NUM_SEQS=512
 export PSRL_DEPLOY_RM_MAX_NUM_BATCHED_TOKENS=$((1024 * 40))
 export PSRL_DEPLOY_FULL_STEPS=100
 export PSRL_DEPLOY_SMOKE_STEPS=10
-export PSRL_DEPLOY_TEST_FREQ=5
+export PSRL_DEPLOY_TEST_FREQ=-1
 export PSRL_DEPLOY_SAVE_FREQ=-1
 export PSRL_DEPLOY_MAX_SCALE_INSTANCES=-1
-export PSRL_DEPLOY_DATASET=${PSRL_DEPLOY_DATASET:-dapo}
+export PSRL_DEPLOY_DATASET=${PSRL_DEPLOY_DATASET:-mixed}
 export PSRL_NEED_VALIDATION=${PSRL_NEED_VALIDATION:-0}
 export PSRL_DEPLOY_OPTIMIZER_OFFLOAD=${PSRL_DEPLOY_OPTIMIZER_OFFLOAD:-True}
 export PSRL_DEPLOY_VAL_BEFORE_TRAIN=False
@@ -53,6 +53,7 @@ export PSRL_EXCLUSIVE_REBALANCE_MIGRATION_QUEUE=True
 shift || true
 
 export PSRL_DEPLOY_EXTRA="\
+psrl.global_coordinator.enable=true \
 +psrl.nixl.weight_verification.enable=${PSRL_WEIGHT_VERIFY} \
 +psrl.nixl.weight_verification.transfer_chain=True \
 +psrl.nixl.weight_verification.trainer_sleep_wake=True \

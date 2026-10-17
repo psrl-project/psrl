@@ -11,6 +11,7 @@ from safetensors import safe_open
 from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForImageTextToText
 from verl.utils.fs import copy_to_local
 
+from psrl.utils.common.nixl_metadata import ClientInfoUpdates
 from psrl.utils.common.nixl_names import NIXL_META_SERVER_NAME
 from psrl.utils.common.worker_naming import ps_agent_name, ps_client_pull_name, ps_client_push_name
 from psrl.utils.converter import create_parameter_mapping
@@ -189,22 +190,11 @@ class PSStorageWorker:
             )
         self._nixl_protocol_phase2()
 
-    def nixl_wait_for_update_infos(self, info_num: int):
-        """Wait for update infos from the storage client.
-
-        Args:
-            info_num (int): Number of infos to wait for
+    def nixl_update_client_infos(self, updates: ClientInfoUpdates) -> None:
         """
-        self.nixl_multi_storage_clients.wait_for_update_infos(info_num)
-
-    def nixl_broadcast_update_client_infos(self, dst_agent_names: list[str], update_client_names: list[str]):
-        """Broadcast updated client infos to destination agents.
-
-        Args:
-            dst_agent_names (list[str]): List of destination agent names
-            update_client_names (list[str]): List of updated client names
+        Acknowledge updated descriptors for both PS storage clients.
         """
-        self.nixl_multi_storage_clients.broadcast_update_client_infos(dst_agent_names, update_client_names)
+        self.nixl_multi_storage_clients.update_client_infos(updates)
 
     def get_nixl_agent_name(self) -> str:
         """Get the name of the NIXL agent."""

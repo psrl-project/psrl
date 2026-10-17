@@ -290,7 +290,7 @@ def test_trainer_wake_restores_weights_after_reclaim(modules):
         executor, events = _trainer_pool_executor(modules)
         executor._trainer_state = modules.executor.TrainerState.ASLEEP
         await executor.acquire_trainer_pool()
-        assert events == ["reclaim", "nixl_wake_up", "nixl_send_local_info_to", "broadcast", "pull_model"], (
+        assert events == ["reclaim", "nixl_wake_up", "broadcast", "pull_model"], (
             "Reclaim and NIXL reconnection must complete before weight restoration."
         )
         assert executor._trainer_state == modules.executor.TrainerState.AWAKE, "Restored weights permit training."

@@ -19,7 +19,7 @@ from verl.trainer.config import AlgoConfig
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import AdvantageEstimator
 
-from psrl.utils.reward_token_metrics import extract_reward_model_token_counts
+from psrl.utils.reward_token_metrics import build_rm_length_metrics
 from psrl.workers.elastic.pool_layout import ReplicaPlacement
 
 psrl_logger = logging.getLogger(__file__)
@@ -450,10 +450,12 @@ def compute_rm_token_metrics(
     """
     Combine policy tokens with reward-model tokens for one training batch.
 
-    `rm_input_length` and `rm_output_length` sum every nested `rm_input_len` and
-    `rm_output_len` in per-sample `reward_extra_info`. `overall_token_num` is
-    `sum(global_token_num)` plus those two totals. `perf/overall_throughput` uses
-    the same GPU-normalized formula as `perf/throughput`.
+    `perf/rm_input_length` and `perf/rm_output_length` sum every nested
+    `rm_input_len` and `rm_output_len` in per-sample `reward_extra_info`.
+    `perf/overall_token_num` is `sum(global_token_num)` plus those two totals.
+    `perf/overall_throughput` uses the same GPU-normalized formula as
+    `perf/throughput`. `rm_seq_length/*` reports min, mean, and max over each
+    RM call, plus per-model totals.
 
     Args:
         reward_extra_infos (list): Per-sample `reward_extra_info` payloads.
@@ -462,26 +464,23 @@ def compute_rm_token_metrics(
         n_gpus (int): GPU count used to normalize throughput.
 
     Returns:
-        dict[str, float]: `rm_input_length`, `rm_output_length`, `overall_token_num`,
-            and `perf/overall_throughput`.
+        dict[str, float]: `perf/rm_input_length`, `perf/rm_output_length`,
+            `perf/overall_token_num`, `perf/overall_throughput`, and
+            `rm_seq_length/*` sequence-length stats.
     """
     extra_infos = list(reward_extra_infos)
     policy_tokens = [int(token_num) for token_num in global_token_num]
     assert len(extra_infos) == len(policy_tokens), (
         f"Reward extra info count {len(extra_infos)!r} does not match global_token_num count {len(policy_tokens)!r}."
     )
-    rm_input_length = 0
-    rm_output_length = 0
-    for extra_info in extra_infos:
-        input_tokens, output_tokens = extract_reward_model_token_counts(extra_info)
-        rm_input_length += input_tokens
-        rm_output_length += output_tokens
-    overall_token_num = float(sum(policy_tokens) + rm_input_length + rm_output_length)
+    length_metrics = build_rm_length_metrics(extra_infos)
+    overall_token_num = float(
+        sum(policy_tokens) + length_metrics["perf/rm_input_length"] + length_metrics["perf/rm_output_length"]
+    )
     step_time = timing_raw["step"]
     return {
-        "rm_input_length": float(rm_input_length),
-        "rm_output_length": float(rm_output_length),
-        "overall_token_num": overall_token_num,
+        **length_metrics,
+        "perf/overall_token_num": overall_token_num,
         "perf/overall_throughput": overall_token_num / (step_time * n_gpus),
     }
 

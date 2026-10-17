@@ -10,8 +10,8 @@ from enum import Enum, auto
 import ray
 
 from psrl.trainer.ppo.utils import PSRL_Role
-from psrl.utils.common.nixl_names import NIXL_META_SERVER_NAME
-from psrl.utils.common.worker_naming import ps_agent_name, train_client_name
+from psrl.utils.common.nixl_metadata import merge_client_updates
+from psrl.utils.common.worker_naming import train_client_name
 from psrl.utils.elastic.diagnostics import log_elastic_rm_backlog_diag
 from psrl.utils.logger import DualOutputHandler, FileOnlyHandler
 from psrl.utils.server.command import Command, CommandType
@@ -121,7 +121,6 @@ class ElasticExecutor:
         self._trainer_state = TrainerState.AWAKE
         self._deferred_actor_ckpt_path = None
         self._nixl_servers = []
-        self._nixl_destination_names = []
         self._validation_instance_ids = []
         self._validation_active = False
 
@@ -323,21 +322,12 @@ class ElasticExecutor:
         self,
         ps_wg,
         servers,
-        worker_to_ps_idx,
     ) -> None:
         """
         Bind the clients that must receive trainer NIXL address updates.
         """
         self.ps_wg = ps_wg
         self._nixl_servers = [server for role_servers in servers.values() for server in role_servers]
-        rollout_count = len(servers.get("rollout", []))
-        self._nixl_destination_names = [ps_agent_name(rank) for rank in range(ps_wg.world_size)]
-        self._nixl_destination_names.extend(
-            key.to_nixl_client_name(rollout_count if key.role == "validate" else 0)
-            for key in worker_to_ps_idx
-            if key.role in ("rollout", "validate")
-        )
-        self._nixl_destination_names.extend(train_client_name(rank) for rank in range(self.actor_wg.world_size))
 
     async def initialize_validation_workers(
         self,
@@ -391,7 +381,7 @@ class ElasticExecutor:
     @staticmethod
     async def _await_trainer_operations(
         futures,
-    ) -> None:
+    ) -> list:
         """
         Settle every worker before allowing the next storage transition.
         """
@@ -399,17 +389,16 @@ class ElasticExecutor:
         for result in results:
             if isinstance(result, BaseException):
                 raise result
+        return results
 
     async def _broadcast_trainer_client_infos(self) -> None:
-        updated = [train_client_name(rank) for rank in range(self.actor_wg.world_size)]
+        groups = await self._await_trainer_operations(self.actor_wg.execute_all_async("nixl_get_local_client_info"))
+        updates = merge_client_updates(groups, (train_client_name(rank) for rank in range(self.actor_wg.world_size)))
         await self._await_trainer_operations(
             [
-                self.ps_manager_handle.nixl_broadcast_update_client_infos.remote(
-                    self._nixl_destination_names, updated
-                ),
-                *self.ps_wg.execute_all_async("nixl_wait_for_update_infos", 1),
-                *(server.nixl_wait_for_update_infos.remote(1) for server in self._nixl_servers),
-                *self.actor_wg.execute_all_async("nixl_wait_for_update_infos", 1),
+                *self.ps_wg.execute_all_async("nixl_update_client_infos", updates),
+                *(server.nixl_update_client_infos.remote(updates) for server in self._nixl_servers),
+                *self.actor_wg.execute_all_async("nixl_update_client_infos", updates),
             ]
         )
 
@@ -460,12 +449,6 @@ class ElasticExecutor:
                 return
             self._trainer_state = TrainerState.RESTORING
             await self._await_trainer_operations(self.actor_wg.execute_all_async("nixl_wake_up"))
-            await self._await_trainer_operations(
-                [
-                    *self.actor_wg.execute_all_async("nixl_send_local_info_to", NIXL_META_SERVER_NAME),
-                    self.ps_manager_handle.nixl_wait_for_update_infos.remote(self.actor_wg.world_size),
-                ]
-            )
             await self._broadcast_trainer_client_infos()
             await self._await_trainer_operations(self.actor_wg.execute_all_async("pull_model"))
             if self._deferred_actor_ckpt_path is not None:

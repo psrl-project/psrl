@@ -1,0 +1,2 @@
+# Use independent global coordination for rollout, validation, and reward replicas.
+enable: false

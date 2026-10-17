@@ -22,6 +22,7 @@ defaults:
   - lmcache@lmcache
   - env_worker@env_worker
   - rollout_gateway@rollout_gateway
+  - global_coordinator@global_coordinator
   - _self_
 
 # IP address of parameter server managaer.

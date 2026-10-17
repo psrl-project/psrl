@@ -66,3 +66,21 @@ def test_manager_and_gateway_use_same_tokenizer_source(monkeypatch, tokenizer_pa
 
     copier.assert_called_once_with(tokenizer_path or rm_config.model.path, use_shm=False)
     tokenizer_loader.assert_called_once_with("local_tokenizer", trust_remote_code=False)
+
+
+def test_manager_uses_injected_coordinator_without_creating_an_actor(monkeypatch):
+    config = OmegaConf.create({"model": {"path": "models/judge"}, "rollout": {}})
+    monkeypatch.setattr(_manager_mod, "copy_to_local", MagicMock(return_value="local_tokenizer"))
+    monkeypatch.setattr(_manager_mod, "hf_tokenizer", MagicMock())
+    monkeypatch.setattr(RewardModelManager, "_initialize_reward_replicas", lambda self: None)
+    monkeypatch.setattr(RewardModelManager, "_register_reward_servers", lambda self, replicas: None)
+    remote = MagicMock()
+    monkeypatch.setattr(_manager_mod.ray, "remote", remote)
+    monkeypatch.setattr(_manager_mod.ray, "get", MagicMock())
+    coordinator = MagicMock()
+
+    manager = RewardModelManager("judge", OmegaConf.create({}), config, [], "http://reward", coordinator=coordinator)
+
+    remote.assert_not_called()
+    assert manager.reward_model_coordinator is coordinator, "The manager must retain the injected controller."
+    coordinator.start_busy_loop.remote.assert_called_once_with()

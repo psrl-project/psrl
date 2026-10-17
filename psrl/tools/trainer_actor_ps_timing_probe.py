@@ -21,8 +21,8 @@ from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.single_controller.ray.base import RayResourcePool
 
 from psrl.trainer.constants_ppo import get_ppo_ray_runtime_env
-from psrl.utils.common.nixl_names import NIXL_META_SERVER_NAME
-from psrl.utils.common.worker_naming import ps_agent_name, train_client_name
+from psrl.utils.common.nixl_metadata import merge_client_updates
+from psrl.utils.common.worker_naming import train_client_name
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DIR = REPO_ROOT / "psrl" / "trainer" / "config"
@@ -222,7 +222,6 @@ def _compact_fingerprints(fingerprints: list[dict[str, Any]]) -> list[dict[str, 
 def _run_wake_cycle(
     actor_wg: RayWorkerGroup,
     ps_wg: Any,
-    ps_manager,
     timeout_s: int,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {}
@@ -236,22 +235,13 @@ def _run_wake_cycle(
 
     updated_client_names = [train_client_name(rank) for rank in range(actor_wg.world_size)]
     stage_start = time.perf_counter()
-    gather_refs = actor_wg.execute_all_async("nixl_send_local_info_to", NIXL_META_SERVER_NAME)
-    gather_refs.append(ps_manager.nixl_wait_for_update_infos.remote(actor_wg.world_size))
-    _wait(gather_refs, timeout_s)
+    groups = _wait(actor_wg.execute_all_async("nixl_get_local_client_info"), timeout_s)
+    updates = merge_client_updates(groups, updated_client_names)
     result["gather_infos_s"] = time.perf_counter() - stage_start
 
-    destination_agents = [ps_agent_name(rank) for rank in range(ps_wg.world_size)]
-    destination_agents.extend(updated_client_names)
-    wait_refs = ps_wg.execute_all_async("nixl_wait_for_update_infos", 1)
-    wait_refs.extend(actor_wg.execute_all_async("nixl_wait_for_update_infos", 1))
     stage_start = time.perf_counter()
-    broadcast_ref = ps_manager.nixl_broadcast_update_client_infos.remote(
-        destination_agents,
-        updated_client_names,
-    )
-    ray.get(broadcast_ref, timeout=timeout_s)
-    result["broadcast_send_s"] = time.perf_counter() - stage_start
+    wait_refs = ps_wg.execute_all_async("nixl_update_client_infos", updates)
+    wait_refs.extend(actor_wg.execute_all_async("nixl_update_client_infos", updates))
     _wait(wait_refs, timeout_s)
     result["broadcast_all_receivers_s"] = time.perf_counter() - stage_start
 
@@ -319,7 +309,6 @@ def _print_cycle(world_size: int, cycle: int, result: dict[str, Any]) -> None:
         f"logical_slices={counts.get('logical_slices')} "
         f"arena_counts={worker.get('arena_counts_per_rank')} "
         f"gather_infos_s={result['gather_infos_s']:.6f} "
-        f"broadcast_send_s={result['broadcast_send_s']:.6f} "
         f"broadcast_all_receivers_s={result['broadcast_all_receivers_s']:.6f} "
         f"pull_model_s={result['pull_model_s']:.6f}",
         flush=True,
@@ -520,7 +509,7 @@ def main() -> None:
             if args.reuse_existing_registration:
                 cycle_result = _run_reused_registration_cycle(actor_wg, args.operation_timeout_s)
             else:
-                cycle_result = _run_wake_cycle(actor_wg, ps_wg, ps_manager, args.operation_timeout_s)
+                cycle_result = _run_wake_cycle(actor_wg, ps_wg, args.operation_timeout_s)
             cycle_result["cycle"] = cycle
             if baseline_fingerprints is not None:
                 precision_start = time.perf_counter()

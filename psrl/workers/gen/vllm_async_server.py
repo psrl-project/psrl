@@ -52,6 +52,7 @@ from vllm.v1.engine import PauseMode
 from vllm.v1.engine.async_llm import AsyncLLM
 
 import grpc
+from psrl.utils.common.nixl_metadata import ClientInfoUpdates
 from psrl.utils.common.tms_env import prepend_python_library_path
 from psrl.utils.kv_cache import KVCacheManager, LMCacheConfig
 from psrl.utils.logger import (
@@ -1440,18 +1441,21 @@ class PSRL_vLLMHttpServer(vLLMHttpServer):
         await self.collective_rpc(method="nixl_deregister")
         await self.sleep(level)
 
-    async def nixl_send_local_info_to(self, dst_agent_names: str | list[str]):
+    async def nixl_get_local_client_info(self) -> list[ClientInfoUpdates]:
+        """
+        Export current NIXL descriptors from every inference worker.
+        """
         await self._is_init_nixl_client.wait()
-        await self.collective_rpc(
-            method="nixl_send_local_info_to",
-            args=(dst_agent_names,),
-        )
+        return await self.collective_rpc(method="nixl_get_local_client_info")
 
-    async def nixl_wait_for_update_infos(self, info_num: int):
+    async def nixl_update_client_infos(self, updates: ClientInfoUpdates) -> None:
+        """
+        Acknowledge a metadata update after every inference worker installs it.
+        """
         await self._is_init_nixl_client.wait()
         await self.collective_rpc(
-            method="nixl_wait_for_update_infos",
-            args=(info_num,),
+            method="nixl_update_client_infos",
+            args=(updates,),
         )
 
     ###### KV Cache Management ######

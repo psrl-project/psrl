@@ -38,7 +38,7 @@ def _trainer(elastic=True):
             for name in (
                 "nixl_wake_up",
                 "nixl_sleep",
-                "nixl_send_local_info_to",
+                "nixl_get_local_client_info",
                 "pause_generation",
             )
         }
@@ -55,9 +55,9 @@ def _trainer(elastic=True):
     trainer.actor_wg = MagicMock()
     trainer.actor_wg.world_size = 2
     trainer.actor_wg.execute_all_async.return_value = [object()]
-    trainer.ps_manager_handle = SimpleNamespace(nixl_wait_for_update_infos=_remote_handle())
+    trainer.ps_manager_handle = SimpleNamespace()
     trainer._post_gateway_worker_routing_control = MagicMock()
-    trainer._broadcast_updated_client_infos_from_ps_manager = MagicMock()
+    trainer._broadcast_updated_client_infos = MagicMock()
     trainer.worker_to_ps_idx = {ray_trainer.WorkerKey("validate", 0, 0): 0}
     return trainer
 
@@ -173,13 +173,14 @@ def test_elastic_runtime_hands_off_registration_without_sleeping_workers():
 
 def test_non_elastic_validation_restores_trainer_after_validation_sleep():
     trainer = _trainer(elastic=False)
-    with patch.object(ray_trainer.ray, "get", return_value=True):
+    groups = [{ray_trainer.train_client_name(rank): {"info": bytes([rank]), "temp_mapping": {}}} for rank in range(2)]
+    with patch.object(ray_trainer.ray, "get", return_value=groups):
         trainer.switch_to_trainer_mode()
     trainer.tag_to_server_handles["validate"][0].nixl_sleep.remote.assert_called_once_with(level=2)
     trainer.actor_wg.execute_all_async.assert_has_calls(
         [
             call("nixl_wake_up"),
-            call("nixl_send_local_info_to", ray_trainer.NIXL_META_SERVER_NAME),
+            call("nixl_get_local_client_info"),
             call("pull_model"),
         ]
     )

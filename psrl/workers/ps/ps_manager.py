@@ -931,14 +931,6 @@ class PSManager(RequestStatusTracker):
         self.nixl_meta_server.notify_all_client_temp_mappings()
         psrl_logger.info("NIXL protocol complete.")
 
-    def nixl_wait_for_update_infos(self, info_num: int):
-        """Wait for NIXL clients to send updated infos to the meta server.
-
-        Args:
-            info_num (int): Number of client infos to wait for
-        """
-        self.nixl_meta_server.wait_for_update_infos(info_num)
-
     def shutdown_nixl_server(self):
         """Shutdown NIXL meta server cleanly.
 
@@ -948,15 +940,6 @@ class PSManager(RequestStatusTracker):
             return
         self.nixl_meta_server.shutdown()
         self.nixl_meta_server = None
-
-    def nixl_broadcast_update_client_infos(self, dst_agent_names: list[str], update_client_names: list[str]):
-        """Broadcast updated client infos to specified NIXL clients.
-
-        Args:
-            dst_agent_names (List[str]): List of destination agent names to receive the updates
-            update_client_names (List[str]): List of client names whose infos are updated
-        """
-        self.nixl_meta_server.broadcast_update_client_infos(dst_agent_names, update_client_names)
 
     def bind_ps_worker_group(self, ps_worker_group: PSWorkerGroup):
         """Bind the PS worker group to the PSManager.

@@ -184,9 +184,7 @@ def _trainer_pool_executor(modules):
         events.append(method)
 
     executor.actor_wg.execute_all_async.side_effect = lambda method, *args, **kwargs: [execute(method)]
-    executor.ps_manager_handle = SimpleNamespace(
-        nixl_wait_for_update_infos=SimpleNamespace(remote=AsyncMock()),
-    )
+    executor.ps_manager_handle = SimpleNamespace()
     executor._broadcast_trainer_client_infos = AsyncMock(side_effect=lambda: events.append("broadcast"))
     executor._reclaim_trainer_pool = AsyncMock(side_effect=lambda: events.append("reclaim"))
     return executor, events

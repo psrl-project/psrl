@@ -26,6 +26,7 @@ from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.v1.core.kv_cache_utils import get_max_concurrency_for_kv_cache_config
 from vllm_patches.interfaces import supports_weight_layout
 
+from psrl.utils.common.nixl_metadata import ClientInfoUpdates
 from psrl.utils.common.nixl_names import NIXL_META_SERVER_NAME
 from psrl.utils.common.worker_naming import gen_client_name
 from psrl.utils.converter import create_parameter_mapping
@@ -949,21 +950,17 @@ class vLLMWorkerExtension:
             elapsed_s,
         )
 
-    def nixl_send_local_info_to(self, dst_agent_names: str | list[str]):
+    def nixl_get_local_client_info(self) -> ClientInfoUpdates:
         """
-        Send local NIXL info to the specified destination agents.
+        Export registered NIXL descriptors for this inference worker.
         """
-        if isinstance(dst_agent_names, str):
-            dst_agent_names = [dst_agent_names]
-        self.nixl_storage_client.send_local_info_to(dst_agent_names)
+        return self.nixl_storage_client.get_local_client_info()
 
-    def nixl_wait_for_update_infos(self, info_num: int):
-        """Wait for infos of updated clients for global synchronization.
-
-        Args:
-            info_num (int): Number of infos to wait for.
+    def nixl_update_client_infos(self, updates: ClientInfoUpdates) -> None:
         """
-        self.nixl_storage_client.wait_for_update_infos(info_num)
+        Acknowledge updated NIXL descriptors after installing them locally.
+        """
+        self.nixl_storage_client.update_client_infos(updates)
 
     def nixl_log_shard_info(self, label: str = "", max_elements: int = 8):
         """Debug log local NIXL shard info on this vLLM worker."""
