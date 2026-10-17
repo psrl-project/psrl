@@ -9,6 +9,7 @@ from verl.utils.device import get_device_id
 from verl.workers.rollout.vllm_rollout.utils import vLLMColocateWorkerExtension
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.distributed.kv_transfer import get_kv_transfer_group
+from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.v1.core.kv_cache_utils import get_max_concurrency_for_kv_cache_config
 from vllm_patches.interfaces import supports_weight_layout
 
@@ -74,6 +75,20 @@ class vLLMWorkerExtension(vLLMColocateWorkerExtension):
             # Ensure all operations are completed before returning
             torch.cuda.synchronize()
         return loaded_params
+
+    def finalize_weight_loading(self) -> None:
+        """
+        Convert freshly loaded weights to runtime format and wait for completion.
+        """
+        model = self.model_runner.model
+        if isinstance(model, CUDAGraphWrapper):
+            model = model.unwrap()
+        process_weights_after_loading(
+            model,
+            self.model_runner.vllm_config.model_config,
+            self.model_runner.device,
+        )
+        torch.cuda.synchronize()
 
     # ----------------------------- NIXL Related -----------------------------
     # Because the model is on another process since vllm V1, we must call the nixl methods via rpc
