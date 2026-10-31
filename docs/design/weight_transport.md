@@ -4290,7 +4290,7 @@ train step v 完成
 
 | # | 优化 | 收益 | 独立落地 |
 |---|---|---|---|
-| **0** | **NIXL 新 API 的 micro-benchmark + 升级到 1.5.0** | **已完成**（`tests/nixl/bench_nixl_prepped_xfer.py`）。确认收益成立（5~30×）但有两个前提，见 §3.6.3。Dockerfile 与 install 脚本均 pin **NIXL v1.5.0 + UCX v1.23.x**，否则 Nx5 strided 不可用 | 已做 |
+| **0** | **NIXL 新 API 的 micro-benchmark + 升级到 1.5.0** | **已完成**（`tests/nixl/bench_nixl_prepped_xfer.py`）。确认收益成立（5~30×）但有两个前提，见 §3.6.3。Dockerfile 与 install 脚本均 pin **NIXL v1.5.2 + UCX v1.23.x**，否则 Nx5 strided 不可用 | 已做 |
 | 1 | `prep_xfer_dlist` / `make_prepped_xfer` 替代 per-key `initialize_xfer` | **实测 5~30× 加速且随 descriptor 数放大**（16384 条下 0.014ms vs 0.424ms）。**索引必须用 int32 ndarray**，传 Python list 会慢 15× 并抵消全部收益（§3.6.3） | 是 |
 | 2 | colocate 走 CUDA IPC + stage 边界 offload（`discard(("kv_cache",))`） | 切换成本从「全量 PCIe 往返 + 重握手」降到「权重 D2H/H2D + KV cache 重分配」，**且 colocate 路径完全不碰 NIXL 注册**（§3.7.3），省掉大 MoE 下 14 万次 `register_memory` | 是 |
 | 3 | Nx5 strided 描述符 | 删掉非连续 shard 的中转缓冲（**GPU 上，不是 CPU**——见 §3.6 的更正）与槽位串行等待。**槽位串行等待是主要收益**，显存次之 | 是 |

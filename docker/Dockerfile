@@ -22,7 +22,7 @@ ARG INSTALL_FLASH_ATTN_3=1
 # component without rewriting the installation graph. Patch compatibility must
 # be revalidated whenever one of these defaults changes.
 ARG UCX_REF=v1.23.x
-ARG NIXL_REF=v1.5.0
+ARG NIXL_REF=v1.5.2
 ARG VLLM_REF=v0.30.0
 ARG VERL_REF=dc709af
 ARG TRANSFER_QUEUE_REF=434f8c476b4be24bc087e6e95070e64efcc739f9
