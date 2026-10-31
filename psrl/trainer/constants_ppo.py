@@ -24,6 +24,11 @@ _HOST_RUNTIME_ENV_KEYS = (
     "no_proxy",
     "NO_PROXY",
     "PSRL_HARNESS_RUNTIME_ROOT",
+    "PSRL_LOGGING_LEVEL",
+    "WANDB_MODE",
+    "NIXL_PLUGIN_DIR",
+    "LD_LIBRARY_PATH",
+    "LD_PRELOAD",
 )
 
 
