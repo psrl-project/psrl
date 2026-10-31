@@ -1,0 +1,78 @@
+- name: mini_swe_claude_code_subagent
+  _target_: psrl.workers.agent_loop.loops.mini_swe_harness_agent_loop.MiniSWEHarnessAgentLoop
+  sandbox_config:
+    # p3b, not the in-process docker backend: the service prices a sandbox from
+    # what it measures and admits the burst through one ledger.
+    backend: p3b
+    sandbox_cpu_count: 2
+    collect_resource_metrics: ${oc.decode:${oc.env:PSRL_SANDBOX_COLLECT_RESOURCE_METRICS,false}}
+    snapshot_verifier: true
+    environment:
+      image: "swebench-sentinel-override-per-instance"
+      cwd: "/testbed"
+      container_timeout: "2h"
+    rollout_environment:
+      memory: "30g"
+      resource_class: rollout
+    grader_environment:
+      memory: "30g"
+      resource_class: grader
+  harness:
+    kind: claude_code
+    executable: claude
+    # Post-rollout integrity scan dispatches on the trajectory output format, so
+    # this must match what the CLI emits (`--output-format stream-json`).
+    trajectory_format: claude_code_stream_json
+    permission_mode: acceptEdits
+    # Preserve Claude Code's stock system prompt. Mini-SWE task and integrity
+    # constraints are supplied by `build_harness_prompt` as the user message.
+    setting_sources: user
+    tools: null
+    allowed_permissions:
+      - "Bash(*)"
+      - "Read(*)"
+      - "Edit(*)"
+      - "Write(*)"
+      - WebSearch
+      - WebFetch
+      - Glob
+      - Grep
+      - LS
+      - NotebookRead
+      - NotebookEdit
+      - TodoWrite
+      - Task
+      - Agent
+    max_output_tokens: 16384
+    thinking_enabled: true
+    thinking_budget_tokens: null
+    reasoning_effort: null
+    interleaved_thinking: true
+    supported_capabilities:
+      - thinking
+      - adaptive_thinking
+      - interleaved_thinking
+    disable_prompt_caching: true
+    disable_experimental_betas: false
+    # Keep Claude Code's subagent tool enabled. Its model calls arrive with the
+    # native agent headers, which the session router turns into TITO agent
+    # metadata; the main_only policy in the launch script then keeps those rows
+    # as context and trains only the main trajectory.
+    subagents_enabled: true
+    # Parallel subagents share one sandbox; keep their writes out of the main
+    # artifact directory.
+    workspace_isolation: logical
+    # Make the validation episode exercise the delegation path deterministically.
+    prompt_suffix: |
+
+      Subagent validation: before you edit any file, delegate one independent
+      repository investigation to a subagent with Claude Code's subagent tool
+      (Agent, also exposed as Task). The subagent is a read-only investigator:
+      have it inspect the code and report findings, and tell it not to modify
+      the main task root. Apply the fix yourself after using its report.
+    compaction:
+      enabled: true
+      compact_percent: 87.5
+    # Canonical tool-call format guidance appended to the Claude Code system prompt
+    # (--append-system-prompt): system_prompt_mode: append -> injected, none -> not injected.
+    system_prompt_mode: none

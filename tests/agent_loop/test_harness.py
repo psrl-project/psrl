@@ -861,6 +861,22 @@ def test_subagent_example_config_enables_delegation_without_training_it() -> Non
     assert configs[0].sandbox_config.environment.cwd == "/testbed"
 
 
+def test_claude_code_subagent_example_config_enables_delegation_without_training_it() -> None:
+    path = Path(__file__).parents[2] / "examples/mini_swe/config/swebench_harness_config_cc_subagent.yaml"
+    configs = OmegaConf.load(path)
+
+    assert [item.name for item in configs] == ["mini_swe_claude_code_subagent"]
+    harness = HarnessConfig.from_value(configs[0].harness)
+    assert harness.kind == "claude_code"
+    assert harness.subagents_enabled is True
+    assert harness.workspace_isolation == "logical"
+    # The subagent tool is named Agent in current Claude Code and was Task before it;
+    # both must be admitted for the delegation path to be available.
+    assert {"Agent", "Task"} <= set(harness.allowed_permissions)
+    assert "delegate" in harness.prompt_suffix.lower()
+    assert configs[0].sandbox_config.environment.cwd == "/testbed"
+
+
 def test_task_context_only_enables_compatible_clean_snapshot() -> None:
     state_policy = SandboxStatePolicy(enabled=True)
     runtime_mount = MountSpec("/host/runtimes/claude_code", "/opt/harness", read_only=True)
