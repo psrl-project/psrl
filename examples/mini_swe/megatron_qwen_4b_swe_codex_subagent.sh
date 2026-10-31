@@ -5,7 +5,15 @@ staleness=${1:-1}
 project_name=psrl_swe_smith
 experiment_name=GRPO-Qwen-4B-swe_smith-codex-subagent-megatron-staleness_${staleness}
 
-source ${PSRL_WORKSPACE}/env/env.sh
+SCRIPT_PYTHON=$(command -v python || true)
+if [[ -n "${PSRL_WORKSPACE:-}" && -f "${PSRL_WORKSPACE}/env/env.sh" ]]; then
+    source "${PSRL_WORKSPACE}/env/env.sh"
+elif [[ -n "${PSRL_WORKSPACE:-}" && -f "${PSRL_WORKSPACE}/env.sh" ]]; then
+    source "${PSRL_WORKSPACE}/env.sh"
+fi
+if [[ -n "$SCRIPT_PYTHON" ]]; then
+    export PATH="$(dirname "$SCRIPT_PYTHON"):$PATH"
+fi
 
 # Read-only harness runtime trees (native Claude Code / Codex, no Node).
 # The canonical trees live on the shared filesystem and the p3b nodes allowlist
@@ -23,6 +31,19 @@ HOME=${PSRL_WORKSPACE}
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 PSRL_PATH=$(cd "$SCRIPT_DIR/../.." && pwd)
 export PYTHONPATH="$PSRL_PATH${PYTHONPATH:+:$PYTHONPATH}"
+
+# Staged runtime libraries and NIXL backend plugins. The wheel's compiled
+# default is a build path and the wheel's own plugins may be built against a
+# different NIXL API; this file points at the shared runtime tree.
+source "${PSRL_PATH}/scripts/nixl_env.sh"
+# The cluster's NIXL library and the staged plugins are the API-1 pair. Put the
+# cluster lib first so the wheel's API-2 copy cannot win through RUNPATH.
+export LD_LIBRARY_PATH="/apdcephfs_zwfy10/share_303541817/lhy/anaconda3/lib:${LD_LIBRARY_PATH:-}"
+export LD_PRELOAD="/apdcephfs_zwfy10/share_303541817/lhy/anaconda3/lib/libnixl.so${LD_PRELOAD:+:${LD_PRELOAD}}"
+export NIXL_PLUGIN_DIR=${PSRL_NIXL_PLUGIN_DIR:-/apdcephfs_zwfy10/share_303541817/lhy/nixl_runtime/plugins}
+if [[ -n "$SCRIPT_PYTHON" ]]; then
+    export PATH="$(dirname "$SCRIPT_PYTHON"):$PATH"
+fi
 
 # --- Pre-flight checks ---
 echo "=== Pre-flight checks ==="
@@ -75,7 +96,8 @@ echo "=== Sandbox reclamation done ==="
 
 # --- Model ---
 # Qwen3.5-4B has max_position_embeddings=262144, so do not patch config.json.
-HF_MODEL_PATH=/apdcephfs_zwfy_303760348/share_303760348/ls/models/Qwen3.5-4B
+HF_MODEL_PATH=${HF_MODEL_PATH:-/jizhicfs/lhy/models/Qwen3.5-4B}
+CUSTOM_CHAT_TEMPLATE=${CUSTOM_CHAT_TEMPLATE:-${PSRL_PATH}/examples/mini_swe/config/qwen35_no_think_strip.jinja}
 
 # --- Data ---
 # Both splits are SkyRL-v0-293: 293 train and 23 validation SWE-bench Verified rows.
@@ -109,19 +131,18 @@ default_local_dir=$CKPT_ROOT/checkpoint/$experiment_name
 # which carries turn sequence numbers and the compact snapshot format.
 agent_loop_config_path=${PSRL_PATH}/examples/mini_swe/config/swebench_harness_config_codex_subagent.yaml
 
-# --- Cluster layout (32 GPUs total: 16 for rollout, 16 for train) ---
-# Rollout: TP=2 (4B is small, TP=2 is sufficient for inference).
-#
-# Train: TP=4, PP=1 (4B fits easily without pipeline parallelism, DP=4).
-# Val: TP=2 (matches rollout engine, 8 instances).
-GEN_TP=1
-GEN_PP=1
+# --- Cluster layout (16 GPUs: one node of rollout engines, one node of training ranks) ---
+# Rollout: TP=1, so one engine per GPU.
+# Train: TP=4, CP=2 by default; a model whose head layout does not divide by
+# TP*CP needs its own values here.
+GEN_TP=${GEN_TP:-1}
+GEN_PP=${GEN_PP:-1}
 
-VAL_TP=1
+VAL_TP=${VAL_TP:-1}
 
-TRAIN_TP=4
-TRAIN_PP=1
-TRAIN_CP=2
+TRAIN_TP=${TRAIN_TP:-4}
+TRAIN_PP=${TRAIN_PP:-1}
+TRAIN_CP=${TRAIN_CP:-2}
 
 NNODES=2
 NGPUS_PER_NODE=8
@@ -162,7 +183,7 @@ clip_ratio_high=0.28
 # charged separately rather than to the same budget.
 max_turns=80
 val_max_turns=160
-trajectory_timeout=1800
+trajectory_timeout=${TRAJECTORY_TIMEOUT:-1800}
 # An episode can still exhaust the trajectory budget before it exhausts its turns, and
 # one that does is stopped at the deadline with its partial patch and trajectory kept and
 # graded, instead of being cancelled and re-run with all of its turns discarded.
@@ -179,10 +200,10 @@ enable_overlong_buffer=False
 overlong_buffer_len=$((1024 * 30))
 overlong_penalty_factor=1.0
 loss_agg_mode="token-mean"
-train_prompt_bsz=8
-n_resp_per_prompt=16
+train_prompt_bsz=${TRAIN_BSZ:-8}
+n_resp_per_prompt=${ROLLOUT_N:-16}
 n_resp_per_prompt_val=1
-train_prompt_mini_bsz=8
+train_prompt_mini_bsz=${TRAIN_MINI_BSZ:-$train_prompt_bsz}
 
 # --- Sampling (from OpenClaw 4B) ---
 temperature=1
@@ -280,7 +301,7 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config --conf
     gen_actor_rollout_ref.rollout.max_model_len=${max_model_len} \
     \
     train_actor_rollout_ref.model.path="$HF_MODEL_PATH" \
-    train_actor_rollout_ref.model.custom_chat_template=${PSRL_PATH}/examples/mini_swe/config/qwen35_no_think_strip.jinja \
+    train_actor_rollout_ref.model.custom_chat_template=${CUSTOM_CHAT_TEMPLATE} \
     train_actor_rollout_ref.model.use_fused_kernels=False \
     train_actor_rollout_ref.model.use_remove_padding=True \
     train_actor_rollout_ref.rollout.enable_chunked_prefill=True \
@@ -318,7 +339,6 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config --conf
     train_actor_rollout_ref.actor.megatron.tensor_model_parallel_size=${TRAIN_TP} \
     train_actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${TRAIN_PP} \
     train_actor_rollout_ref.actor.megatron.context_parallel_size=${TRAIN_CP} \
-    train_actor_rollout_ref.actor.megatron.vanilla_mbridge=False \
     +train_actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform \
     +train_actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full \
     +train_actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1 \
@@ -365,4 +385,4 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config --conf
     trainer.test_freq=5 \
     trainer.save_freq=50 \
     trainer.total_epochs=100 \
-    trainer.total_training_steps=200 2>&1 | tee ${experiment_name}.log
+    trainer.total_training_steps=${TOTAL_STEPS:-200} 2>&1 | tee ${experiment_name}.log
