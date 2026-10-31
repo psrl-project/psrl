@@ -405,7 +405,8 @@ class Harness(ABC):
         stdout_path = str(PurePosixPath(self._log_dir) / "stdout.log")
         argv = self.build_command(prompt, runtime)
         command = (
-            f"{shlex.join([str(item) for item in argv])} > {shlex.quote(stdout_path)} 2> {shlex.quote(stderr_path)}"
+            f"{shlex.join([str(item) for item in argv])} > {shlex.quote(stdout_path)} "
+            f"2> {shlex.quote(stderr_path)} < /dev/null"
         )
         env = dict(self.build_env(runtime))
         if self.config.workspace_isolation == "logical":
