@@ -302,6 +302,12 @@ def build_worker_registration_payload(
     worker_id: str | None = None,
 ) -> dict[str, Any]:
     labels = {
+        # SMG's PSRL worker selector admits a candidate only when it declares
+        # which request class it serves; a worker without this label is dropped
+        # before any other selection stage runs, which leaves queued requests
+        # pending forever. These engines serve both training and validation
+        # rollouts, so they declare both classes.
+        "psrl_request_scope": "all",
         "max_model_len": str(max_model_len),
         "dp_size": str(dp_size),
         "tp_size": str(tp_size),

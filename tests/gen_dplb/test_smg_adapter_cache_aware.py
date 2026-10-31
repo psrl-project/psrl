@@ -154,6 +154,20 @@ def test_build_rollout_router_args_cache_aware_v1():
 
 
 @pytest.mark.unit
+def test_worker_registration_payload_declares_request_scope():
+    """The PSRL selector drops workers that do not declare a request scope."""
+    payload = build_worker_registration_payload(
+        url="grpc://127.0.0.1:30000",
+        model_id="my-model",
+        max_model_len=4096,
+        dp_size=1,
+        tp_size=1,
+        pp_size=1,
+    )
+    assert payload["labels"]["psrl_request_scope"] == "all"
+
+
+@pytest.mark.unit
 def test_worker_registration_payload_includes_worker_id():
     payload = build_worker_registration_payload(
         url="grpc://127.0.0.1:30000",
