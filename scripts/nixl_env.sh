@@ -48,6 +48,10 @@ if [ -z "${LOCAL_NODE_IP:-}" ]; then
 fi
 
 export LD_LIBRARY_PATH="${_PSRL_CONDA_LIB}:${LD_LIBRARY_PATH:-}"
+# The nixl_cu12 wheel's bindings have a RUNPATH to an API-2 libnixl, while the
+# staged runtime tree and this cluster's libnixl are the API-1 pair. Preload the
+# cluster library so the bindings and plugins stay on the same API.
+export LD_PRELOAD="${_PSRL_CONDA_LIB}/libnixl.so${LD_PRELOAD:+:${LD_PRELOAD}}"
 export NIXL_PLUGIN_DIR="${_PSRL_NIXL_PLUGINS}"
 
 # Device list and RoCE reachability mode, taken from the cluster's own env
