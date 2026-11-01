@@ -3339,9 +3339,10 @@ sharding 复核，两轮换版本），不跑完整 RL。覆盖与结论：
 （148 GB/s 聚合、8 读者）。EP→TP 重分片的发布副本是唯一随模型/并行组合增长的新项
 （235B 23.5 GiB/rank），由 `publish_copy_budget_mb` 封顶，需按显存预算配置。
 
-两个架构边界（均已写入 FINDINGS §14）：GDN 的 `linear_attn.in_proj_ba` 在 block FP8 下
-必须保持 bf16（64 行 tile 不能被 TP shard 切开），因此 **Qwen3.5 的 FP8-train + FP8-rollout
-组合当前不支持**；DeepSeek-V3/MLA 的 `W_UK_T`/`W_UV` 是 `kv_b_proj` 的运行时吸收结果，
+两个架构边界（均已写入 FINDINGS §14）：GDN 的 `linear_attn.in_proj_ba` 比一个 128 行
+tile 小，rollout 侧按参数整体量化（见 `fp8_weight_transport.md` §9.4），但 FP8-train 侧在
+TP 切分下给不出整 tile 的 scale，因此 **Qwen3.5 的 FP8-train + FP8-rollout 组合当前不支持**；
+DeepSeek-V3/MLA 的 `W_UK_T`/`W_UV` 是 `kv_b_proj` 的运行时吸收结果，
 不参与传输；每次 pull 落地后读者在 `weights_already_processed()` 下调用 vLLM 上游
 `process_weights_after_loading`（MLA 吸收、MoE kernel、量化 stamp 一并重建，
 实测 4.5–8.2 ms），不支持的量化方法回退到仅 MLA 的 refresh。

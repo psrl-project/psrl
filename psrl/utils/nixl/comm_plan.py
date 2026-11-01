@@ -500,6 +500,8 @@ class CommunicationPlanner:
                 target_info = clients[target_client]
 
                 for key, target_tensor_info in target_info.tensor_infos.items():
+                    if getattr(target_tensor_info.sharding, "local_only", False):
+                        continue
                     # Use the precomputed key->sources mapping and a set for O(1) discard,
                     # avoiding O(G × C_s) per-key scan and O(C_s) list.remove().
                     if key not in key_to_srcs:

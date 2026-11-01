@@ -8,10 +8,6 @@ defaults:
 
 model:
   gen_quantization: fp8
-  # GDN's `in_proj_ba` is quantised in 64-row tiles; a TP2 shard would cut a tile, so it
-  # stays bf16. Production FP8 rollouts of Qwen3.5 need the same exclusion.
-  fp8_ignored_layer_suffixes:
-    - linear_attn.in_proj_ba
 
 logging:
   path: ${oc.env:PSRL_REPO}/tests/nixl/log/qwen35_4b_fp8

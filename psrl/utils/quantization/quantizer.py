@@ -113,6 +113,11 @@ class VllmFp8BlockQuantizer(PublishQuantizer):
 
     def can_quantize_in_place(self, shard: torch.Tensor) -> bool:
         """Whether the fused kernel can write straight into a publish copy."""
+        block = self.plan.block
+        assert block is not None, "A quantized plan must declare a block."
+        if any(size % tile != 0 for size, tile in zip(shard.shape[-2:], block)):
+            # A partial tile is padded before it is quantized, which the fused kernel does not do.
+            return False
         from psrl.utils.nixl import fp8_kernels
 
         return fp8_kernels.available(shard)

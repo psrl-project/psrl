@@ -265,6 +265,9 @@ class NIXLStorageClient:
         #: the scale metadata that the unified sharding needs.
         self._reader_quantization = False
         self._quantized_pairs: dict[str, tuple[object, NIXLSharding, object, tuple[int, int]]] = {}
+        #: Keys this client computes and keeps, such as a quantization unit's scale,
+        #: removed from the sharding the server plans over.
+        self._local_only_shardings: dict[str, NIXLSharding] = {}
         self.publish_copy_bytes = 0
         # Train dtype to rollout dtype. Shards of a cast dtype are published as copies in the rollout dtype.
         self._publish_casts: dict[torch.dtype, torch.dtype] = {}
@@ -1263,6 +1266,8 @@ class NIXLStorageClient:
             # round robin across its bounded contiguous slot pool.
             if sharding_dict is None:
                 sharding_dict = {}
+            if self._local_only_shardings:
+                sharding_dict = {**sharding_dict, **self._local_only_shardings}
             _uncontiguous_tensor_mapping: dict[
                 tuple[Any, Any], list[tuple[str, tuple[int, ...], torch.Tensor]]
             ] = {}  # (shape, dtype) -> [key, shard_idx, uncontiguous_tensor]
@@ -1987,12 +1992,27 @@ class NIXLStorageClient:
         """Versions seen since `begin_version_observation`, or empty if not recording."""
         return set(getattr(self, "_observed_versions", set()))
 
+    def plan_sharding(self, sharding_dict: dict[str, NIXLSharding]) -> dict[str, NIXLSharding]:
+        """
+        The sharding the transfer plan is built over.
+
+        A quantization unit's scale is computed by the rollout from its members' bytes and
+        never travels, so it stays out of the plan and is merged back for local registration.
+        Every other key is planned as usual.
+        """
+        local_only = {
+            key: sharding for key, sharding in sharding_dict.items() if getattr(sharding, "local_only", False)
+        }
+        self._local_only_shardings.update(local_only)
+        return {key: sharding for key, sharding in sharding_dict.items() if key not in local_only}
+
     def send_local_sharding(self, sharding_dict: dict[str, NIXLSharding]):
         """
         Send local sharding to the server.
         """
         assert self._is_connected, "Not connected to server"
-        self.agent.send_notif(self.server_name, encode(NotifKind.SHARDING, {self.client_name: sharding_dict}))
+        announced = self.plan_sharding(sharding_dict)
+        self.agent.send_notif(self.server_name, encode(NotifKind.SHARDING, {self.client_name: announced}))
 
     def send_local_info(self):
         """

@@ -458,6 +458,11 @@ PSRL 对 scale 做同一件事，且比 amax 更简单——§3 已证明 scale 
 - **这不会消除模型接入工作，只会把它从「写一套 layout」降到「写残差」。**
   不要宣称自动接入等于零工作量——`exclude_substr("rotary_emb.inv_freq")`
   这类条目依然要人判断。
+- **小于一个 tile 的融合参数按参数整体量化。** rollout 的量化单位是它自己消费的张量，
+  不是 checkpoint 视图。Qwen3.5 GDN 的 `in_proj_ba` 只有 `2 × linear_num_value_heads` 行，
+  checkpoint 里的 `in_proj_b`/`in_proj_a` 各切掉半个 tile；读取端把两个视图的源字节按
+  目标行序组装，用 vLLM 的 `per_block_cast_to_fp8` 语义（补齐到 128 行再裁回）整体量化一次，
+  scale 以参数名登记。这套「`quant_unit`」只改变读取端的量化粒度，wire 仍是 HF 视图。
 
 ---
 

@@ -105,6 +105,18 @@ removes the repeated BF16 read and quantization for identical target shards. Dif
 target layouts form different groups and still quantize independently; the
 layout-independent canonical-chunk cache is phase 2 (implemented, see below).
 
+### Quantization units
+
+A fused parameter can be smaller than one scale tile. Qwen3.5's GDN `in_proj_ba` is
+64 rows, so its checkpoint views `in_proj_b` and `in_proj_a` each cut the 128 row tile
+and have no scale block of their own. The converter marks both views with `quant_unit`
+and exports the parameter's scale once, as a `local_only` key the transfer plan never
+sees. The reader stages each member's bytes at its destination rows, then quantizes the
+assembled parameter in one pass at the end of the pull and writes the scale together
+with the members' FP8 views. Members are read upstream by every replica rather than from
+a designate: a designate's quantized output is only meaningful together with the scale,
+and the scale does not exist until that pull ends.
+
 ## Version and failure behavior
 
 - A reader of version v reads BF16 source shards stamped v. If the optimizer starts

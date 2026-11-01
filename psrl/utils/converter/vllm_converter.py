@@ -38,7 +38,7 @@ from psrl.utils.converter.vllm_module_info import (
     is_moe_experts_module,
 )
 from psrl.utils.converter.weight_layout_plan import PlanExecutor
-from psrl.utils.nixl.block_fp8 import block_scales_of, scale_key_of, scale_view
+from psrl.utils.nixl.block_fp8 import block_scales_of, scale_key_of, scale_view, tile_aligned
 from psrl.utils.nixl.nixl_spec import NIXLSharding
 from psrl.utils.quantization import QuantizationPlan, plan_dtype
 
@@ -202,6 +202,7 @@ class VllmConverter(BaseConverter):
                     continue
                 fused_scale = fused_auxiliary(module, param_name, param, self.quantization)
 
+                views = []
                 for converted in executor.execute(full_name, param, module):
                     sharding = converted.sharding
                     if sharding is None:
@@ -221,10 +222,32 @@ class VllmConverter(BaseConverter):
                     converted_param, sharding = self.maybe_reshape_qkv_to_3d(converted_name, converted_param, sharding)
                     converted_state_dict[converted_name] = converted_param
                     sharding_dict[converted_name] = sharding
-                    if fused_scale is not None:
+                    views.append((converted_name, converted_param, sharding))
+
+                if fused_scale is None:
+                    continue
+                block = self.quantization.block
+                assert block is not None, "A quantized rollout parameter must have a scale tile."
+                if all(tile_aligned(view, param, fused_scale, block) for _, view, _ in views):
+                    for converted_name, converted_param, sharding in views:
                         scale_name = scale_key_of(converted_name)
-                        converted_state_dict[scale_name] = scale_view(converted_param, param, fused_scale)
+                        converted_state_dict[scale_name] = scale_view(converted_param, param, fused_scale, block)
                         sharding_dict[scale_name] = deepcopy(sharding)
+                    continue
+                # The rollout quantizes this parameter as one tensor, and a view that cuts a
+                # tile has no scale of its own. Export the parameter's scale once and let every
+                # view declare the unit it feeds, so the reader quantizes them together.
+                unit = canonical_vllm_name(full_name)
+                for converted_name, converted_param, sharding in views:
+                    assert converted_param.dim() == 2, (
+                        f"{converted_name}: a quantization unit spans 2D views, got {converted_param.dim()}D."
+                    )
+                    sharding.quant_unit = unit
+                scale_sharding = NIXLSharding.default()
+                scale_sharding.quant_unit = unit
+                scale_sharding.local_only = True
+                converted_state_dict[scale_key_of(unit)] = fused_scale
+                sharding_dict[scale_key_of(unit)] = scale_sharding
 
             # Export only buffers with an explicit layout rule.
             for buf_name, buf in module.named_buffers(recurse=False):

@@ -147,6 +147,19 @@ class vLLMWorkerExtension(vLLMColocateWorkerExtension):
             parameter_mapping=param_mapping,
             quantization=QuantizationPlan.from_config(quantization),
         )
+        unit_layers = sorted(
+            {
+                sharding.quant_unit
+                for sharding in self.local_sharding_dict.values()
+                if getattr(sharding, "quant_unit", None) is not None
+            }
+        )
+        if unit_layers and not self.nixl_storage_client._reader_quantization:
+            raise ValueError(
+                f"This model fuses {len(unit_layers)} parameter(s) whose checkpoint views are smaller "
+                f"than one quantization tile, first {unit_layers[0]!r}. The rollout must quantize them "
+                "as one unit, which requires psrl.nixl.reader_quantization=true."
+            )
 
     def nixl_protocol(self, model_config: DictConfig, mode: str = "full", quantization: dict | None = None):
         """Run the NIXL server protocol.

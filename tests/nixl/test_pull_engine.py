@@ -17,7 +17,7 @@ import pytest
 import torch
 from omegaconf import OmegaConf
 from psrl.utils.common.worker_naming import gen_client_name, model_role_of, train_client_name
-from psrl.utils.nixl.block_fp8 import scale_shape
+from psrl.utils.nixl.block_fp8 import quantize_blockwise, scale_shape
 from psrl.utils.nixl.client import NIXLStorageClient
 from psrl.utils.nixl.comm_plan import CommunicationPlanner
 from psrl.utils.nixl.handshake_notif import NotifKind
@@ -1137,3 +1137,136 @@ def test_reader_quantization_tiles_a_grouped_moe_shaped_key(monkeypatch, train_t
     cluster = _fp8_cluster(train_tp, gen_tp, instances=1, peer_diffusion=True, reader_quantization=True)
     cluster.pull(epoch=1)
     _judge_fp8(cluster, version=7)
+
+
+# --- A fused parameter whose checkpoint views cut a quantization tile ---------
+
+#: Two 24-row halves of one 48-row parameter. Against BLOCK's 32-row tile, neither half
+#: is a whole tile, so the rollout can only quantize them together.
+UNIT_MEMBER_ROWS = 24
+UNIT_MEMBERS = {
+    "layers.0.gdn.in_proj_b.weight": (UNIT_MEMBER_ROWS, HIDDEN),
+    "layers.0.gdn.in_proj_a.weight": (UNIT_MEMBER_ROWS, HIDDEN),
+}
+UNIT_ID = "layers.0.gdn.in_proj_ba.weight"
+UNIT_SCALE = UNIT_ID + "_scale_inv"
+
+
+def _unit_cluster(train_tp, gen_tp, instances=2, peer_diffusion=True):
+    """A rollout whose fused parameter is quantized as one unit.
+
+    The checkpoint stores `in_proj_b` and `in_proj_a` separately, so each wire view is
+    half of the 64-row parameter and neither is a whole 128-row tile. The trainer keeps
+    both BF16; the rollout assembles them and quantizes the parameter once.
+    """
+    cluster = Cluster.__new__(Cluster)
+    cluster.bus = NotifBus()
+    cluster.declared, cluster.states = {}, {}
+    cluster.units, cluster.expected = {}, {}
+    kinds = {}
+    torch.manual_seed(11)
+    global_b = torch.randn(UNIT_MEMBER_ROWS, HIDDEN).to(torch.bfloat16)
+    global_a = torch.randn(UNIT_MEMBER_ROWS, HIDDEN).to(torch.bfloat16)
+    trainer_rows = UNIT_MEMBER_ROWS // train_tp
+    for r in range(train_tp):
+        name = f"NIXLTrainClient_{r}"
+        kinds[name] = NIXLClientType.PUSH_SIDE
+        cluster.states[name] = {
+            "layers.0.gdn.in_proj_b.weight": global_b[r * trainer_rows : (r + 1) * trainer_rows].clone(),
+            "layers.0.gdn.in_proj_a.weight": global_a[r * trainer_rows : (r + 1) * trainer_rows].clone(),
+        }
+        cluster.declared[name] = {key: _sharding(0, train_tp, r) for key in UNIT_MEMBERS}
+    gen_rows = UNIT_MEMBER_ROWS // gen_tp
+    for i in range(instances):
+        for r in range(gen_tp):
+            name = f"NIXLGenClient_I{i}_R{r}"
+            kinds[name] = NIXLClientType.PULL_SIDE
+            fused = torch.zeros((2 * gen_rows, HIDDEN), dtype=torch.float8_e4m3fn)
+            state = {
+                "layers.0.gdn.in_proj_b.weight": fused[:gen_rows],
+                "layers.0.gdn.in_proj_a.weight": fused[gen_rows:],
+                UNIT_SCALE: torch.zeros(scale_shape(fused.shape, BLOCK), dtype=torch.float32),
+            }
+            declared = {key: _sharding(0, gen_tp, r) for key in UNIT_MEMBERS}
+            for sharding in declared.values():
+                sharding.quant_unit = UNIT_ID
+            declared[UNIT_SCALE] = NIXLSharding.default()
+            declared[UNIT_SCALE].quant_unit = UNIT_ID
+            declared[UNIT_SCALE].local_only = True
+            cluster.states[name], cluster.declared[name] = state, declared
+            cluster.units[(i, r)] = fused
+            lo, hi = r * gen_rows, (r + 1) * gen_rows
+            cluster.expected[(i, r)] = torch.cat([global_b[lo:hi], global_a[lo:hi]])
+
+    from psrl.utils.nixl.server import NIXLMetaServer
+
+    cluster.clients = {}
+    for name, kind in kinds.items():
+        client = NIXLStorageClient(
+            client_name=name,
+            server_name="server",
+            use_gpu=False,
+            client_type=kind,
+            nixl_config=CONFIG,
+            binded_agent=MemcpyAgent(name, cluster.bus),
+        )
+        if kind is NIXLClientType.PUSH_SIDE:
+            client.set_publish_quantization(FP8_PLAN, reader_quantization=True)
+        else:
+            client.set_reader_quantization(FP8_PLAN)
+        cluster.clients[name] = client
+    # The server plans over what each client announces, which leaves the unit's
+    # reader-computed scale out of the plan.
+    announced = {n: c.plan_sharding(cluster.declared[n]) for n, c in cluster.clients.items()}
+
+    server = NIXLMetaServer.__new__(NIXLMetaServer)
+    server.client_sharding_dicts = {n: copy.deepcopy(d) for n, d in announced.items()}
+    server.client_unified_sharding_dicts, server.finest_shard_meshes = {}, {}
+    server._agents_reported = {kind: set() for kind in NotifKind}
+    server._agents_reported[NotifKind.SHARDING] = set(announced)
+    server.make_unified_sharding()
+    unified = server.client_unified_sharding_dicts
+
+    for name, client in cluster.clients.items():
+        client.register_local_tensors(cluster.states[name], unified[name])
+    if peer_diffusion:
+        _train_ranks_remote(cluster.clients)
+    infos = {name: c.local_client_info for name, c in cluster.clients.items()}
+    plan = CommunicationPlanner(peer_diffusion=peer_diffusion).make_comm_plan(infos)
+    for client in cluster.clients.values():
+        client._all_client_infos = dict(infos)
+        client._comm_plan = plan
+    cluster.plan = plan
+    cluster.gen = [n for n in cluster.clients if n.startswith("NIXLGenClient")]
+    cluster.engines = {
+        n: NIXLPullEngine(cluster.clients[n], staging_bytes=1 << 16, peer_timeout_s=5.0) for n in cluster.gen
+    }
+    return cluster
+
+
+def _judge_units(cluster):
+    for (i, r), fused in cluster.units.items():
+        name = f"NIXLGenClient_I{i}_R{r}"
+        expected_q, expected_s = quantize_blockwise(cluster.expected[(i, r)], BLOCK)
+        assert torch.equal(fused.view(torch.uint8), expected_q.view(torch.uint8)), name
+        assert torch.equal(cluster.states[name][UNIT_SCALE], expected_s), name
+
+
+@pytest.mark.parametrize("train_tp,gen_tp", [(1, 1), (4, 1), (2, 2), (4, 2), (1, 2), (4, 4)])
+def test_reader_quantization_quantizes_a_fused_parameter_as_one_unit(train_tp, gen_tp):
+    """A view that cuts a tile is quantized with its siblings, over the engine's own tile.
+
+    The scale is derived from the whole parameter, so it equals what vLLM's online
+    quantizer produces for the same local tensor, at every train/rollout TP split.
+    """
+    cluster = _unit_cluster(train_tp, gen_tp)
+    cluster.pull(epoch=1)
+    _judge_units(cluster)
+
+
+def test_a_unit_member_is_read_upstream_by_every_replica():
+    """A follower cannot read a designate's unit bytes: the designate quantizes at pull end."""
+    cluster = _unit_cluster(4, 1, instances=2, peer_diffusion=True)
+    reports = cluster.pull(epoch=1)
+    _judge_units(cluster)
+    assert all(report.peer_keys == 0 for report in reports.values())
