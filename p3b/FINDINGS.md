@@ -534,3 +534,39 @@ Reproduce the deadline contract:
 ```bash
 go test ./internal/server -run 'TestExecStopsAtTheCommandDeadline|TestGrantIDsAreUnique' -v
 ```
+
+## A session's shell is not a place to redefine `exit`
+
+The persistent shell installed an `exit` override so a command ending in `exit N`
+would report N and leave the shell standing. dash (`/bin/sh` on Debian and Ubuntu)
+and busybox ash (`/bin/sh` on Alpine) refuse to define a function named after a
+special builtin, and a non-interactive shell answers that syntax error by exiting.
+Installing the override therefore killed the session before its first command, and
+the node reported the loss as if the sandbox had never been there. Neither shell
+family this deployment runs accepts it; only a shell where `/bin/sh` is non-POSIX
+bash does, and no image here is built that way.
+
+The override is removed. `exit` now means what it means in a shell: the command
+session ends, the container and its filesystem stay, the caller gets a lost
+session, and the next command starts on a fresh shell. The node names the runtime's
+cause in that message instead of claiming the sandbox is not held, which is what it
+was doing while the container was still running.
+
+The live tests reach this through the daemon, on both shell families:
+
+```bash
+go test -tags integration ./internal/backend/dockerbackend -run 'Persistent|Exit|Errexit' -v
+```
+
+## A typed command timeout is a TimeoutError
+
+`SandboxCommandTimeout` derives from both `SandboxError` and `TimeoutError`, so the
+SDK's transport caught it in its `asyncio.TimeoutError` branch and rewrote it as
+"the service did not answer within Ns". The node had answered in time with a typed
+command timeout; the caller abandoned work the sandbox had preserved. The typed
+error is now caught first, and the transport clause is left for a reply that never
+came:
+
+```bash
+pytest p3b/tests/sandbox/test_client_failures.py -q
+```

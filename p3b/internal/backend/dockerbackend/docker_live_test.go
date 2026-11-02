@@ -21,6 +21,10 @@ import (
 
 const testImage = "alpine:latest"
 
+// dashImage ships dash as /bin/sh, which is what the Debian and Ubuntu images
+// the harness runs on do.
+const dashImage = "ubuntu:22.04"
+
 func liveBackend(t *testing.T) *Backend {
 	t.Helper()
 	socket := os.Getenv("DOCKER_SOCKET")
@@ -460,7 +464,15 @@ func TestConcurrentCreatesAndReleasesAllSucceed(t *testing.T) {
 // mode a multi-turn harness uses.
 func persistentOne(t *testing.T, b *Backend) backend.Created {
 	t.Helper()
+	return persistentOneOn(t, b, testImage)
+}
+
+// persistentOneOn creates a persistent sandbox on a chosen image, so a test can
+// pin behaviour that depends on the shell the image ships.
+func persistentOneOn(t *testing.T, b *Backend, image string) backend.Created {
+	t.Helper()
 	request := spec()
+	request.Source = backend.Source{Kind: "image", Reference: image}
 	request.ExecMode = "persistent"
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
@@ -511,22 +523,49 @@ func assertSessionSurvived(t *testing.T, b *Backend, handle backend.Handle) {
 	}
 }
 
-func TestAnExitCommandReportsItsOwnStatusAndTheShellSurvives(t *testing.T) {
-	// The status of a command is data the caller reads, and a session that a
-	// command can end is not a session: `exit 3` has to report 3 and leave the
-	// shell it ran in standing.
+func TestAnExitCommandEndsTheSessionAndTheSandboxSurvives(t *testing.T) {
+	// A persistent shell is a transport, not the caller's process. `exit` ends the
+	// command session, as it does in any shell, and the caller is told that the
+	// state built in it is gone. What must not happen is the node treating that as
+	// the sandbox dying: the container and its filesystem stay, and the next
+	// command gets a fresh shell.
 	b := liveBackend(t)
 	created := persistentOne(t, b)
 	setUpSessionState(t, b, created.Handle)
 
-	result, err := execIn(t, b, created.Handle, "exit 3")
-	if err != nil {
-		t.Fatalf("exit 3 was reported as a failure rather than as a status: %v", err)
+	if _, err := execIn(t, b, created.Handle, "exit 3"); !errors.Is(err, backend.ErrSessionLost) {
+		t.Fatalf("exit reported %v, want a lost session", err)
 	}
-	if result.ExitCode != 3 {
-		t.Fatalf("exit 3 reported %d, want 3", result.ExitCode)
+	result, err := execIn(t, b, created.Handle, "pwd; echo $PSRL_MARK")
+	if err != nil || result.ExitCode != 0 {
+		t.Fatalf("the sandbox did not survive the session: code=%d err=%v", result.ExitCode, err)
 	}
-	assertSessionSurvived(t, b, created.Handle)
+	if strings.Contains(result.Stdout, "kept") {
+		t.Fatalf("the old session's state survived %q, so the shell was not replaced", result.Stdout)
+	}
+}
+
+func TestAPersistentSessionWorksOnDash(t *testing.T) {
+	// The images the harness runs on ship dash as /bin/sh. A persistent shell has
+	// to work there, and its state has to survive between commands.
+	b := liveBackend(t)
+	created := persistentOneOn(t, b, dashImage)
+
+	result, err := execIn(t, b, created.Handle, "echo first")
+	if err != nil || result.ExitCode != 0 || strings.TrimSpace(result.Stdout) != "first" {
+		t.Fatalf("the first command failed: code=%d out=%q err=%v", result.ExitCode, result.Stdout, err)
+	}
+	result, err = execIn(t, b, created.Handle, "PSRL_DASH=kept; cd /tmp")
+	if err != nil || result.ExitCode != 0 {
+		t.Fatalf("setting session state failed: code=%d err=%v", result.ExitCode, err)
+	}
+	result, err = execIn(t, b, created.Handle, "echo $PSRL_DASH $(pwd)")
+	if err != nil || result.ExitCode != 0 {
+		t.Fatalf("reading session state failed: code=%d err=%v", result.ExitCode, err)
+	}
+	if strings.TrimSpace(result.Stdout) != "kept /tmp" {
+		t.Fatalf("session state is %q, so the session was replaced", strings.TrimSpace(result.Stdout))
+	}
 }
 
 func TestACallerErrexitDoesNotReplaceTheSession(t *testing.T) {

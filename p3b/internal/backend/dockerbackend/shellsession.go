@@ -184,29 +184,8 @@ func newShellSession(ctx context.Context, b *Backend, sandboxID string) (*shellS
 		s.close()
 		return nil, fmt.Errorf("persistent shell did not become ready: %v (output: %q)", err, res.Stdout)
 	}
-	// Install the exit shim once, so that for the life of this session `exit N`
-	// ends the command rather than the shell.
-	//
-	// A session is not a terminal: it outlives every command sent to it, and the
-	// operation that ends a sandbox is release, not a shell builtin. Read the
-	// other way, a caller whose script ends in `exit` would lose the working
-	// directory and every exported variable it had built, and would never be told.
-	// The shim returns instead, so the sentinel still carries the status. A
-	// caller that redefines exit itself overrides this, which is its own choice.
-	if _, err := s.runInner(startCtx, exitShim, "", nil, defaultSilenceTimeout); err != nil {
-		s.close()
-		return nil, fmt.Errorf("persistent shell could not install its exit handling: %w", err)
-	}
 	return s, nil
 }
-
-// exitShim makes a shell `exit` end the command it is in rather than the shell.
-//
-// The status is the argument when one is given and the previous command's status
-// otherwise, which is what the builtin does. `local` is used to read the status
-// before the guard overwrites it, and is available in every shell these sandboxes
-// run (dash, bash, and busybox ash).
-const exitShim = `exit() { local code=$?; [ $# -gt 0 ] && code=$1; return $code; }`
 
 // alive reports whether this session is still usable. A session is abandoned
 // when the shell exited, and also when a command overran its budget, so this
