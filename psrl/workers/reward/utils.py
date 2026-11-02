@@ -2,6 +2,8 @@ import torch
 from tensordict import TensorDict
 from verl.utils import tensordict_utils as tu
 
+from psrl.utils.dataset.utils import normalize_reward_model_dicts
+
 
 def ensure_reward_attention_mask(inputs: TensorDict) -> TensorDict:
     """Add the all-valid mask expected by reward loops when it is absent.
@@ -20,3 +22,24 @@ def ensure_reward_attention_mask(inputs: TensorDict) -> TensorDict:
         dtype=torch.int64,
     )
     return inputs
+
+
+def attach_reward_trajectories(inputs: TensorDict, outputs: list) -> None:
+    """Carry every training trajectory to the reward worker before TransferQueue publication."""
+    specs = normalize_reward_model_dicts(tu.get(inputs, "reward_model_dicts")[0])
+    if not any(spec.get("reward_loop_type") == "opd" for spec in specs):
+        return
+    tu.assign_non_tensor_stack(
+        inputs,
+        "reward_trajectories",
+        [
+            [
+                {
+                    "prompts": output.prompt_ids,
+                    "responses": output.response_ids,
+                    "has_multimodal_data": bool(output.multi_modal_data),
+                }
+                for output in outputs
+            ]
+        ],
+    )

@@ -12,6 +12,7 @@ from transfer_queue import KVBatchMeta
 from verl.utils import tensordict_utils as tu
 from verl.utils.tensordict_utils import list_of_dict_to_tensordict
 
+from psrl.trainer.distillation.data import validate_teacher_targets
 from psrl.utils.logger import (
     DualOutputHandler,
     EventType,
@@ -405,7 +406,9 @@ class RewardLoopManager(CommandExtension):
             if not request_keys:
                 continue
             expected_attempt = self.request_key_to_attempt.get(request_keys[0])
-            if expected_attempt != result["attempt_id"]:
+            if bool(result.get("is_validate", self.is_validate)) != self.is_validate:
+                raise ValueError("Reward result does not belong to this manager's worker pool.")
+            if any(self.request_key_to_attempt.get(key) != result["attempt_id"] for key in request_keys):
                 psrl_logger.debug(
                     "Drop stale reward result uid=%s attempt=%s expected=%s",
                     result["uid"],
@@ -424,19 +427,37 @@ class RewardLoopManager(CommandExtension):
             is_validate=self.is_validate,
         )
         for result in valid_results:
+            if any(self.request_key_to_attempt.get(key) != result["attempt_id"] for key in result["request_keys"]):
+                continue
             reward = result["result"] if result.get("error") is None else None
             if result.get("error") is not None:
                 psrl_logger.error(
                     f"Reward worker {result['worker_id']} failed for uid={result['uid']!r}, "
                     f"keys={result['request_keys']!r}. Error: {result['error']!r}."
                 )
+            if result.get("error") is not None:
+                reward = {"reward_error": result["error"]}
             if reward is not None:
                 reward["response_len"] = result["response_len"]
             await self._set_reward_for_request_keys(result["request_keys"], reward)
 
     async def _set_reward_for_request_keys(self, request_keys: list[str], reward: dict[str, Any] | None):
+        teacher_outputs = reward.get("teacher_outputs") if reward else None
+        if teacher_outputs is not None and set(teacher_outputs) != set(request_keys):
+            reward = {"reward_error": "Teacher outputs do not match request_keys."}
+            teacher_outputs = None
         for request_key in request_keys:
             per_key_reward = reward.copy() if reward is not None else None
+            if teacher_outputs is not None:
+                per_key_reward.pop("teacher_outputs")
+                teacher = teacher_outputs[request_key].copy()
+                for field_name in ("reward_extra_info", "reward_metrics"):
+                    per_key_reward[field_name] = {
+                        **per_key_reward.get(field_name, {}),
+                        **teacher.pop(field_name, {}),
+                    }
+                per_key_reward.update(teacher)
+                per_key_reward["response_len"] = teacher["teacher_logprobs"].shape[0]
             self.request_key_to_attempt.pop(request_key, None)
             self.request_key_to_worker.pop(request_key, None)
             if request_key in self.request_key_to_future:
@@ -535,134 +556,80 @@ class RewardLoopManager(CommandExtension):
             sync_results = []
             for request_key in sync_keys:
                 if request_key in self.request_key_to_reward:
-                    sync_results.append(self.request_key_to_reward.pop(request_key))
+                    sync_results.append(self.request_key_to_reward[request_key])
+                    if not self._requires_teacher():
+                        self.request_key_to_reward.pop(request_key, None)
                 else:
-                    sync_results.append(await self.request_key_to_future[request_key])
+                    resolved = await self.request_key_to_future[request_key]
+                    if self._requires_teacher():
+                        self.request_key_to_reward[request_key] = resolved
+                    sync_results.append(resolved)
                     self.request_key_to_future.pop(request_key, None)
 
+        for result in sync_results:
+            if result is not None and "reward_error" in result:
+                raise RuntimeError(f"Reward computation failed: {result['reward_error']}.")
         return sync_results[0] if sync_results else None
 
-    async def wait_for_reward_of_requests(self, requests: KVBatchMeta) -> KVBatchMeta:
-        """Wait for all requested rewards and write them to the transfer queue."""
-        request_keys = requests.keys
-        is_validate = requests.partition_id == "val"
-        if is_validate != self.is_validate:
-            raise ValueError("Reward batch does not belong to this manager's worker pool.")
-        partition_id = "val" if is_validate else "train"
-        # Padding from `_balance_batch` in `ray_trainer.py`
-        padding_keys: set[str] = {
-            key for key, tag in zip(requests.keys, requests.tags) if tag.get("is_padding", False)
-        }
-        # Reward may be ready in group post processing
-        ready_keys = {
-            key for key, tag in zip(requests.keys, requests.tags) if not is_validate and tag.get("reward_ready", False)
-        }
-        request_keys_to_put = [key for key in request_keys if key not in ready_keys]
-        request_key_to_reward: dict[str, dict] = {}
-        futures_to_wait = {}
+    def _requires_teacher(self) -> bool:
+        return bool(getattr(getattr(self.config, "distillation", None), "enabled", False)) and not self.is_validate
 
-        for request_key in request_keys_to_put:
+    async def _commit_rewards(self, request_keys: list[str], padding_keys: set[str]) -> None:
+        """Publish scalar rewards and per-trajectory targets before exposing readiness."""
+        fields = []
+        for request_key in request_keys:
             if request_key in padding_keys:
-                request_key_to_reward[request_key] = {
-                    "reward_score": 0.0,
-                    "reward_extra_info": {},
-                    "reward_metrics": {},
-                    "response_len": 1,
-                }
+                reward = self._default_reward_result()
             elif request_key in self.request_key_to_reward:
-                request_key_to_reward[request_key] = self.request_key_to_reward.pop(request_key)
-            elif request_key in self.request_key_to_future:
-                futures_to_wait[request_key] = self.request_key_to_future[request_key]
+                reward = self.request_key_to_reward[request_key]
             else:
-                fut = asyncio.get_running_loop().create_future()
-                self.request_key_to_future[request_key] = fut
-                futures_to_wait[request_key] = fut
-
-        if futures_to_wait:
-            results = await asyncio.gather(*futures_to_wait.values())
-            for request_key, reward in zip(futures_to_wait.keys(), results):
-                request_key_to_reward[request_key] = reward
-
-        fields = []
-        for request_key in request_keys_to_put:
-            reward = request_key_to_reward[request_key]
-            if reward is None:
-                reward = self._default_reward_result()
-            fields.append(reward)
-            self.request_key_to_future.pop(request_key, None)
-
-        for i, f in enumerate(fields):
-            raw_response_len = f.pop("response_len", 1)
-            if raw_response_len <= 0:
-                psrl_logger.error(
-                    "wait_for_reward_of_requests: response_len=%d for key=%s, reward_score=%s, reward_keys=%s",
-                    raw_response_len,
-                    request_keys_to_put[i] if i < len(request_keys_to_put) else "?",
-                    f.get("reward_score"),
-                    list(f.keys()),
-                )
-            response_len = max(raw_response_len, 1)
-            rm_score_tensor = torch.zeros(response_len, dtype=torch.float32)
-            rm_score_tensor[-1] = float(f.get("reward_score", 0.0))
-            f["rm_scores"] = rm_score_tensor
-
-        if request_keys_to_put:
-            await tq.async_kv_batch_put(
-                keys=request_keys_to_put,
-                partition_id=partition_id,
-                fields=list_of_dict_to_tensordict(fields),
-            )
-
-        if not is_validate and self.reward_normalization:
-            requests = await self.normalize_reward(requests)
-
-        return requests
-
-    async def wait_for_reward_ready(self, request_keys: list[str]) -> None:
-        """
-        Write available rewards for request keys to the transfer queue.
-
-        Agent post-processing requires reward scores before the trainer's regular queue write.
-        """
-        futures_to_wait: dict[str, asyncio.Future] = {}
-        resolved: dict[str, dict] = {}
-        for request_key in request_keys:
-            if request_key in self.request_key_to_reward:
-                resolved[request_key] = self.request_key_to_reward[request_key]
-            elif request_key in self.request_key_to_future:
-                fut = self.request_key_to_future[request_key]
-                if fut.done():
-                    resolved[request_key] = fut.result()
-                else:
-                    futures_to_wait[request_key] = fut
-            else:
-                fut = asyncio.get_running_loop().create_future()
-                self.request_key_to_future[request_key] = fut
-                futures_to_wait[request_key] = fut
-
-        if futures_to_wait:
-            results = await asyncio.gather(*futures_to_wait.values())
-            for request_key, result in zip(futures_to_wait.keys(), results):
-                resolved[request_key] = result
-
-        fields = []
-        for request_key in request_keys:
-            reward = resolved.get(request_key)
-            if reward is None:
-                reward = self._default_reward_result()
-            f = reward.copy()
-            response_len = max(f.pop("response_len", 1), 1)
-            rm_score_tensor = torch.zeros(response_len, dtype=torch.float32)
-            rm_score_tensor[-1] = float(f.get("reward_score", 0.0))
-            f["rm_scores"] = rm_score_tensor
-            fields.append(f)
-
+                future = self.request_key_to_future.setdefault(request_key, asyncio.get_running_loop().create_future())
+                reward = await future
+            if reward is not None and "reward_error" in reward:
+                raise RuntimeError(f"Reward computation failed for {request_key!r}: {reward['reward_error']}.")
+            row = (reward or self._default_reward_result()).copy()
+            response_length = max(row.pop("response_len", 1), 1)
+            if self._requires_teacher():
+                loss = self.config.distillation.distillation_loss
+                use_topk = loss.loss_mode == "forward_kl_topk"
+                width = int(loss.topk) if use_topk else 1
+                if request_key in padding_keys:
+                    row.update(teacher_logprobs=torch.zeros(1, width), teacher_weight=0.0)
+                    if use_topk:
+                        row["teacher_ids"] = torch.zeros(1, width, dtype=torch.int64)
+                if use_topk and "teacher_ids" not in row:
+                    raise ValueError(f"Missing teacher_ids for {request_key!r}.")
+                validate_teacher_targets(row, response_length, width, padding=request_key in padding_keys)
+            if "teacher_weight" in row:
+                row["teacher_weight"] = torch.tensor(row["teacher_weight"], dtype=torch.float32)
+            scores = torch.zeros(response_length, dtype=torch.float32)
+            scores[-1] = float(row.get("reward_score", 0.0))
+            row["rm_scores"] = scores
+            fields.append(row)
         if request_keys:
             await tq.async_kv_batch_put(
                 keys=request_keys,
-                partition_id="train",
+                partition_id="val" if self.is_validate else "train",
                 fields=list_of_dict_to_tensordict(fields),
             )
-            for request_key in request_keys:
-                self.request_key_to_reward.pop(request_key, None)
-                self.request_key_to_future.pop(request_key, None)
+            for key in request_keys:
+                self.request_key_to_reward.pop(key, None)
+                self.request_key_to_future.pop(key, None)
+
+    async def wait_for_reward_of_requests(self, requests: KVBatchMeta) -> KVBatchMeta:
+        """Wait for reward fields and publish them atomically to the correct partition."""
+        is_validate = requests.partition_id == "val"
+        if is_validate != self.is_validate:
+            raise ValueError("Reward batch does not belong to this manager's worker pool.")
+        padding = {key for key, tag in zip(requests.keys, requests.tags) if tag.get("is_padding", False)}
+        pending = [
+            key for key, tag in zip(requests.keys, requests.tags) if is_validate or not tag.get("reward_ready", False)
+        ]
+        await self._commit_rewards(pending, padding)
+        if not is_validate and self.reward_normalization:
+            requests = await self.normalize_reward(requests)
+        return requests
+
+    async def wait_for_reward_ready(self, request_keys: list[str]) -> None:
+        """Publish all reward fields before agent group post-processing reads them."""
+        await self._commit_rewards(request_keys, set())

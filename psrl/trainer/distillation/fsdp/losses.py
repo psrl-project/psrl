@@ -16,11 +16,11 @@
 
 import torch
 import torch.nn.functional as F
+from psrl.workers.config import DistillationConfig, DistillationLossConfig
 from verl.utils.ulysses import (
     get_ulysses_sequence_parallel_world_size,
     slice_input_tensor,
 )
-from verl.workers.config import DistillationConfig, DistillationLossConfig
 
 
 def kl_divergence(log_q: torch.Tensor, log_p: torch.Tensor) -> torch.Tensor:
@@ -38,7 +38,7 @@ def compute_forward_kl_topk(
     teacher_topk_ids: torch.Tensor,
     config: DistillationConfig,
     data_format: str,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> dict[str, torch.Tensor]:
     """Compute forward KL distillation loss using top-k log probabilities.
 
     Args:
@@ -55,8 +55,16 @@ def compute_forward_kl_topk(
     assert teacher_topk_log_probs.is_nested and teacher_topk_ids.is_nested, (
         "Teacher top-k log probabilities and IDs must be nested tensors."
     )
-    teacher_topk_log_probs = teacher_topk_log_probs.values().unsqueeze(0)  # (1, total_nnz, topk)
-    teacher_topk_ids = teacher_topk_ids.values().unsqueeze(0)  # (1, total_nnz, topk)
+    if data_format == "thd":
+        teacher_topk_log_probs = teacher_topk_log_probs.values().unsqueeze(0)
+        teacher_topk_ids = teacher_topk_ids.values().unsqueeze(0)
+    elif data_format == "bshd":
+        teacher_topk_log_probs = teacher_topk_log_probs.to_padded_tensor(0.0)
+        teacher_topk_ids = teacher_topk_ids.to_padded_tensor(0)
+    else:
+        raise ValueError(f"Unsupported OPD data format {data_format!r}.")
+    if (teacher_topk_ids < 0).any() or (teacher_topk_ids >= student_logits.shape[-1]).any():
+        raise ValueError("Teacher token IDs exceed the student vocabulary.")
 
     # 1. split across sp groups (bsz, seqlen, topk) => (bsz, seqlen/sp_size, topk)
     if get_ulysses_sequence_parallel_world_size() > 1:

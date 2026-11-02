@@ -60,7 +60,7 @@ class DistillationLossConfig(BaseConfig):
     """
 
     loss_mode: str = "k3"
-    topk: int | None = 128
+    topk: int | None = 32
     use_task_rewards: bool = True
     distillation_loss_coef: float = 1.0
     loss_max_clamp: float | None = 10.0
@@ -84,7 +84,9 @@ class DistillationLossConfig(BaseConfig):
         from psrl.trainer.distillation.losses import DistillationLossSettings, get_distillation_loss_settings
 
         self.loss_settings: DistillationLossSettings = get_distillation_loss_settings(self.loss_mode)
-        if self.loss_settings.use_topk and self.topk is None:
+        if self.loss_settings.use_topk and (
+            isinstance(self.topk, bool) or not isinstance(self.topk, int) or self.topk < 1
+        ):
             raise ValueError("distillation_loss.topk must be set when using a top-k distillation loss.")
 
         if self.policy_loss_mode != "vanilla":
@@ -94,7 +96,7 @@ class DistillationLossConfig(BaseConfig):
             )
 
         if self.use_policy_gradient and self.loss_mode == "forward_kl_topk":
-            print(
+            logger.warning(
                 "WARNING: forward_kl_topk is most effective as a supervised distillation loss "
                 "(use_policy_gradient=False). With policy gradient, the update uses only the sampled"
                 " token's logprob ∇logπ(a), so the top-k distributional signal (how non-sampled logits "
@@ -110,51 +112,7 @@ class DistillationLossConfig(BaseConfig):
 
 @dataclass
 class DistillationConfig(BaseConfig):
-    """Configuration for on-policy distillation.
-
-    enabled (bool):
-        Whether on-policy distillation is enabled.
-    n_gpus_per_node (int):
-        Number of GPUs per node in the teacher resource pool.
-    nnodes (int):
-        Number of nodes in the teacher resource pool.
-    teacher_models (dict[str, TeacherModelConfig]):
-        Configurations for teacher models used for multi-teacher distillation.
-    teacher_key (str):
-        Key to route examples to the appropriate teacher model in multi-teacher setups. Should correspond to a field in
-        the data proto, e.g., data_source.
-    distillation_loss (DistillationLossConfig):
-    Configuration for distillation loss settings.
-
-    NOTE: The `teacher_model` entry is in the `teacher_models` dict by default.
-    Since it is popped when other teacher entries are added, using `teacher_model` as
-    one of several keys silently drops it. For example, the following CLI overrides result
-    in ONLY `teacher_model2` being used:
-
-    ```bash
-    distillation.teacher_models.teacher_model.key=openai/gsm8k
-    distillation.teacher_models.teacher_model.model_path=Qwen/Qwen3-4B
-    +distillation.teacher_models.teacher_model2.key=hiyouga/geometry3k
-    +distillation.teacher_models.teacher_model2.model_path=Qwen/Qwen3-VL-4B-Instruct
-    ```
-    Instead, give the first teacher a different name:
-
-    ```bash
-    +distillation.teacher_models.teacher_model1.key=openai/gsm8k
-    +distillation.teacher_models.teacher_model1.model_path=Qwen/Qwen3-4B
-    +distillation.teacher_models.teacher_model2.key=hiyouga/geometry3k
-    +distillation.teacher_models.teacher_model2.model_path=Qwen/Qwen3-VL-4B-Instruct
-    ```
-    """
-
-    _mutable_fields = BaseConfig._mutable_fields | {"teacher_models", "n_gpus_per_node", "nnodes"}
+    """Configure losses for teachers managed by the reward model service."""
 
     enabled: bool = False
-    teacher_key: str = "data_source"
     distillation_loss: DistillationLossConfig = field(default_factory=DistillationLossConfig)
-
-    def __post_init__(self):
-        if not self.enabled:
-            return
-        if self.distillation_loss.loss_settings.use_topk and self.distillation_loss.topk is None:
-            raise ValueError("distillation.distillation_loss.topk must be set for top-k distillation.")

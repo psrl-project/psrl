@@ -15,11 +15,11 @@
 
 
 import torch
+from psrl.workers.config import DistillationConfig, DistillationLossConfig
 from verl.models.mcore.util import (
     preprocess_bshd_engine,
     preprocess_thd_engine,
 )
-from verl.workers.config import DistillationConfig, DistillationLossConfig
 
 
 def vocab_parallel_log_softmax(
@@ -218,7 +218,7 @@ def compute_forward_kl_topk(
     teacher_topk_ids: torch.Tensor,
     config: DistillationConfig,
     data_format: str,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> dict[str, torch.Tensor]:
     """Compute forward KL distillation loss using top-k log probabilities.
 
     Args:

@@ -10,7 +10,7 @@ PSRL groups two complementary recipes under this umbrella:
 | Recipe | One-line summary | Status |
 |---|---|---|
 | [LLM-as-a-Judge](llm_as_a_judge) | A separate model judges policy responses, with configurable prompt construction and scoring | Available |
-| [On-Policy Distillation](on_policy_distillation) | A stronger teacher model emits token-level targets on the policy's own rollouts, the policy distills against those targets | TBD |
+| [On-Policy Distillation](on_policy_distillation) | Teacher token-level targets on student rollouts, with veRL-style distillation losses | Available |
 
 These recipes use PSRL's vLLM serving and `RewardManager` / `RewardLoop`
 infrastructure. Dataset reward specifications determine which signals each

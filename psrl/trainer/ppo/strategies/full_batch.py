@@ -11,6 +11,7 @@ from __future__ import annotations
 import ray
 from verl.utils.debug import marked_timer
 
+from psrl.trainer.distillation.losses import is_distillation_enabled
 from psrl.trainer.ppo.strategies.base import StepStrategy, psrl_logger
 from psrl.utils.logger import EventType, log_dual_events
 
@@ -74,7 +75,7 @@ class FullBatchStepStrategy(StepStrategy):
                 ):
                     batch = t._compute_values(batch, metrics=metrics)
 
-        if t.config.reward.launch_reward_fn_async:
+        if t.config.reward.launch_reward_fn_async or is_distillation_enabled(getattr(t.config, "distillation", None)):
             with marked_timer("async_reward_get", timing_raw, color="yellow"):
                 with log_dual_events(
                     "Wait for async reward model score",

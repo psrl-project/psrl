@@ -16,7 +16,6 @@ class TestPSRLRole:
             "ActorRolloutRef",
             "Validate",
             "DummyPolicy",
-            "TeacherModel",
         }
         actual = {r.name for r in PSRL_Role}
         assert expected == actual

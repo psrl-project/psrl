@@ -129,6 +129,48 @@ def validate_fine_grain_elastic(config) -> None:
 
 
 # TODO(zyf): After refactoring, elastic rl's configuration check should be considered.
+def validate_opd_config(config: DictConfig) -> None:
+    """Check teacher service registration and explicit dataset routing before GPU allocation."""
+    if not config.get("distillation", {}).get("enabled", False):
+        return
+    from psrl.utils.dataset.utils import normalize_reward_model_dicts
+    from psrl.workers.config.reward_model import resolve_active_managers
+    from psrl.workers.reward.reward_protocol import resolve_reward_function_name
+
+    teachers = [item for item in resolve_active_managers(config.reward) if item.reward_loop_type == "opd"]
+    if not teachers:
+        raise ValueError("Distillation requires at least one active OPD reward manager.")
+    names = [teacher.get("reward_model_name") for teacher in teachers]
+    if any(not isinstance(name, str) or not name for name in names) or len(set(names)) != len(names):
+        raise ValueError("OPD teachers require unique, nonempty reward_model_name values.")
+    signatures = []
+    for teacher in teachers:
+        if teacher.reward_manager.name != "opd" or teacher.rollout.name != "vllm":
+            raise ValueError("OPD requires an OPD reward loop and a vLLM reward service.")
+        for function in teacher.reward_fn:
+            signatures.append((teacher.reward_model_name, function.name))
+    if len(set(signatures)) != len(signatures):
+        raise ValueError("Active OPD teacher specifications must be unique.")
+    if config.gen_actor_rollout_ref.rollout.agent.get("traj_reward_mode", "traj") != "traj":
+        raise ValueError("OPD requires traj_reward_mode=traj to score every final training trajectory.")
+    for dataset in config.data.get("train_datas", []):
+        if "reward_model_dicts" not in dataset:
+            continue
+        routes = [
+            spec
+            for spec in normalize_reward_model_dicts(dataset.reward_model_dicts)
+            if spec.get("reward_loop_type") == "opd"
+        ]
+        if len(routes) != 1:
+            raise ValueError("Each OPD training dataset must select exactly one teacher.")
+        route = routes[0]
+        if (
+            route.get("reward_model_name"),
+            resolve_reward_function_name(route.get("reward_fn", "default")),
+        ) not in signatures:
+            raise ValueError("Dataset OPD teacher does not exactly match an active reward manager.")
+
+
 def validate_config(
     config: DictConfig,
     use_reference_policy: bool,
@@ -141,6 +183,8 @@ def validate_config(
         use_reference_policy (bool): is ref policy needed
         use_critic (bool): is critic needed
     """
+
+    validate_opd_config(config)
 
     train_n_gpus = config.psrl.deployment.train_ngpus_per_node * config.psrl.deployment.train_nnodes
     if not config.train_actor_rollout_ref.actor.use_dynamic_bsz:

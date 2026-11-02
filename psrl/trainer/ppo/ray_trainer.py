@@ -22,7 +22,6 @@ from transfer_queue import KVBatchMeta
 from verl import DataProto
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.single_controller.ray.base import create_colocated_worker_cls_fused
-from verl.trainer.distillation.losses import is_distillation_enabled
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
 from verl.trainer.ppo.metric_utils import (
@@ -39,7 +38,6 @@ from verl.trainer.ppo.utils import (
     WorkerType,
     need_critic,
     need_reference_policy,
-    need_teacher_policy,
 )
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils import tensordict_utils as tu
@@ -60,6 +58,7 @@ from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.config import EngineConfig
 from verl.workers.utils.padding import response_from_nested, response_to_nested
 
+from psrl.trainer.distillation.losses import is_distillation_enabled
 from psrl.trainer.ppo.batch_schedule import (
     TRAJECTORY_AGG_MODE,
     BatchScheduleStep,
@@ -97,7 +96,6 @@ from psrl.utils.transfer_queue.payload import PayloadState, clear_payload
 from psrl.workers.agent_loop.manager import PSRL_AgentLoopManager
 from psrl.workers.agent_loop.prometheus_utils import update_prometheus_config
 from psrl.workers.agent_loop.worker import PSRL_AgentLoopWorker
-from psrl.workers.config import DistillationConfig
 from psrl.workers.config.reward_model import resolve_active_managers
 from psrl.workers.elastic.executor import ElasticExecutor, ReplicaRegistration
 from psrl.workers.gen.rollout_gateway import RolloutGateway
@@ -274,7 +272,7 @@ class PSRL_RayPPOTrainer(RayPPOTrainer):
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
         self.use_reference_policy = need_reference_policy(self.config)
-        self.use_teacher_policy = need_teacher_policy(self.config)
+        self.use_teacher_policy = is_distillation_enabled(self.config.get("distillation"))
 
         # AGENT(VERL): skip `use_rm` in PSRL.
 
@@ -437,16 +435,6 @@ class PSRL_RayPPOTrainer(RayPPOTrainer):
         # Used for multimodal LLM, could be None
         self.processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
 
-    @staticmethod
-    def _select_opd_teacher_value(reward_result: dict, field: str):
-        teacher_values = reward_result.get(field, {})
-        if not isinstance(teacher_values, dict) or not teacher_values:
-            return None
-        for key, value in teacher_values.items():
-            if str(key).startswith("opd/"):
-                return value
-        return next(iter(teacher_values.values()))
-
     def _normalize_sync_reward_tensor(
         self, batch: DataProto, reward_tensor: torch.Tensor | None
     ) -> torch.Tensor | None:
@@ -496,61 +484,6 @@ class PSRL_RayPPOTrainer(RayPPOTrainer):
                 continue
             normalized_reward_tensor[idx, valid_len] = score
         return normalized_reward_tensor
-
-    @classmethod
-    def _merge_teacher_tensor_from_rewards(
-        cls,
-        request_id_to_reward: dict,
-        request_ids: list[int],
-        response_mask: torch.Tensor,
-        field: str,
-        dtype: torch.dtype,
-    ) -> tuple[torch.Tensor | None, dict[str, float]]:
-        teacher_values = []
-        missing_count = 0
-        mismatch_count = 0
-        topk_width = 0
-        for request_id in request_ids:
-            value = cls._select_opd_teacher_value(request_id_to_reward[request_id], field)
-            if value is None:
-                teacher_values.append(None)
-                missing_count += 1
-                continue
-            tensor = value.detach().cpu() if isinstance(value, torch.Tensor) else torch.tensor(value)
-            if tensor.ndim == 2:
-                topk_width = max(topk_width, int(tensor.shape[-1]))
-            teacher_values.append(tensor)
-
-        if missing_count == len(request_ids):
-            return None, {}
-
-        batch_size, response_width = response_mask.shape
-        output_shape = (batch_size, response_width, topk_width) if topk_width > 0 else (batch_size, response_width)
-        merged = torch.zeros(output_shape, dtype=dtype)
-        for idx, tensor in enumerate(teacher_values):
-            if tensor is None:
-                continue
-            valid_len = int(response_mask[idx].sum().item())
-            if tensor.shape[0] != valid_len:
-                mismatch_count += 1
-            copy_len = min(int(tensor.shape[0]), valid_len, response_width)
-            if copy_len <= 0:
-                continue
-            if topk_width > 0:
-                if tensor.ndim == 1:
-                    tensor = tensor.unsqueeze(-1)
-                copy_width = min(int(tensor.shape[-1]), topk_width)
-                merged[idx, :copy_len, :copy_width] = tensor[:copy_len, :copy_width].to(dtype)
-            else:
-                merged[idx, :copy_len] = tensor[:copy_len].to(dtype)
-
-        metrics = {
-            f"distillation/{field}_missing": float(missing_count),
-            f"distillation/{field}_mismatch": float(mismatch_count),
-        }
-        if topk_width > 0:
-            metrics[f"distillation/{field}_topk"] = float(topk_width)
-        return merged, metrics
 
     def _initialize_queue_buffers(self):
         if self.config.psrl.rollout_coordination.redundant_rollout.enable:
@@ -1978,19 +1911,9 @@ class PSRL_RayPPOTrainer(RayPPOTrainer):
             self.dummy_wg = all_wg["dummy"]
             self.dummy_wg.init_model()
 
-        # initialize teacher loop manager
-        if self.use_teacher_policy:
-            from verl.experimental.teacher_loop import TeacherModelManager
-
-            teacher_resource_pool = self.resource_pool_manager.get_resource_pool(PSRL_Role.TeacherModel)
-            self.teacher_model_manager = TeacherModelManager(
-                config=self.config.distillation,
-                resource_pool=teacher_resource_pool,
-            )
-            self.distillation_config: DistillationConfig = omega_conf_to_dataclass(self.config.distillation)
-        else:
-            self.teacher_model_manager = None
-            self.distillation_config = None
+        self.distillation_config = (
+            omega_conf_to_dataclass(self.config.distillation) if self.use_teacher_policy else None
+        )
 
         # AGENT(VERL): skip `async_rollout_manager`, `checkpoint_manager` in PSRL.
 

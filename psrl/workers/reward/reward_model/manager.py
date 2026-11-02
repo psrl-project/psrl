@@ -6,7 +6,7 @@ import os
 from typing import TYPE_CHECKING
 
 import ray
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf, open_dict
 from verl.single_controller.ray import RayWorkerGroup
 from verl.utils import hf_tokenizer, omega_conf_to_dataclass
 from verl.utils.fs import copy_to_local
@@ -47,6 +47,16 @@ class RewardModelManager:
             trust_remote_code=model_cfg.get("trust_remote_code", False),
         )
         self.hf_model_config = model_cfg
+        if reward_model_config.reward_loop_type == "opd":
+            loss = config.distillation.distillation_loss
+            width = int(loss.topk) if loss.loss_mode == "forward_kl_topk" else 0
+            with open_dict(reward_model_config.rollout):
+                if "engine_kwargs" not in reward_model_config.rollout:
+                    reward_model_config.rollout.engine_kwargs = {}
+                if "vllm" not in reward_model_config.rollout.engine_kwargs:
+                    reward_model_config.rollout.engine_kwargs.vllm = {}
+                current = OmegaConf.select(reward_model_config.rollout, "engine_kwargs.vllm.max_logprobs", default=0)
+                reward_model_config.rollout.engine_kwargs.vllm.max_logprobs = max(width, current or 0)
         self.rollout_config: RolloutConfig = omega_conf_to_dataclass(reward_model_config.rollout)
 
         self.reward_model_coordinator: CoordinatorClient = coordinator

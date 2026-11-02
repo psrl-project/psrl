@@ -32,6 +32,7 @@ from psrl.workers.agent_loop.context import AgentLoopContext
 from psrl.workers.agent_loop.loops.utils import TerminateReason
 from psrl.workers.gen.utils import TokenInput, TokenOutput
 from psrl.workers.ps.request_status_tracker import PSRL_RequestStatus
+from psrl.workers.reward.utils import attach_reward_trajectories
 
 psrl_logger = logging.getLogger(__name__)
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
@@ -243,6 +244,7 @@ class AgentLoopBase(ABC):
             },
         )
 
+        attach_reward_trajectories(reward_requests, outputs)
         reward_result = await self.reward_manager.compute_score(reward_requests)
         if not self.config.reward.launch_reward_fn_async:
             if not reward_result:

@@ -525,7 +525,7 @@ index 946f76110de9af8acea75c30c4c85d5c91c30338..b0dbb4d519efa43c9f1811147bf55ee4
  
                  # compute mean and std
 diff --git a/verl/trainer/ppo/padding_utils.py b/verl/trainer/ppo/padding_utils.py
-index 436e17bc6023e35bde291abb6f8b2e75658a64dd..a5de3c3b41a84077ffa469402aa99e035e53eebc 100644
+index 436e17bc6023e35bde291abb6f8b2e75658a64dd..def6f221f47699eae9e3ad228f58048f903158a6 100644
 --- a/verl/trainer/ppo/padding_utils.py
 +++ b/verl/trainer/ppo/padding_utils.py
 @@ -71,6 +71,7 @@ def construct_minimal_padding_template(
@@ -569,7 +569,7 @@ index 436e17bc6023e35bde291abb6f8b2e75658a64dd..a5de3c3b41a84077ffa469402aa99e03
          prompts=prompts,
          responses=prompts.clone(),
          input_ids=input_ids,
-@@ -112,6 +114,38 @@ def construct_minimal_padding_template(
+@@ -112,6 +114,44 @@ def construct_minimal_padding_template(
          rm_scores=torch.zeros_like(response_mask, dtype=torch.float32),
          rollout_log_probs=torch.zeros_like(response_mask, dtype=torch.float32),
      )
@@ -603,12 +603,18 @@ index 436e17bc6023e35bde291abb6f8b2e75658a64dd..a5de3c3b41a84077ffa469402aa99e03
 +        value = template_sample.get(field_name)
 +        if isinstance(value, torch.Tensor):
 +            template_sample[field_name] = torch.zeros_like(response_mask, dtype=value.dtype)
++    for field_name in ("teacher_logprobs", "teacher_ids"):
++        value = template_sample.get(field_name)
++        if isinstance(value, torch.Tensor):
++            template_sample[field_name] = value.new_zeros((1, *value.shape[1:]))
++    if "teacher_weight" in template_sample:
++        template_sample["teacher_weight"] = torch.tensor(0.0)
 +    if "parent_id" in template_sample:
 +        template_sample["parent_id"] = pad_uid
      if "multi_modal_inputs" in template_sample:
          template_sample["multi_modal_inputs"] = {}
      if routed_experts is not None:
-@@ -120,7 +154,27 @@ def construct_minimal_padding_template(
+@@ -120,7 +160,27 @@ def construct_minimal_padding_template(
          template_sample.pop("routed_experts", None)
  
      # Padding flag is deployed to protect metrics calculation (e.g. response length, score, reward).
@@ -626,7 +632,7 @@ index 436e17bc6023e35bde291abb6f8b2e75658a64dd..a5de3c3b41a84077ffa469402aa99e03
 +        unshrunk = {
 +            key: tuple(value.shape)
 +            for key, value in template_sample.items()
-+            if isinstance(value, torch.Tensor) and source_response_len in value.shape
++            if isinstance(value, torch.Tensor) and value.ndim > 0 and value.shape[0] == source_response_len
 +        }
 +        if unshrunk:
 +            raise AssertionError(
@@ -637,7 +643,7 @@ index 436e17bc6023e35bde291abb6f8b2e75658a64dd..a5de3c3b41a84077ffa469402aa99e03
      return template_sample, template_tag
  
  
-@@ -154,26 +208,18 @@ def upsample_batch_to_divisible_size(
+@@ -154,26 +214,18 @@ def upsample_batch_to_divisible_size(
      source_key = batch.keys[source_idx]
      source_td = tq.kv_batch_get(keys=[source_key], partition_id=batch.partition_id)[0]
  

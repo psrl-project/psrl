@@ -116,6 +116,8 @@ def compute_distillation_loss_range(
         distillation_losses_response = distillation_losses[response_mask.bool().to_padded_tensor(False)]
     else:
         distillation_losses_response = distillation_losses[response_mask.bool()]
+    if distillation_losses_response.numel() == 0:
+        distillation_losses_response = distillation_losses.new_zeros(1)
     return {
         "distillation/loss_min": Metric(AggregationType.MIN, distillation_losses_response.min()),
         "distillation/loss_max": Metric(AggregationType.MAX, distillation_losses_response.max()),
@@ -128,7 +130,7 @@ def compute_topk_loss(
     data: TensorDict,
     student_logits: torch.Tensor,
     data_format: str,
-) -> torch.Tensor:
+) -> dict[str, torch.Tensor]:
     """Compute the topk loss in logit processor.
 
     Returns:
@@ -137,7 +139,7 @@ def compute_topk_loss(
     - teacher_mass: (bsz, seqlen/cp_size)
     """
     match config.strategy:
-        case "fsdp":
+        case "fsdp" | "fsdp2":
             import psrl.trainer.distillation.fsdp.losses as fsdp_losses
 
             distillation_loss_fn = fsdp_losses.compute_forward_kl_topk
@@ -207,10 +209,15 @@ def distillation_ppo_loss(
 
     # Called as final policy loss
     distillation_loss_config = distillation_config.distillation_loss
+    if data is not None and "dp_size" in data:
+        for field_name in ("dp_size", "batch_num_tokens", "global_batch_size"):
+            config.global_batch_info[field_name] = data[field_name]
+        config.global_batch_info["loss_scale_factor"] = config.loss_scale_factor
     distill_loss, distill_metrics = distillation_loss(config, distillation_config, model_output, data)
-    policy_loss, policy_metrics = ppo_loss(config, model_output, data, dp_group)
-    if not distillation_loss_config.use_task_rewards:
-        policy_loss = 0.0
+    if distillation_loss_config.use_task_rewards:
+        policy_loss, policy_metrics = ppo_loss(config, model_output, data, dp_group)
+    else:
+        policy_loss, policy_metrics = 0.0, {}
 
     # Combine distillation with policy loss
     policy_metrics.update(distill_metrics)
@@ -256,6 +263,11 @@ def distillation_loss(
         distillation_losses = distillation_losses.clamp(
             min=-loss_config.loss_max_clamp, max=loss_config.loss_max_clamp
         )
+
+    weights = data["teacher_weight"].to(device=distillation_losses.device, dtype=distillation_losses.dtype)
+    if weights.ndim != 1 or len(weights) != len(data) or not torch.isfinite(weights).all() or (weights < 0).any():
+        raise ValueError("Actor teacher_weight must contain one finite nonnegative weight per trajectory.")
+    distillation_losses = distillation_losses * weights.unsqueeze(-1)
 
     if loss_config.use_policy_gradient:
         # Use negative distillation loss as reward, as done by https://thinkingmachines.ai/blog/on-policy-distillation/.
@@ -324,6 +336,9 @@ def compute_forward_kl_topk(
     # Log amount of mass in the top-k log probabilities for both student and teacher.
     student_mass = student_mass[response_mask_bool]
     teacher_mass = teacher_mass[response_mask_bool]
+    if student_mass.numel() == 0:
+        student_mass = distillation_losses.new_zeros(1)
+        teacher_mass = distillation_losses.new_zeros(1)
     distillation_metrics = {
         "distillation/student_mass": student_mass.mean().item(),
         "distillation/student_mass_min": Metric(AggregationType.MIN, student_mass.min()),
@@ -375,6 +390,9 @@ def compute_distillation_loss_reverse_kl_estimator(
     )
     # Since k1 can be negative, log the mean absolute loss.
     metrics = {
-        "distillation/abs_loss": Metric(AggregationType.MEAN, distillation_losses[response_mask_bool].abs().mean()),
+        "distillation/abs_loss": Metric(
+            AggregationType.MEAN,
+            distillation_losses[response_mask_bool].abs().sum() / response_mask_bool.sum().clamp_min(1),
+        ),
     }
     return distillation_losses, metrics

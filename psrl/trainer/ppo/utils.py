@@ -105,7 +105,6 @@ class PSRL_Role(Enum):
     RewardModel = enum.auto()
     ActorRolloutRef = enum.auto()
     Validate = enum.auto()
-    TeacherModel = enum.auto()
     DummyPolicy = enum.auto()
 
 

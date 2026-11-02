@@ -4,9 +4,6 @@ _target_: psrl.workers.config.DistillationConfig
 # Whether to enable on-policy distillation.
 enabled: false
 
-# Reward-loop key used when multiple OPD teachers are present.
-teacher_key: default
-
 # Distillation loss config.
 distillation_loss:
 

@@ -3,6 +3,7 @@
 import logging
 import os
 from contextlib import nullcontext
+from functools import partial
 from typing import TYPE_CHECKING
 
 import ray
@@ -16,11 +17,14 @@ from verl.single_controller.base.decorator import (
     register,
 )
 from verl.utils import tensordict_utils as tu
+from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_device_id, is_cuda_available
 from verl.utils.fs import copy_to_local
 from verl.utils.memory_utils import aggressive_empty_cache
 from verl.workers.engine_workers import ActorRolloutRefWorker
 
+from psrl.trainer.distillation.data import align_teacher_targets
+from psrl.trainer.distillation.losses import distillation_ppo_loss
 from psrl.utils.common.patch_utils import apply_tms_patch
 from psrl.utils.converter import create_parameter_mapping
 from psrl.utils.converter.param_sync import ParamSyncPlan
@@ -590,12 +594,25 @@ class PSRL_EngineTrainWorker(ActorRolloutRefWorker, PSRL_BaseTrainWorker):
                             self.config.actor.fsdp_config.load_weight = True
                         elif strategy == "megatron":
                             self.config.actor.megatron.load_weight = True
+            if self.distillation_enabled and self._is_actor:
+                self.distillation_config = omega_conf_to_dataclass(self.distillation_config)
+                self.loss_fn = partial(
+                    distillation_ppo_loss,
+                    config=omega_conf_to_dataclass(self.config.actor),
+                    distillation_config=self.distillation_config,
+                )
+                self.actor.set_loss_fn(self.loss_fn)
             self._materialize_actor_weight_arena()
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @gpu_memory_logger_decorator(log_only_rank_0=False)
     def update_actor(self, data: TensorDict) -> TensorDict:
         """Train the actor for one step, then push updated weights to the PS."""
+        if self.distillation_enabled:
+            loss = self.distillation_config.distillation_loss
+            use_topk = loss.loss_settings.use_topk
+            vocab_size = self.actor.model_config.hf_config.get_text_config().vocab_size
+            data = align_teacher_targets(data, int(loss.topk) if use_topk else 1, use_topk, vocab_size=vocab_size)
         with log_dual_events("Train actor", psrl_logger, event_type=EventType.TRAIN):
             output = ActorRolloutRefWorker.update_actor(self, data)
         push_model = tu.pop(data, key="push_model", default=True)
