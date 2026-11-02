@@ -546,10 +546,16 @@ func (n *Node) Sweep(ctx context.Context, _ *v1.Empty) (*v1.SweepReport, error) 
 // It carries the lifecycle's attribution when one is still known, and maps to
 // gRPC NotFound so an SDK classifies it as a lost session rather than a
 // transport fault. `reason` is empty when the node never held the sandbox.
+//
+// `cause` is the runtime's own account of a session that ended under a sandbox
+// the node still holds -- a persistent shell that died, for instance. It is kept
+// apart from the attribution because nothing exited: the sandbox is alive and the
+// caller needs to know that, not to be told it was never here.
 type sessionGoneError struct {
 	sandboxID  string
 	nodeID     string
 	reason     string
+	cause      string
 	exitCode   int
 	codeKnown  bool
 	finished   time.Time
@@ -572,8 +578,24 @@ func sessionGone(sandboxID, nodeID string, attribution node.ExitAttribution) *se
 	}
 }
 
+// sessionGoneWithCause builds the failure for a sandbox the node still holds
+// whose command session ended, naming what happened to the session. The caller
+// must replace the session, not the sandbox, and "not held" would tell it the
+// opposite.
+func sessionGoneWithCause(sandboxID, nodeID string, cause error) *sessionGoneError {
+	gone := sessionGone(sandboxID, nodeID, node.ExitAttribution{})
+	gone.cause = cause.Error()
+	return gone
+}
+
 func (e *sessionGoneError) Error() string {
 	message := fmt.Sprintf("sandbox %q is not held by node %q", e.sandboxID, e.nodeID)
+	if e.cause != "" {
+		message = fmt.Sprintf(
+			"sandbox %q is held by node %q, but its command session was lost: %s",
+			e.sandboxID, e.nodeID, e.cause,
+		)
+	}
 	var details []string
 	if e.reason != "" {
 		details = append(details, "exit_reason="+e.reason)
@@ -710,10 +732,12 @@ func (n *Node) classifyRuntimeFailure(
 		n.lifecycle.MarkLost(handle.SandboxID, attribution)
 		return sessionGone(handle.SandboxID, n.nodeID, attribution)
 	case errors.Is(err, backend.ErrSessionLost):
-		// The command session is gone, but the container may still be healthy.
-		// The caller replaces the sandbox; the node does not release a runtime
-		// it has no evidence is dead, so there is no exit code to report.
-		return sessionGone(handle.SandboxID, n.nodeID, node.ExitAttribution{})
+		// The command's shell is gone, but the container may still be healthy. The
+		// caller replaces the sandbox; the node does not release a runtime it has no
+		// evidence is dead, so there is no exit code to report. The runtime's own
+		// account travels with the loss, because a caller told only "not held"
+		// cannot tell a session that ended from a sandbox that was never there.
+		return sessionGoneWithCause(handle.SandboxID, n.nodeID, err)
 	case errors.Is(err, backend.ErrPathNotFound):
 		return &pathNotFoundError{path: "", err: err}
 	default:

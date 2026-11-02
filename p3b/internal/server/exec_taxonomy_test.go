@@ -115,6 +115,39 @@ func TestALossCarriesTheRuntimeEvidenceForItsExitCode(t *testing.T) {
 	}
 }
 
+func TestALostCommandSessionKeepsTheSandboxAndNamesItsCause(t *testing.T) {
+	// A shell that dies mid-command is a fact about the command session, not about
+	// the sandbox: the node still holds a healthy container. Telling the caller it
+	// was never here sends it to replace a sandbox that is fine, and hides what
+	// actually ended the session.
+	cause := fmt.Errorf(
+		"the persistent shell exited while this command was running: %w", backend.ErrSessionLost)
+	hosted := &typedBackend{fakeDirect: &fakeDirect{}, execErr: cause}
+	agent, life, handle := createOneSandbox(t, hosted)
+
+	_, err := agent.Exec(context.Background(), handle, "true", "", nil, backend.ExecOptions{})
+	var gone *sessionGoneError
+	if !errors.As(err, &gone) {
+		t.Fatalf("a dead shell must be a lost session, got %v", err)
+	}
+	if gone.cause == "" {
+		t.Fatal("the loss dropped the runtime's account of what ended the session")
+	}
+	if !strings.Contains(err.Error(), "its command session was lost") {
+		t.Fatalf("message %q does not say the session was lost", err.Error())
+	}
+	if strings.Contains(err.Error(), "is not held by node") {
+		t.Fatalf("message %q claims the sandbox is not held, but the node still holds it", err.Error())
+	}
+	if !life.Running(handle.SandboxID) {
+		t.Fatal("the node released a sandbox whose runtime it has no evidence is gone")
+	}
+	wire := classify(err)
+	if wire.Code != "session_lost" || wire.ExitReason != "" {
+		t.Fatalf("wire %q reason %q, want session_lost with no exit attribution", wire.Code, wire.ExitReason)
+	}
+}
+
 func TestALossWithoutInspectEvidenceNamesTheInspectFailure(t *testing.T) {
 	hosted := &typedBackend{
 		fakeDirect: &fakeDirect{},
