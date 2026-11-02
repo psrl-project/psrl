@@ -28,6 +28,7 @@ from psrl.sandbox import (
     ResourceSpec,
     SandboxCapabilities,
     SandboxCollectorError,
+    SandboxCommandTimeout,
     SandboxExitReason,
     SandboxPathNotFoundError,
     SandboxRef,
@@ -88,6 +89,9 @@ class FakeSandbox(SandboxSession):
         self.status_value = status_value
         self.status_error = status_error
         self.commands: list[tuple[str, str | None, Mapping[str, str] | None]] = []
+        # The deadline each command carried, so a test can pin that the harness hands
+        # its episode clock to the sandbox instead of relying on its own timer.
+        self.timeouts: list[float | None] = []
         self.writes: dict[str, bytes] = {}
         self.cli_started = asyncio.Event()
         self.cli_cancelled = False
@@ -109,6 +113,7 @@ class FakeSandbox(SandboxSession):
         timeout_s: float | None = None,
     ) -> ExecResult:
         self.commands.append((command, cwd, env))
+        self.timeouts.append(timeout_s)
         # The prepare probe creates the state dir and checks the mounted CLI.
         if command.startswith("mkdir -p /root/.psrl-harness"):
             return ExecResult(0 if self.runtime_available else 1, "", "" if self.runtime_available else "no such file")
@@ -122,7 +127,18 @@ class FakeSandbox(SandboxSession):
         if "/opt/harness/bin/" in command and self.block_cli:
             self.cli_started.set()
             try:
-                await asyncio.Future()
+                if timeout_s is None:
+                    await asyncio.Future()
+                else:
+                    # The sandbox enforces a command's deadline itself. Modeling it here
+                    # is what makes a harness that relies on its own timer fail this
+                    # test instead of passing slowly.
+                    await asyncio.wait_for(asyncio.Future(), timeout=timeout_s)
+            except asyncio.TimeoutError as exc:  # a deadline stop, not a cancellation
+                self.cli_cancelled = True
+                raise SandboxCommandTimeout(
+                    "the CLI ran out of its command budget", sandbox_preserved=True
+                ) from exc
             except asyncio.CancelledError:
                 self.cli_cancelled = True
                 raise
@@ -301,11 +317,13 @@ async def test_successful_harness_skips_diagnostic_tail_commands() -> None:
 
 @pytest.mark.asyncio
 async def test_the_harness_stops_at_the_deadline_and_keeps_partial_output() -> None:
-    """A `keep` loop hands the harness its episode deadline, so the harness stops the CLI.
+    """A `keep` loop hands the harness its episode deadline, so the CLI stops at it.
 
-    The run has to return rather than raise, with `timed_out` set and the output files
-    still pointing at what the CLI had written, because the loop that chose `keep`
-    collects the partial trajectory and grades it.
+    The deadline travels to the sandbox as the command's own budget, and the sandbox
+    stops the CLI and answers with a command timeout. The run has to return rather
+    than raise, with `timed_out` set and the output files still pointing at what the
+    CLI had written, because the loop that chose `keep` collects the partial
+    trajectory and grades it.
     """
     sandbox = FakeSandbox(block_cli=True)
     harness = create_harness(HarnessConfig(kind="codex", executable="codex"), sandbox)
@@ -318,6 +336,9 @@ async def test_the_harness_stops_at_the_deadline_and_keeps_partial_output() -> N
     assert result.timed_out is True
     assert result.exit_code == EXIT_TIME_BUDGET_EXCEEDED
     assert sandbox.cli_cancelled, "the deadline stops the CLI rather than leaving it running"
+    # The episode clock travels to the sandbox as the command's own deadline, so the
+    # sandbox stops the CLI and the collector finds a free shell behind it.
+    assert sandbox.timeouts[-1] == pytest.approx(0.05)
     # The deadline stops the CLI; it does not discard what the CLI produced.
     assert result.stdout_path == "/root/.psrl-harness/stdout.log"
     assert result.stdout_tail == "bounded tail"
@@ -524,6 +545,41 @@ async def test_collector_stops_at_the_total_patch_budget(
 
     assert "patch_capped=1" in str(excinfo.value)
     assert "status='running'" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_a_collector_that_times_out_grades_what_it_wrote() -> None:
+    """A collector stopped at its budget leaves a gradeable patch behind.
+
+    The collector writes each file's diff as it goes, so a budget stop is not a failed
+    collection: discarding what it wrote would cost a finished harness run to the size
+    of the repository rather than to the solution.
+    """
+
+    class SlowCollector(FakeSandbox):
+        async def exec(self, command, *, cwd=None, env=None, timeout_s=None):
+            if _HARNESS_PATCH_NAME in command:
+                self.writes[_PATCH_PATH] = b"diff --git a/x b/x\n+done\n"
+                raise SandboxCommandTimeout("collector stopped at its budget", sandbox_preserved=True)
+            return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s)
+
+    patch = await collect_git_patch(SlowCollector(), "/testbed", staging_dir=_STAGING_DIR)
+
+    assert patch == "diff --git a/x b/x\n+done\n"
+
+
+@pytest.mark.asyncio
+async def test_a_collector_that_times_out_before_writing_anything_is_a_collector_fault() -> None:
+    class EmptyCollector(FakeSandbox):
+        async def exec(self, command, *, cwd=None, env=None, timeout_s=None):
+            if _HARNESS_PATCH_NAME in command:
+                raise SandboxCommandTimeout("collector stopped at its budget", sandbox_preserved=True)
+            return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s)
+
+    with pytest.raises(SandboxCollectorError) as excinfo:
+        await collect_git_patch(EmptyCollector(), "/testbed", staging_dir=_STAGING_DIR)
+
+    assert "before writing any patch" in str(excinfo.value)
 
 
 @pytest.mark.asyncio

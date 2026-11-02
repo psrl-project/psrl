@@ -31,6 +31,12 @@ psrl_logger = logging.getLogger(__file__)
 # deadline rather than the CLI exiting on its own.
 EXIT_TIME_BUDGET_EXCEEDED = -1
 
+# How long past the episode clock this layer keeps waiting for the sandbox's reply.
+# The sandbox enforces the deadline itself and answers with a typed timeout; this
+# wait only covers a transport that stops answering, so it sits above the SDK's own
+# reply grace and never races the real answer.
+_REPLY_BACKSTOP_S = 60.0
+
 # Trajectory output formats the post-rollout integrity scanner and the episode
 # summary parser can dispatch on. `auto` resolves to the kind default below, but the
 # scan dispatch key is always a concrete format.
@@ -417,6 +423,11 @@ class Harness(ABC):
                 command,
                 cwd=runtime.workdir,
                 env=env,
+                # The episode clock is the command's own deadline: the sandbox stops the
+                # CLI at it and keeps partial output, so the artifact collector can run
+                # on the same sandbox immediately instead of queuing behind a turn
+                # nobody is waiting for.
+                timeout_s=deadline_s,
             )
         )
         self._active_exec = task
@@ -424,12 +435,13 @@ class Harness(ABC):
             if deadline_s is None:
                 result = await task
             else:
-                result = await asyncio.wait_for(task, timeout=deadline_s)
+                result = await asyncio.wait_for(task, timeout=deadline_s + _REPLY_BACKSTOP_S)
         except asyncio.TimeoutError:
-            # The deadline fired while the CLI was still working. Cancelling the exec is
-            # the best stop this layer can offer; the sandbox lease release is the hard
-            # one. Return the partial output rather than raising, so the caller decides
-            # whether to keep it.
+            # Either the sandbox stopped the CLI at the episode deadline (its typed
+            # command timeout is also a TimeoutError) or nothing answered at all.
+            # Cancelling the exec is the best stop this layer can offer; the sandbox
+            # lease release is the hard one. Return the partial output rather than
+            # raising, so the caller decides whether to keep it.
             return HarnessResult(
                 exit_code=EXIT_TIME_BUDGET_EXCEEDED,
                 timed_out=True,
