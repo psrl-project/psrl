@@ -6,7 +6,7 @@ import pymupdf
 
 
 def main() -> None:
-    root = Path(__file__).resolve().parent.parent
+    root = Path(__file__).resolve().parents[3]
     figures = root / "docs" / "_static" / "img"
     source = figures / "resource_elasticity_overview.pdf"
     target = source.with_suffix(".svg")

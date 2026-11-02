@@ -56,6 +56,9 @@ with a cost model, or cache-aware). SMG also captures multi-turn training data v
 
 ### Rollout Instances
 
+Policy rollout, validation, and reward-model inference use vLLM. Set their rollout
+configuration to `name: vllm`.
+
 vLLM engine pools that handle inference requests. Each instance manages a subset of generation requests and maintains its own KV cache. Rollout instances **pull** new model weights from co-located PS Workers when triggered by the sync strategy. Multiple instances can run different model versions concurrently during the transition period.
 
 ### Reward Service

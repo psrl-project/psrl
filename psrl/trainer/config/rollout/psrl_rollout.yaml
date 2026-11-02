@@ -11,7 +11,7 @@ defaults:
 # Target class for this configuration (PSRL's extended RolloutConfig).
 _target_: psrl.workers.config.RolloutConfig
 
-# PSRL only support vllm backend.
+# PSRL uses the vLLM rollout backend.
 name: vllm
 
 # Async mode in PSRL

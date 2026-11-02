@@ -11,7 +11,6 @@ PSRL_WORKSPACE=${PSRL_WORKSPACE:-$PSRL_PATH}
 HOME=${PSRL_WORKSPACE}
 
 ROLLOUT_NAME="vllm"
-TEACHER_ROLLOUT_NAME="${TEACHER_ROLLOUT_NAME:-vllm}"
 DATA_PATH="${PSRL_WORKSPACE}/data"
 
 STUDENT_MODEL_PATH="${STUDENT_MODEL_PATH:-models/Qwen3-4B-Thinking-2507}"
@@ -113,7 +112,7 @@ REWARD_MODELS=(
     reward.managers.gen_qwen3_8b.model.path="${TEACHER_MODEL_PATH}"
     reward.managers.gen_qwen3_8b.model.trust_remote_code=False
     reward.managers.gen_qwen3_8b.rollout._target_=psrl.workers.config.RolloutConfig
-    reward.managers.gen_qwen3_8b.rollout.name=${TEACHER_ROLLOUT_NAME}
+    reward.managers.gen_qwen3_8b.rollout.name=vllm
     reward.managers.gen_qwen3_8b.rollout.mode=psrl_async
     reward.managers.gen_qwen3_8b.rollout.disable_attn=False
     reward.managers.gen_qwen3_8b.rollout.dtype=bfloat16

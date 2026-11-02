@@ -129,7 +129,7 @@ repository root with:
 
 ```bash
 python -m pip install PyMuPDF
-python scripts/render_elastic_overview.py
+python examples/elastic/elastic_analysis/render_elastic_overview.py
 ```
 
 The repository `.gitignore` excludes `**/*.png` as a runtime artifact, with an

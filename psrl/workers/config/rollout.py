@@ -105,6 +105,7 @@ class AgentLoopConfig(_VeRLAgentLoopConfig):
 class RolloutConfig(_VeRLRolloutConfig):
     """Extend veRL rollout configuration with PSRL settings."""
 
+    name: str = "vllm"
     disable_attn: bool = False
     runner: str = "generate"
     task: str = "generate"
@@ -121,6 +122,14 @@ class RolloutConfig(_VeRLRolloutConfig):
     disable_kv_cache: bool = False
     task: str = "generate"
     runner: str = "generate"
+
+    def __post_init__(self):
+        """
+        Validate the supported backend and upstream rollout settings.
+        """
+        if self.name != "vllm":
+            raise ValueError(f"PSRL supports only the vLLM rollout backend, got name={self.name!r}.")
+        super().__post_init__()
 
 
 __all__ = [

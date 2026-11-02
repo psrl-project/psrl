@@ -66,11 +66,6 @@ from psrl.utils.logger import (
 )
 from psrl.utils.ray import shared_pull_model_context_async
 from psrl.workers.config import RolloutConfig
-from psrl.workers.gen.rope import (
-    _ensure_vllm_hf_rope_overrides,
-    effective_max_position_embeddings,
-    vllm_engine_kwargs,
-)
 from psrl.workers.gen.smg_adapter import build_worker_registration_payload, cfg_get, is_cache_aware_method
 from psrl.workers.gen.stats_collector import DPLBStatCollector
 from psrl.workers.gen.utils import DEFAULT_MAX_CONNECTIONS, DEFAULT_TIMEOUT, TokenOutput
@@ -208,30 +203,10 @@ class PSRL_vLLMHttpServer(vLLMHttpServer):
         # Populated after engine startup. Generative models retain `None`.
         self.pooling_params: PoolingParams | None = None
 
-    def _preprocess_engine_kwargs(self, engine_kwargs: dict) -> None:
-        _ensure_vllm_hf_rope_overrides(engine_kwargs, self.model_config.hf_config)
-
     def _validate_configs(self) -> None:
-        from verl.workers.rollout.utils import get_max_position_embeddings
-
-        # The parent compares `max_model_len` to the unscaled HF field.
-        # YaRN extends that ceiling by `factor`.
-        engine_kwargs = vllm_engine_kwargs(self.config)
-        native = get_max_position_embeddings(self.model_config.hf_config)
-        effective = effective_max_position_embeddings(self.model_config.hf_config, engine_kwargs, native)
-        hf_config = self.model_config.hf_config
-        if effective == native:
-            super()._validate_configs()
-            return
-        native_field = getattr(hf_config, "max_position_embeddings", None)
-        hf_config.max_position_embeddings = effective
-        try:
-            super()._validate_configs()
-        finally:
-            if native_field is None:
-                delattr(hf_config, "max_position_embeddings")
-            else:
-                hf_config.max_position_embeddings = native_field
+        """
+        Defer context validation to vLLM engine creation, which applies HF overrides.
+        """
 
     async def is_init_model(self):
         self._is_init_model.set()
@@ -666,6 +641,7 @@ class PSRL_vLLMHttpServer(vLLMHttpServer):
             kwargs["stat_loggers"] = [self.psrl_preemption_logger]
 
         engine_client = AsyncLLM.from_vllm_config(vllm_config=vllm_config, usage_context=usage_context, **kwargs)
+        self.config.max_model_len = vllm_config.model_config.max_model_len
 
         # Don't keep the dummy data in memory
         await engine_client.reset_mm_cache()

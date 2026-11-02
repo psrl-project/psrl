@@ -186,6 +186,11 @@ outside the workspace's `models/` directory. Select `PSRL_DEPLOY_DATASET=gsm8k`,
 dataset definitions in your launcher and its `data.train_datas` / `data.val_datas`
 overrides together.
 
+Set RoPE overrides under `rollout.engine_kwargs.vllm.hf_overrides.rope_parameters`,
+using the checkpoint's RoPE settings and vLLM's parameter names. The GLM recipe
+sets YaRN's `rope_type`, `factor`, and `original_max_position_embeddings` there.
+vLLM validates the context length with these overrides during engine creation.
+
 **Change topology through the launcher's `PSRL_DEPLOY_*` exports.**
 Many model, node, TP, and memory values are assigned unconditionally by the model
 script. The shared launch body derives instance sizes and validation counts from
