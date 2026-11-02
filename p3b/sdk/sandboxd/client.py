@@ -189,6 +189,16 @@ class Transport:
                     result = await asyncio.wait_for(roundtrip, timeout=timeout_s)
                 reusable = True
                 return result
+            except SandboxError:
+                # A typed service error leaves the connection clean: the reply was
+                # read in full, so the connection is still reusable. It is caught
+                # before asyncio.TimeoutError on purpose: a command timeout is both
+                # a typed service error and a TimeoutError, and the caller acts on
+                # the type. Read as a transport fault, the sandbox survives a
+                # command nobody can tell was stopped, and work it could finish is
+                # abandoned.
+                reusable = True
+                raise
             except asyncio.TimeoutError as exc:
                 # The service may still be acting on it, so this connection is
                 # dropped rather than pooled with an unread reply in the pipe.
@@ -197,11 +207,6 @@ class Transport:
                 ) from exc
             except (ConnectionError, OSError, asyncio.IncompleteReadError) as exc:
                 raise SandboxTransportError(f"The sandbox service connection failed during {method!r}: {exc}") from exc
-            except SandboxError:
-                # A typed service error leaves the connection clean: the reply was
-                # read in full, so the connection is still reusable.
-                reusable = True
-                raise
             finally:
                 if reusable:
                     self._release(reader, writer)
