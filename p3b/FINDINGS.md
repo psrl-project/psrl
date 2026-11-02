@@ -496,3 +496,41 @@ python tests/sandbox/soak.py --endpoint <control-endpoint> \
     --nodes 'node-a=root@<host-a>,node-b=root@<host-b>,node-c=root@<host-c>' \
     --image alpine:latest --seconds 120 --concurrency 64
 ```
+
+## Command budgets travel with the command
+
+A command's deadline used to live only in the caller's wait. A caller that gave up
+left the process running in the sandbox's persistent shell, so the next command
+queued behind it until its own budget expired. In the NeoHorse rollout run every one
+of the 260 exec timeouts was the artifact collector, and admission never waited once.
+
+The node plane now parses `timeout_s` and `silence_timeout_s`, enforces the deadline
+where the command runs, and answers `command_timeout` with `preserved=true`; the SDK
+waits a fixed grace past the deadline so that typed reply wins the race; and a
+cancel closes the command's shell so the next command starts on a fresh one.
+
+| Scenario | Result |
+| --- | --- |
+| `sleep 30` under a 2 s command budget | typed `command_timeout` at the budget, sandbox preserved |
+| a command issued right after it | succeeds immediately on a fresh shell |
+| concurrent creates | unique grant ids, no "quota grant already exists" |
+
+### A wedged container takes the node out of service
+
+Sandbox containers left by crashed runs had their `fuse-overlayfs` processes stuck in
+`D` state (`inode_wait_for_write`), so the daemon never answered
+`GET /containers/<id>/json`. Startup reconciliation inspects every container the node
+owns before it serves, so the restart timed out inspecting one of them and the node
+refused to start. `docker rm -f` on those containers times out as well, while a new
+container starts normally on the same daemon.
+
+The refusal is deliberate: a node that cannot account for a container must not admit
+against memory it cannot see. Recovering such a node is a host operation. Serving in a
+degraded mode, with an un-inspectable container charged from its cgroup instead of
+from the daemon, is the open design question this raised.
+
+Reproduce the deadline contract:
+
+```bash
+go test ./internal/server -run 'TestExecStopsAtTheCommandDeadline|TestGrantIDsAreUnique' -v
+```
