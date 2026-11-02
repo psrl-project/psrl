@@ -650,7 +650,9 @@ func (e *pathNotFoundError) GRPCStatus() *status.Status {
 // starts a fresh process per call, which is cheaper and correct for a grader.
 // The strategy is chosen at sandbox creation time and stored on the lifecycle
 // resident so this path cannot diverge from what the spec asked for.
-func (n *Node) Exec(ctx context.Context, handle backend.Handle, command, workdir string, env map[string]string) (backend.ExecResult, error) {
+func (n *Node) Exec(
+	ctx context.Context, handle backend.Handle, command, workdir string, env map[string]string, opts backend.ExecOptions,
+) (backend.ExecResult, error) {
 	_, held, owned := n.lifecycle.Lookup(handle.SandboxID)
 	if !owned {
 		// The sandbox is gone. Report why it left when the lifecycle still
@@ -681,9 +683,18 @@ func (n *Node) Exec(ctx context.Context, handle backend.Handle, command, workdir
 	// `git diff` or a compiler reaches the bound.
 	n.PrepareForCommand(ctx, handle.SandboxID)
 	defer n.FinishCommand(handle.SandboxID)
-	result, err := executor.Exec(ctx, handle, execMode, command, workdir, env)
+	result, err := executor.Exec(ctx, handle, execMode, command, workdir, env, opts)
 	if err == nil {
 		return result, nil
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		// The command ran out of its budget and the backend stopped it. The shell
+		// session is closed, so the sandbox survives and the next command gets a
+		// fresh one: this is a fact about the command, not a transport fault, and a
+		// caller that reads it as one abandons work the sandbox could still grade.
+		return result, status.Errorf(
+			codes.DeadlineExceeded, "command exceeded its budget and was stopped: %v", err,
+		)
 	}
 	return result, n.classifyRuntimeFailure(ctx, held, handle, err)
 }
@@ -823,7 +834,7 @@ func (n *Node) ReadBytes(ctx context.Context, handle backend.Handle, path string
 	done := n.lifecycle.Begin(handle.SandboxID)
 	defer done()
 	result, err := executor.Exec(ctx, handle, n.lifecycle.ExecMode(handle.SandboxID),
-		fmt.Sprintf("base64 %q", path), "", nil)
+		fmt.Sprintf("base64 %q", path), "", nil, backend.ExecOptions{})
 	if err != nil {
 		return nil, n.classifyRuntimeFailure(ctx, held, handle, err)
 	}
@@ -859,7 +870,9 @@ func (n *Node) WriteBytes(ctx context.Context, handle backend.Handle, path strin
 	defer done()
 	command := fmt.Sprintf("mkdir -p \"$(dirname %q)\" && printf %%s %q | base64 -d > %q",
 		path, base64.StdEncoding.EncodeToString(data), path)
-	result, err := executor.Exec(ctx, handle, n.lifecycle.ExecMode(handle.SandboxID), command, "", nil)
+	result, err := executor.Exec(
+		ctx, handle, n.lifecycle.ExecMode(handle.SandboxID), command, "", nil, backend.ExecOptions{},
+	)
 	if err != nil {
 		return n.classifyRuntimeFailure(ctx, held, handle, err)
 	}

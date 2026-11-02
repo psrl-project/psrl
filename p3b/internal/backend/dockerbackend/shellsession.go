@@ -179,7 +179,7 @@ func newShellSession(ctx context.Context, b *Backend, sandboxID string) (*shellS
 	startCtx, cancel := context.WithTimeout(ctx, defaultShellStartupTimeout)
 	defer cancel()
 	probe := fmt.Sprintf("echo %s $$", readinessMarker)
-	res, err := s.runInner(startCtx, probe, "", nil)
+	res, err := s.runInner(startCtx, probe, "", nil, defaultSilenceTimeout)
 	if err != nil || !strings.Contains(res.Stdout, readinessMarker) {
 		s.close()
 		return nil, fmt.Errorf("persistent shell did not become ready: %v (output: %q)", err, res.Stdout)
@@ -193,7 +193,7 @@ func newShellSession(ctx context.Context, b *Backend, sandboxID string) (*shellS
 	// directory and every exported variable it had built, and would never be told.
 	// The shim returns instead, so the sentinel still carries the status. A
 	// caller that redefines exit itself overrides this, which is its own choice.
-	if _, err := s.runInner(startCtx, exitShim, "", nil); err != nil {
+	if _, err := s.runInner(startCtx, exitShim, "", nil, defaultSilenceTimeout); err != nil {
 		s.close()
 		return nil, fmt.Errorf("persistent shell could not install its exit handling: %w", err)
 	}
@@ -231,13 +231,14 @@ func (s *shellSession) run(
 	ctx context.Context,
 	command, workdir string,
 	env map[string]string,
+	silence time.Duration,
 ) (backend.ExecResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
 		return backend.ExecResult{ExitCode: 1}, fmt.Errorf("persistent shell is closed")
 	}
-	return s.runInner(ctx, command, workdir, env)
+	return s.runInner(ctx, command, workdir, env, silence)
 }
 
 // runInner executes one command. Must be called with s.mu held.
@@ -246,11 +247,20 @@ func (s *shellSession) run(
 // decoded as it arrives instead of searching the raw bytes for the sentinel: a
 // frame header could otherwise match the sentinel, and the two streams could not
 // be reported separately. A partial frame is kept until the rest of it arrives.
+//
+// The context bound the command for its whole life: the deadline stops an
+// overrunning command at the caller's budget, and a cancellation (the caller went
+// away) does the same. Either way the session is closed, so the next command gets
+// a fresh shell instead of queueing behind a process nobody is waiting for.
 func (s *shellSession) runInner(
 	ctx context.Context,
 	command, workdir string,
 	env map[string]string,
+	silence time.Duration,
 ) (backend.ExecResult, error) {
+	if silence <= 0 {
+		silence = defaultSilenceTimeout
+	}
 	wrapped := s.wrap(command, workdir, env)
 	if _, err := fmt.Fprintf(s.conn, "%s\n", wrapped); err != nil {
 		s.closed = true
@@ -273,14 +283,19 @@ func (s *shellSession) runInner(
 	if t, ok := ctx.Deadline(); ok {
 		deadline = t
 	}
-	silenceDeadline := time.Now().Add(defaultSilenceTimeout)
+	// Closing the stream is what unblocks a read that would otherwise wait out the
+	// silence budget. Without it a cancelled command keeps the sandbox's shell held
+	// for up to a silence timeout, and every later command queues behind it.
+	stopOnCancel := context.AfterFunc(ctx, func() { _ = s.conn.Close() })
+	defer stopOnCancel()
+	silenceDeadline := time.Now().Add(silence)
 	raw := make([]byte, shellReadBufBytes)
 	for {
 		if !deadline.IsZero() {
 			now := time.Now()
 			if now.After(deadline) {
 				s.closed = true
-				return fail(1, "persistent shell command exceeded deadline")
+				return fail(1, "persistent shell command exceeded its deadline")
 			}
 			nextSilence := silenceDeadline
 			if deadline.Before(nextSilence) {
@@ -294,7 +309,7 @@ func (s *shellSession) runInner(
 		n, readErr := s.reader.Read(raw)
 		if n > 0 {
 			pending.Write(raw[:n])
-			silenceDeadline = time.Now().Add(defaultSilenceTimeout)
+			silenceDeadline = time.Now().Add(silence)
 			if !unframed && pending.Len() >= 8 && pending.Bytes()[0] > 2 {
 				// Not the Engine's framing: keep the bytes as stdout rather than
 				// dropping an output stream that is already plain text.
@@ -319,6 +334,12 @@ func (s *shellSession) runInner(
 			}
 		}
 		if readErr != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				// The caller's budget ran out or the caller went away. The stream was
+				// closed for us, so this is the command's outcome, not a shell fault.
+				s.closed = true
+				return fail(1, "persistent shell command stopped: "+ctxErr.Error())
+			}
 			if os.IsTimeout(readErr) {
 				if time.Now().After(silenceDeadline) {
 					s.closed = true
@@ -549,12 +570,13 @@ func (b *Backend) execPersistent(
 	handle backend.Handle,
 	command, workdir string,
 	env map[string]string,
+	silence time.Duration,
 ) (backend.ExecResult, error) {
 	s, err := b.shells.acquire(ctx, b, handle.SandboxID)
 	if err != nil {
 		return backend.ExecResult{ExitCode: 1}, fmt.Errorf("persistent shell: %w", err)
 	}
-	result, err := s.run(ctx, command, workdir, env)
+	result, err := s.run(ctx, command, workdir, env, silence)
 	if errors.Is(err, backend.ErrSessionLost) {
 		// The shell exited while this command was running, so the session is gone
 		// and part of the command may already have run.

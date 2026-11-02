@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -66,7 +67,9 @@ func (s *stubNodes) RenewOwnerOn(_ context.Context, _, owner string) error {
 	s.renewed = append(s.renewed, owner)
 	return nil
 }
-func (s *stubNodes) ExecOn(context.Context, backend.Handle, string, string, map[string]string) (backend.ExecResult, error) {
+func (s *stubNodes) ExecOn(
+	context.Context, backend.Handle, string, string, map[string]string, backend.ExecOptions,
+) (backend.ExecResult, error) {
 	return backend.ExecResult{}, nil
 }
 func (s *stubNodes) ReadBytesOn(context.Context, backend.Handle, string) (string, error) {
@@ -169,5 +172,30 @@ func TestReleaseWithUnknownRecordSurfacesANodeFailure(t *testing.T) {
 	})
 	if status.Code(err) != codes.Unavailable {
 		t.Fatalf("want Unavailable so the caller retries, got %v", err)
+	}
+}
+
+// TestGrantIDsAreUnique pins the property the quota ledger relies on: concurrent
+// creates must not share a grant id, or every create after the first one in a tick
+// fails with "quota grant already exists" instead of running.
+func TestGrantIDsAreUnique(t *testing.T) {
+	const n = 4096
+	ids := make(chan string, n)
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			ids <- newGrantID()
+		}()
+	}
+	wg.Wait()
+	close(ids)
+	seen := make(map[string]struct{}, n)
+	for id := range ids {
+		if _, duplicate := seen[id]; duplicate {
+			t.Fatalf("duplicate grant id %q among %d concurrent creates", id, n)
+		}
+		seen[id] = struct{}{}
 	}
 }

@@ -904,10 +904,14 @@ func (b *Backend) DeleteSnapshot(ctx context.Context, snapshotID string) error {
 // passes it here.
 func (b *Backend) Exec(
 	ctx context.Context, handle backend.Handle, execMode, command, workdir string, env map[string]string,
+	opts backend.ExecOptions,
 ) (backend.ExecResult, error) {
 	if execMode == "persistent" {
-		return b.execPersistent(ctx, handle, command, workdir, env)
+		return b.execPersistent(ctx, handle, command, workdir, env, opts.SilenceTimeout)
 	}
+	// A one-shot command is a single request whose reply is the whole result, so the
+	// caller's deadline is the only budget it needs: there is no stream to watch for
+	// silence.
 	return b.execOneShot(ctx, handle, command, workdir, env)
 }
 

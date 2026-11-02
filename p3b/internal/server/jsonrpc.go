@@ -142,6 +142,10 @@ type wireError struct {
 	// that made the exit code unknown. A loss with no code is diagnosable only
 	// if this travels with it.
 	StateError string `json:"state_error,omitempty"`
+	// Preserved says whether the sandbox survived the failure. A command that ran out
+	// of its budget keeps its runtime and only loses the shell session, so a caller can
+	// continue with a fresh shell; a lost session has nothing left to continue in.
+	Preserved bool `json:"preserved,omitempty"`
 }
 
 func (j *JSONListener) handle(ctx context.Context, conn net.Conn) {
@@ -216,6 +220,9 @@ func classify(err error) *wireError {
 		}
 	}
 	out := &wireError{Code: code, Message: err.Error(), ExitReason: exitReasonOf(err)}
+	// A deadline stops the command, not the sandbox: the backend closes the command's
+	// shell session and keeps the runtime, so the caller continues with a fresh shell.
+	out.Preserved = code == "command_timeout"
 	if exitCode, ok := exitCodeOf(err); ok {
 		out.ExitCode = &exitCode
 	}
@@ -254,6 +261,11 @@ func preserveSessionLost(err error) error {
 		return err
 	case errors.Is(err, backend.ErrSessionLost):
 		return status.Error(codes.NotFound, err.Error())
+	case status.Code(err) != codes.Unknown:
+		// A failure that already carries a classification keeps it. The wire layer maps
+		// a gRPC code onto the caller's vocabulary; rewriting it to Unavailable here
+		// would turn a command that hit its deadline into a transport fault.
+		return err
 	default:
 		return status.Error(codes.Unavailable, err.Error())
 	}
@@ -661,14 +673,25 @@ func (j *JSONListener) exec(ctx context.Context, raw json.RawMessage) (any, erro
 	}
 	var payload struct {
 		handlePayload
-		Command string            `json:"command"`
-		Cwd     string            `json:"cwd"`
-		Env     map[string]string `json:"env"`
+		Command         string            `json:"command"`
+		Cwd             string            `json:"cwd"`
+		Env             map[string]string `json:"env"`
+		TimeoutS        *float64          `json:"timeout_s"`
+		SilenceTimeoutS *float64          `json:"silence_timeout_s"`
 	}
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		return nil, err
 	}
-	result, err := j.control.nodes.ExecOn(ctx, payload.handle(), payload.Command, payload.Cwd, payload.Env)
+	opts := backend.ExecOptions{
+		Timeout:        durationOf(payload.TimeoutS),
+		SilenceTimeout: durationOf(payload.SilenceTimeoutS),
+	}
+	if opts.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, opts.Timeout)
+		defer cancel()
+	}
+	result, err := j.control.nodes.ExecOn(ctx, payload.handle(), payload.Command, payload.Cwd, payload.Env, opts)
 	if err != nil {
 		return nil, preserveSessionLost(err)
 	}

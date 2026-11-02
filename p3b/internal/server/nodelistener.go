@@ -16,6 +16,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	v1 "psrl.dev/sandboxd/api/v1"
+	"psrl.dev/sandboxd/internal/backend"
 	"psrl.dev/sandboxd/internal/placement"
 )
 
@@ -256,14 +257,28 @@ func (n *NodeListener) statusOn(ctx context.Context, raw json.RawMessage) (any, 
 func (n *NodeListener) exec(ctx context.Context, raw json.RawMessage) (any, error) {
 	var payload struct {
 		handlePayload
-		Command string            `json:"command"`
-		Cwd     string            `json:"cwd"`
-		Env     map[string]string `json:"env"`
+		Command         string            `json:"command"`
+		Cwd             string            `json:"cwd"`
+		Env             map[string]string `json:"env"`
+		TimeoutS        *float64          `json:"timeout_s"`
+		SilenceTimeoutS *float64          `json:"silence_timeout_s"`
 	}
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		return nil, err
 	}
-	result, err := n.node.Exec(ctx, payload.handle(), payload.Command, payload.Cwd, payload.Env)
+	// The command's budget travels with the command and is enforced here, where the
+	// command runs. Without it the caller's own wait is the only bound, and a caller
+	// that gives up leaves the process running in the sandbox's shell.
+	opts := backend.ExecOptions{
+		Timeout:        durationOf(payload.TimeoutS),
+		SilenceTimeout: durationOf(payload.SilenceTimeoutS),
+	}
+	if opts.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, opts.Timeout)
+		defer cancel()
+	}
+	result, err := n.node.Exec(ctx, payload.handle(), payload.Command, payload.Cwd, payload.Env, opts)
 	if err != nil {
 		return nil, preserveSessionLost(err)
 	}
@@ -273,6 +288,16 @@ func (n *NodeListener) exec(ctx context.Context, raw json.RawMessage) (any, erro
 		"stderr":    result.Stderr,
 		"truncated": result.Truncated,
 	}, nil
+}
+
+// durationOf reads a wire timeout in seconds, treating an absent or non-positive
+// value as "no budget". A zero-second deadline would stop every command before it
+// started, which is never what a caller means.
+func durationOf(seconds *float64) time.Duration {
+	if seconds == nil || *seconds <= 0 {
+		return 0
+	}
+	return time.Duration(*seconds * float64(time.Second))
 }
 
 // readBytes fetches one file out of a sandbox.

@@ -482,7 +482,7 @@ func execIn(t *testing.T, b *Backend, handle backend.Handle, command string) (ba
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	return b.Exec(ctx, handle, "persistent", command, "", nil)
+	return b.Exec(ctx, handle, "persistent", command, "", nil, backend.ExecOptions{})
 }
 
 // setUpSessionState builds the state whose loss these tests are about.

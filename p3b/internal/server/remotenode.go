@@ -180,11 +180,22 @@ func (r *RemoteNodeClient) renewOwnerOn(ctx context.Context, owner string) error
 	return err
 }
 
-func (r *RemoteNodeClient) execOn(ctx context.Context, handle backend.Handle, command, cwd string, env map[string]string) (backend.ExecResult, error) {
-	raw, err := r.call(ctx, "exec", map[string]any{
+func (r *RemoteNodeClient) execOn(
+	ctx context.Context, handle backend.Handle, command, cwd string, env map[string]string, opts backend.ExecOptions,
+) (backend.ExecResult, error) {
+	payload := map[string]any{
 		"backend": handle.Backend, "sandbox_id": handle.SandboxID, "node_id": handle.NodeID,
 		"command": command, "cwd": cwd, "env": env,
-	})
+	}
+	// The command's budgets travel with it; the node that runs the command is the
+	// only place they can be enforced.
+	if opts.Timeout > 0 {
+		payload["timeout_s"] = opts.Timeout.Seconds()
+	}
+	if opts.SilenceTimeout > 0 {
+		payload["silence_timeout_s"] = opts.SilenceTimeout.Seconds()
+	}
+	raw, err := r.call(ctx, "exec", payload)
 	if err != nil {
 		return backend.ExecResult{}, err
 	}
@@ -339,12 +350,14 @@ func (f *FleetNodeClient) RenewOwnerOn(ctx context.Context, nodeID, owner string
 }
 
 // ExecOn runs one command in a sandbox on the node that holds it.
-func (f *FleetNodeClient) ExecOn(ctx context.Context, handle backend.Handle, command, cwd string, env map[string]string) (backend.ExecResult, error) {
+func (f *FleetNodeClient) ExecOn(
+	ctx context.Context, handle backend.Handle, command, cwd string, env map[string]string, opts backend.ExecOptions,
+) (backend.ExecResult, error) {
 	n, err := f.node(handle.NodeID)
 	if err != nil {
 		return backend.ExecResult{}, err
 	}
-	return n.execOn(ctx, handle, command, cwd, env)
+	return n.execOn(ctx, handle, command, cwd, env, opts)
 }
 
 // ReadBytesOn reads a file from a sandbox on the node that holds it.

@@ -66,6 +66,14 @@ CALL_LIVENESS_S = 300.0
 # dead service, which is worth reporting rather than waiting on forever.
 CONNECT_LIVENESS_S = 30.0
 
+# How long past a command's own deadline the caller keeps waiting for its reply.
+# The deadline is enforced where the command runs, and its typed timeout reply is
+# the result the caller acts on. Waiting exactly as long as the command may run
+# races that reply: the client would give up at the same instant the sandbox stops
+# the command, report a transport fault, and leave the caller unable to tell a
+# stopped command from a broken service.
+EXEC_REPLY_GRACE_S = 30.0
+
 # How many connections one client keeps to one endpoint. The wire protocol
 # matches replies to requests by order, so a connection serves one call at a
 # time and concurrency is the pool's width. Sized for the concurrent episodes one
@@ -222,6 +230,7 @@ class Transport:
                 exit_code=error.get("exit_code"),
                 finished_at=error.get("finished_at") or "",
                 state_error=error.get("state_error") or "",
+                preserved=bool(error.get("preserved", False)),
             )
         return reply.get("result") or {}
 
@@ -247,6 +256,7 @@ def _error_for(
     exit_code: int | None = None,
     finished_at: str = "",
     state_error: str = "",
+    preserved: bool = False,
 ) -> SandboxError:
     """Rebuild a typed failure from the service's reply.
 
@@ -269,7 +279,7 @@ def _error_for(
         "capacity_timeout": SandboxCapacityTimeout,
         "cannot_admit": SandboxCapacityTimeout,
         "capability": SandboxCapabilityError,
-        "command_timeout": SandboxCommandTimeout,
+        "command_timeout": lambda text: SandboxCommandTimeout(text, sandbox_preserved=preserved),
         "path_not_found": SandboxPathNotFound,
         "transport": SandboxTransportError,
     }.get(code, SandboxError)(message)
@@ -671,7 +681,7 @@ class SandboxClient:
             "timeout_s": timeout_s,
             "silence_timeout_s": silence_timeout_s,
         }
-        reply = await self._run(agent, "exec", payload, timeout_s=timeout_s)
+        reply = await self._run(agent, "exec", payload, timeout_s=_exec_liveness(timeout_s))
         # An agent-backed sandbox runs its own commands, so the node that owns it
         # never observed this one. Tell it the sandbox is still working; an
         # agentless sandbox's node proxied the command and already knows.
@@ -741,6 +751,16 @@ class SandboxClient:
         except Exception:
             # Best-effort by contract: see the docstring.
             pass
+
+
+def _exec_liveness(timeout_s: float | None) -> float | None:
+    """The liveness bound for one exec: the command's deadline plus a reply grace.
+
+    A command with no deadline has no client bound either: it runs until it finishes or
+    the caller cancels. See `EXEC_REPLY_GRACE_S` for why a bounded command's wait is
+    not the command's own budget.
+    """
+    return None if timeout_s is None else timeout_s + EXEC_REPLY_GRACE_S
 
 
 def _handle_payload(handle: SandboxHandle) -> dict[str, Any]:

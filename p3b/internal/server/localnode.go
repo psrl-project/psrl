@@ -81,8 +81,10 @@ func (l *LocalNodeClient) RenewOwnerOn(_ context.Context, _ string, owner string
 }
 
 // ExecOn runs one command in a sandbox the node holds.
-func (l *LocalNodeClient) ExecOn(ctx context.Context, handle backend.Handle, command, cwd string, env map[string]string) (backend.ExecResult, error) {
-	return l.node.Exec(ctx, handle, command, cwd, env)
+func (l *LocalNodeClient) ExecOn(
+	ctx context.Context, handle backend.Handle, command, cwd string, env map[string]string, opts backend.ExecOptions,
+) (backend.ExecResult, error) {
+	return l.node.Exec(ctx, handle, command, cwd, env, opts)
 }
 
 // ReadBytesOn reads a file from a sandbox the node holds.

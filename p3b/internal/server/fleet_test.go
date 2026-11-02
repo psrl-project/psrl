@@ -206,7 +206,7 @@ func TestRemoteNodeClientExecOn(t *testing.T) {
 	addr := startFakeJSONNodeServer(t)
 	client := NewRemoteNodeClient(addr, 5*time.Second, 5*time.Second)
 	handle := backend.Handle{Backend: "docker", SandboxID: "sb-1", NodeID: "n1"}
-	result, err := client.execOn(context.Background(), handle, "echo hello", "", nil)
+	result, err := client.execOn(context.Background(), handle, "echo hello", "", nil, backend.ExecOptions{})
 	if err != nil {
 		t.Fatalf("exec: %v", err)
 	}

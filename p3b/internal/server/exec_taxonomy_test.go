@@ -29,7 +29,7 @@ type typedBackend struct {
 }
 
 func (b *typedBackend) Exec(
-	context.Context, backend.Handle, string, string, string, map[string]string,
+	context.Context, backend.Handle, string, string, string, map[string]string, backend.ExecOptions,
 ) (backend.ExecResult, error) {
 	return backend.ExecResult{}, b.execErr
 }
@@ -93,7 +93,7 @@ func TestALossCarriesTheRuntimeEvidenceForItsExitCode(t *testing.T) {
 	}
 	agent, _, handle := createOneSandbox(t, hosted)
 
-	_, err := agent.Exec(context.Background(), handle, "true", "", nil)
+	_, err := agent.Exec(context.Background(), handle, "true", "", nil, backend.ExecOptions{})
 	var gone *sessionGoneError
 	if !errors.As(err, &gone) {
 		t.Fatalf("a stopped container must be a lost session, got %v", err)
@@ -124,7 +124,7 @@ func TestALossWithoutInspectEvidenceNamesTheInspectFailure(t *testing.T) {
 	}
 	agent, _, handle := createOneSandbox(t, hosted)
 
-	_, err := agent.Exec(context.Background(), handle, "true", "", nil)
+	_, err := agent.Exec(context.Background(), handle, "true", "", nil, backend.ExecOptions{})
 	var gone *sessionGoneError
 	if !errors.As(err, &gone) {
 		t.Fatalf("want a lost session, got %v", err)
@@ -141,7 +141,7 @@ func TestExecOnAStoppedContainerIsSessionLostAndReleasesTheCharge(t *testing.T) 
 	hosted := &typedBackend{fakeDirect: &fakeDirect{}, execErr: backend.ErrRuntimeGone, status: "oom"}
 	agent, life, handle := createOneSandbox(t, hosted)
 
-	_, err := agent.Exec(context.Background(), handle, "true", "", nil)
+	_, err := agent.Exec(context.Background(), handle, "true", "", nil, backend.ExecOptions{})
 	var gone *sessionGoneError
 	if !errors.As(err, &gone) {
 		t.Fatalf("a stopped container must be reported as a lost session, got %v", err)

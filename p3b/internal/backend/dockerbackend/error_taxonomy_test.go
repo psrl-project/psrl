@@ -59,7 +59,7 @@ func TestExecMapsAStoppedContainerToRuntimeGone(t *testing.T) {
 	b := newFakeBackend(t, engine, time.Second, 0)
 	handle := backend.Handle{Backend: "docker", SandboxID: "c-1"}
 
-	_, err := b.Exec(context.Background(), handle, "", "true", "", nil)
+	_, err := b.Exec(context.Background(), handle, "", "true", "", nil, backend.ExecOptions{})
 	if !errors.Is(err, backend.ErrRuntimeGone) {
 		t.Fatalf("a stopped container must be ErrRuntimeGone, got %v", err)
 	}
@@ -81,7 +81,7 @@ func TestExecMapsAnOciExecFailureToRuntimeGone(t *testing.T) {
 	b := newFakeBackend(t, engine, time.Second, 0)
 	handle := backend.Handle{Backend: "docker", SandboxID: "c-1"}
 
-	_, err := b.Exec(context.Background(), handle, "", "true", "", nil)
+	_, err := b.Exec(context.Background(), handle, "", "true", "", nil, backend.ExecOptions{})
 	if !errors.Is(err, backend.ErrRuntimeGone) {
 		t.Fatalf("an OCI exec failure must be ErrRuntimeGone, got %v", err)
 	}
@@ -95,7 +95,7 @@ func TestExecKeepsAnOrdinaryExit127AsACommandResult(t *testing.T) {
 	b := newFakeBackend(t, engine, time.Second, 0)
 	handle := backend.Handle{Backend: "docker", SandboxID: "c-1"}
 
-	result, err := b.Exec(context.Background(), handle, "", "wc -c", "", nil)
+	result, err := b.Exec(context.Background(), handle, "", "wc -c", "", nil, backend.ExecOptions{})
 	if err != nil {
 		t.Fatalf("a missing tool is a command result, got %v", err)
 	}
@@ -122,7 +122,7 @@ func TestExecDoesNotMapAPausedContainerToRuntimeGone(t *testing.T) {
 	b := newFakeBackend(t, engine, time.Second, 0)
 	handle := backend.Handle{Backend: "docker", SandboxID: "c-1"}
 
-	_, err := b.Exec(context.Background(), handle, "", "true", "", nil)
+	_, err := b.Exec(context.Background(), handle, "", "true", "", nil, backend.ExecOptions{})
 	if err == nil || errors.Is(err, backend.ErrRuntimeGone) {
 		t.Fatalf("a paused container can be resumed, so it must not be reported gone: %v", err)
 	}

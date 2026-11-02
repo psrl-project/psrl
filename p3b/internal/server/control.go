@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -40,7 +42,9 @@ type NodeClient interface {
 	// the node that holds the sandbox. In a single-process deployment they call
 	// the node directly; in a fleet they reach the right machine over the
 	// node-plane protocol so the control plane never proxies data traffic.
-	ExecOn(ctx context.Context, handle backend.Handle, command, cwd string, env map[string]string) (backend.ExecResult, error)
+	ExecOn(
+		ctx context.Context, handle backend.Handle, command, cwd string, env map[string]string, opts backend.ExecOptions,
+	) (backend.ExecResult, error)
 	ReadBytesOn(ctx context.Context, handle backend.Handle, path string) (string, error)
 	WriteBytesOn(ctx context.Context, handle backend.Handle, path, data string) error
 }
@@ -190,6 +194,22 @@ func NewControl(cfg ControlConfig) (*Control, error) {
 // Create provisions one sandbox: quota, then routing, then placement, then the
 // node's own admission.
 //
+// newGrantID returns the identity the quota ledger indexes one admission by.
+//
+// The ledger refuses a duplicate id, so the id has to be unique across creates. A
+// timestamp alone is not: a grading wave or a fleet-wide rollout issues creates
+// concurrently, and two can land in the same clock tick. The random suffix removes
+// that collision without asking callers to retry.
+func newGrantID() string {
+	var suffix [6]byte
+	if _, err := rand.Read(suffix[:]); err != nil {
+		// crypto/rand does not fail on Linux; keeping the timestamp alone is still
+		// better than failing a create over its identifier.
+		return fmt.Sprintf("grant-%d", time.Now().UnixNano())
+	}
+	return fmt.Sprintf("grant-%d-%s", time.Now().UnixNano(), hex.EncodeToString(suffix[:]))
+}
+
 // A create is observable by its spec's idempotency key, when it has one: a
 // caller that has no response yet can ask what state its create is in, which is
 // what tells "still provisioning" apart from "the request never reached a
@@ -222,7 +242,7 @@ func (c *Control) create(ctx context.Context, req *v1.CreateRequest) (*v1.Create
 	// The ledger and the node must key on the same owner, because that is the
 	// identity the caller heartbeats. ownerOf reads it the way the node does.
 	owner := ownerOf(spec)
-	grantID := fmt.Sprintf("grant-%d", time.Now().UnixNano())
+	grantID := newGrantID()
 	charged := c.charged(spec)
 	amount := quotaAmount(charged)
 	if err := c.admit(ctx, grantID, spec.ResourceClass, owner, amount); err != nil {

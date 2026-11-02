@@ -164,7 +164,7 @@ func TestOneSandboxGoesEndToEndThroughEveryLayer(t *testing.T) {
 
 	// The command path goes to the node, never through the control plane.
 	result, err := s.node.Exec(ctx,
-		backend.Handle{SandboxID: created.GetHandle().GetSandboxId()}, "echo wired", "", nil)
+		backend.Handle{SandboxID: created.GetHandle().GetSandboxId()}, "echo wired", "", nil, backend.ExecOptions{})
 	if err != nil || result.ExitCode != 0 {
 		t.Fatalf("exec: code=%d err=%v", result.ExitCode, err)
 	}

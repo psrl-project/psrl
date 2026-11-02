@@ -33,6 +33,9 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"psrl.dev/sandboxd/internal/backend"
 	"psrl.dev/sandboxd/internal/node"
 	"psrl.dev/sandboxd/internal/server"
@@ -76,7 +79,9 @@ func (f *fakeExecBackend) Status(_ context.Context, handle backend.Handle) (stri
 	}
 	return "terminated", nil
 }
-func (f *fakeExecBackend) Exec(_ context.Context, _ backend.Handle, _, command, _ string, _ map[string]string) (backend.ExecResult, error) {
+func (f *fakeExecBackend) Exec(
+	_ context.Context, _ backend.Handle, _, command, _ string, _ map[string]string, _ backend.ExecOptions,
+) (backend.ExecResult, error) {
 	return backend.ExecResult{Stdout: "hello-from-" + f.name}, nil
 }
 
@@ -182,7 +187,7 @@ func TestTwoPlaneCreateExecRelease(t *testing.T) {
 
 	// Step 4: exec — the node proxies for a backend whose sandboxes have no
 	// in-sandbox agent, which is exactly what the docker backend does.
-	result, err := fleet.ExecOn(ctx, created.Handle, "echo hello", "", nil)
+	result, err := fleet.ExecOn(ctx, created.Handle, "echo hello", "", nil, backend.ExecOptions{})
 	if err != nil {
 		t.Fatalf("exec_on: %v", err)
 	}
@@ -245,7 +250,7 @@ func TestTwoPlaneMultiNodeRouting(t *testing.T) {
 	}
 
 	// Exec must reach node-b's backend, not node-a's.
-	result, err := fleet.ExecOn(ctx, created.Handle, "echo hello", "", nil)
+	result, err := fleet.ExecOn(ctx, created.Handle, "echo hello", "", nil, backend.ExecOptions{})
 	if err != nil {
 		t.Fatalf("exec_on: %v", err)
 	}
@@ -266,7 +271,7 @@ func TestTwoPlaneExecOnUnknownNodeReturnsError(t *testing.T) {
 		"node-a": server.NewRemoteNodeClient("127.0.0.1:1", 1*time.Second, 1*time.Second),
 	})
 	handle := backend.Handle{Backend: "fake", SandboxID: "sb-1", NodeID: "node-missing"}
-	_, err := fleet.ExecOn(context.Background(), handle, "echo hi", "", nil)
+	_, err := fleet.ExecOn(context.Background(), handle, "echo hi", "", nil, backend.ExecOptions{})
 	if err == nil {
 		t.Fatal("expected error for sandbox on an unknown node, got nil")
 	}
@@ -417,5 +422,63 @@ func TestRenewOwnerCrossesTheNodePlane(t *testing.T) {
 	}
 	if !gate.OwnerAlive("owner-r") {
 		t.Fatal("renew_owner did not reach the node's admission")
+	}
+}
+
+// deadlineBackend runs a command until its context ends, which is what a shell
+// executing a long command looks like to the node.
+type deadlineBackend struct{ *fakeExecBackend }
+
+func (d *deadlineBackend) Exec(
+	ctx context.Context, _ backend.Handle, _, _, _ string, _ map[string]string, _ backend.ExecOptions,
+) (backend.ExecResult, error) {
+	<-ctx.Done()
+	return backend.ExecResult{ExitCode: 1}, ctx.Err()
+}
+
+// TestExecStopsAtTheCommandDeadlineAndKeepsTheSandbox pins the contract that made
+// the ledger's collector timeouts possible to fix: the budget a caller sends with
+// a command is enforced where the command runs, the failure crosses the node
+// boundary as a command timeout rather than a transport fault, and the sandbox
+// survives it.
+func TestExecStopsAtTheCommandDeadlineAndKeepsTheSandbox(t *testing.T) {
+	b := &deadlineBackend{fakeExecBackend: newFakeExecBackend("slow")}
+	n := buildNodeForTest(t, "node-1", b)
+	addr := startNodeListener(t, n)
+	remote := server.NewRemoteNodeClient(addr, 10*time.Second, 10*time.Second)
+	fleet := server.NewFleetNodeClient(map[string]*server.RemoteNodeClient{"node-1": remote})
+
+	ctx := context.Background()
+	spec := backend.Spec{
+		Source:        backend.Source{Kind: "image", Reference: "alpine:latest"},
+		ResourceClass: "default",
+		WorkflowID:    "wf-deadline",
+		Resources:     backend.Resources{MemoryMB: 256, CPUCount: 0.5},
+	}
+	leaseID, gpus, refusal, err := fleet.Admit(ctx, "node-1", spec)
+	if err != nil || refusal != "" {
+		t.Fatalf("admit: err=%v refusal=%q", err, refusal)
+	}
+	spec.AssignedGPUs = gpus
+	created, err := fleet.CreateOn(ctx, "node-1", leaseID, "slow", spec, "")
+	if err != nil {
+		t.Fatalf("create_on: %v", err)
+	}
+
+	started := time.Now()
+	_, err = fleet.ExecOn(ctx, created.Handle, "pytest", "", nil, backend.ExecOptions{Timeout: 100 * time.Millisecond})
+	if err == nil {
+		t.Fatal("a command past its deadline reported success")
+	}
+	if status.Code(err) != codes.DeadlineExceeded {
+		t.Fatalf("deadline failure crossed as %v (%v), want DeadlineExceeded", status.Code(err), err)
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("exec took %s for a 100ms deadline", elapsed)
+	}
+	// A command deadline is about the command: the sandbox and its filesystem stay.
+	state, err := fleet.StatusOn(ctx, created.Handle)
+	if err != nil || state != "running" {
+		t.Fatalf("status after a command deadline: state=%q err=%v, want running", state, err)
 	}
 }

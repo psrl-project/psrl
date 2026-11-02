@@ -57,6 +57,21 @@ type ExecResult struct {
 	Truncated bool
 }
 
+// ExecOptions are the budget facts a command carries with it.
+//
+// They exist because a command's deadline belongs to the command, not to the
+// connection that carries it. A caller that wants ten minutes of `pytest` wants
+// the sandbox to stop it at ten minutes and say so; a transport that gives up at
+// the same instant instead leaves the process running, holds the sandbox's shell
+// for the next caller, and reports a fault that says nothing about the command.
+type ExecOptions struct {
+	// Timeout is the command's whole budget. Zero means no deadline.
+	Timeout time.Duration
+	// SilenceTimeout is the longest the command may produce no output before it is
+	// declared stuck. Zero takes the backend's default.
+	SilenceTimeout time.Duration
+}
+
 // Executor is implemented by a backend that can run a command inside a
 // sandbox. It is optional and separate from Backend because a backend whose
 // sandboxes run their own in-agent command server never reaches this path.
@@ -66,7 +81,9 @@ type ExecResult struct {
 // a failed command needs to know which stream said what, and a backend that
 // merged them cannot answer that.
 type Executor interface {
-	Exec(ctx context.Context, handle Handle, execMode, command, workdir string, env map[string]string) (ExecResult, error)
+	Exec(
+		ctx context.Context, handle Handle, execMode, command, workdir string, env map[string]string, opts ExecOptions,
+	) (ExecResult, error)
 }
 
 // SchedulingMode says who chooses the node a sandbox lands on.
