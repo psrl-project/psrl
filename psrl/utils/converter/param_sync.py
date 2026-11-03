@@ -166,8 +166,8 @@ class ConcatenatedQKVSync:
             qkv = torch.cat((q, k, v), dim=1).reshape(-1)
         else:
             qkv = torch.cat((q, k, v), dim=1).reshape(-1, self.source_param.size(1))
-            if self.is_visual_qkv:
-                qkv = reshape_visual_block_qkv(qkv, vision_head_size=self.vision_head_size)
+        if self.is_visual_qkv:
+            qkv = reshape_visual_block_qkv(qkv, vision_head_size=self.vision_head_size)
         state_dict[self.key].copy_(qkv.to(dtype=state_dict[self.key].dtype))
 
     def after_push(self, state_dict: dict[str, torch.Tensor]) -> None:

@@ -335,8 +335,8 @@ class MegatronConverter(BaseConverter):
             qkv = torch.cat((q, k, v), dim=1).reshape(-1)
         else:
             qkv = torch.cat((q, k, v), dim=1).reshape(-1, param.size(1))
-            if "visual.blocks" in full_hf_name and "qkv" in full_hf_name:
-                qkv = reshape_visual_block_qkv(qkv, vision_head_size=self.model_info.get("vision_head_size"))
+        if "visual.blocks" in full_hf_name and "qkv" in full_hf_name:
+            qkv = reshape_visual_block_qkv(qkv, vision_head_size=self.model_info.get("vision_head_size"))
         self.sync_plan.add(
             ConcatenatedQKVSync(
                 key=full_hf_name,
