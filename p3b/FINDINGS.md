@@ -570,3 +570,28 @@ came:
 ```bash
 pytest p3b/tests/sandbox/test_client_failures.py -q
 ```
+
+## A node's container network is part of the fleet contract
+
+Replacement sandbox nodes were Kubernetes workers whose dockerd runs with
+`--bridge=none --iptables=false`. Containers created there start and run, but get
+only a loopback interface: the harness inside the sandbox could not reach the
+rollout gateway, so every Codex trajectory failed with "codex produced no usable
+TITO trajectory" while every p3b call reported success. The harness's own stderr
+tail, carried in that error, named the real fault: "Reconnecting... waiting for
+network (Connection failed: error sending request)".
+
+A dedicated bridge network plus the NAT rule Docker would otherwise install gives
+sandboxes the same outbound path the old fleet had:
+
+```bash
+docker network create --driver=bridge --subnet=172.31.247.0/24 --gateway=172.31.247.1 p3b
+iptables -t nat -A POSTROUTING -s 172.31.247.0/24 -j MASQUERADE
+# node backend config: "network_mode": "p3b"
+```
+
+This is host state rather than repository state: it does not survive a reboot and
+has to be reapplied on any node whose daemon does not manage its own networking.
+A fleet swap should therefore check the sandbox's view of the network (one
+container plus a connection to the gateway), not only that the node registers.
+
