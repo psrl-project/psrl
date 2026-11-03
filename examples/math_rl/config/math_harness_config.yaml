@@ -1,0 +1,41 @@
+- name: math_codex
+  _target_: examples.math_rl.agent_loop.MathHarnessAgentLoop
+  runtime_in_image: ${oc.decode:${oc.env:MATH_RL_RUNTIME_IN_IMAGE,true}}
+  verifier:
+    endpoint: ${oc.env:MATH_RL_VERIFIER_URL}
+    verifier_harness_version: ${oc.env:MATH_RL_VERIFIER_VERSION}
+    model: ${oc.env:MATH_RL_VERIFIER_MODEL,''}
+    profile: ${oc.env:MATH_RL_VERIFIER_PROFILE,''}
+    reasoning_effort: ${oc.env:MATH_RL_VERIFIER_EFFORT,''}
+    stage_timeout_s: ${oc.decode:${oc.env:MATH_RL_VERIFIER_STAGE_TIMEOUT_S,600}}
+    max_retries: ${oc.decode:${oc.env:MATH_RL_VERIFIER_MAX_RETRIES,2}}
+    max_concurrency: ${oc.decode:${oc.env:MATH_RL_VERIFIER_MAX_CONCURRENCY,64}}
+    max_solution_bytes: 16777216
+    cache_size: 256
+    reward_mode: ${oc.env:MATH_RL_REWARD_MODE,graded}
+    graded_mapping:
+      "7": 1.0
+      "6": 0.8
+      "1": 0.3
+      "0": 0.0
+  sandbox_config:
+    backend: p3b
+    sandbox_cpu_count: 2
+    snapshot_verifier: false
+    environment:
+      image: ${oc.env:MATH_RL_SANDBOX_IMAGE,math-rl-codex:local}
+      cwd: /workspace
+      container_timeout: "2h"
+      memory: "8g"
+      resource_class: rollout
+  harness:
+    kind: codex
+    executable: codex
+    trajectory_format: codex_jsonl
+    reasoning_effort: medium
+    home_dir: /root
+    runtime_mount: ${oc.env:MATH_RL_HARNESS_RUNTIME_MOUNT,/usr/local}
+    subagents_enabled: false
+    compaction:
+      enabled: true
+      compact_percent: 75
