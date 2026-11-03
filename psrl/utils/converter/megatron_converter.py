@@ -329,9 +329,14 @@ class MegatronConverter(BaseConverter):
         # GQA produces mismatched middle dims (q: [groups, q_len, hidden],
         # k/v: [groups, kv_len, hidden]), so the concat is group-local (dim=1) and then
         # flattened. cat(dim=0) happens to work only when num_heads == num_kv_heads.
-        qkv = torch.cat((q, k, v), dim=1).reshape(-1, param.size(1))
-        if "visual.blocks" in full_hf_name and "qkv" in full_hf_name:
-            qkv = reshape_visual_block_qkv(qkv, vision_head_size=self.model_info.get("vision_head_size"))
+        if param.dim() == 1:
+            # A fused qkv bias has no hidden dimension. Both sides use the same
+            # group-major order, so the group-local concat is the whole tensor.
+            qkv = torch.cat((q, k, v), dim=1).reshape(-1)
+        else:
+            qkv = torch.cat((q, k, v), dim=1).reshape(-1, param.size(1))
+            if "visual.blocks" in full_hf_name and "qkv" in full_hf_name:
+                qkv = reshape_visual_block_qkv(qkv, vision_head_size=self.model_info.get("vision_head_size"))
         self.sync_plan.add(
             ConcatenatedQKVSync(
                 key=full_hf_name,
@@ -353,7 +358,7 @@ class MegatronConverter(BaseConverter):
         num_v_heads = self.model_info.get("linear_num_value_heads")
         if key_dim is None or value_dim is None or num_v_heads is None:
             raise ValueError(
-                "Qwen3.5 linear attention dims are missing in model_info for in_proj split; "
+                "Qwen3.5 linear attention dims are missing in model_info for in_proj split. "
                 f"got linear_key_dim={key_dim}, linear_value_dim={value_dim}, linear_num_value_heads={num_v_heads}."
             )
         try:
@@ -521,7 +526,7 @@ class MegatronConverter(BaseConverter):
         num_v_heads = self.model_info.get("linear_num_value_heads")
         if key_dim is None or value_dim is None or num_v_heads is None:
             raise ValueError(
-                "GDN linear dims missing in model_info for GDNLinearMapping split; "
+                "GDN linear dims missing in model_info for GDNLinearMapping split. "
                 f"got linear_key_dim={key_dim}, linear_value_dim={value_dim}, "
                 f"linear_num_value_heads={num_v_heads}."
             )

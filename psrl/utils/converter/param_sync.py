@@ -86,7 +86,7 @@ class ResidentZeroCenteredGammaSync:
     flight, and *not* reverting would leave the trainer's own forward reading gamma+1.
 
     So the exposed value gets its own tensor. `source_param` stays zero-centred for the
-    trainer; `state_dict[key]` holds `source_param + 1` and is refreshed at each version
+    trainer. `state_dict[key]` holds `source_param + 1` and is refreshed at each version
     publish. The copy costs one gamma per norm layer, which is negligible beside the
     weights themselves -- and it is what lets the registered address stay valid, since
     NIXL descriptors point at this tensor for the life of the run.
@@ -159,10 +159,15 @@ class ConcatenatedQKVSync:
             tp_size=self.tp_size,
         )
         # GQA models produce mismatched shapes (e.g., q: [8, 512, 4096], k/v: [8, 128, 4096]).
-        # cat(dim=0) only works for MHA; cat(dim=1) concatenates group-local QKV, then flatten.
-        qkv = torch.cat((q, k, v), dim=1).reshape(-1, self.source_param.size(1))
-        if self.is_visual_qkv:
-            qkv = reshape_visual_block_qkv(qkv, vision_head_size=self.vision_head_size)
+        # cat(dim=0) only works for MHA. cat(dim=1) concatenates group-local QKV, then flatten.
+        if self.source_param.dim() == 1:
+            # A fused qkv bias has no hidden dimension. Both sides use the same
+            # group-major order, so the group-local concat is the whole tensor.
+            qkv = torch.cat((q, k, v), dim=1).reshape(-1)
+        else:
+            qkv = torch.cat((q, k, v), dim=1).reshape(-1, self.source_param.size(1))
+            if self.is_visual_qkv:
+                qkv = reshape_visual_block_qkv(qkv, vision_head_size=self.vision_head_size)
         state_dict[self.key].copy_(qkv.to(dtype=state_dict[self.key].dtype))
 
     def after_push(self, state_dict: dict[str, torch.Tensor]) -> None:
@@ -176,6 +181,12 @@ class ConcatenatedQKVSync:
         # Flatten visual QKV layouts to 2-D first.
         if hf_qkv.dim() > 2:
             hf_qkv = hf_qkv.reshape(-1, hf_qkv.shape[-1])
+
+        if hf_qkv.dim() == 1:
+            # A fused qkv bias has no hidden dimension. `before_push` wrote the same
+            # group-major order, so the inverse is a copy.
+            self.source_param.copy_(hf_qkv.reshape(self.source_param.shape).to(dtype=self.source_param.dtype))
+            return
 
         # `before_push` writes via cat(dim=1).reshape: the flat tensor is organised as
         # nsh groups, each containing (q_len + k_len + v_len) rows, where
@@ -191,7 +202,7 @@ class ConcatenatedQKVSync:
 
         expected_rows = nsh * total_group_rows
         if hf_qkv.shape[0] != expected_rows:
-            # Size mismatch — cannot safely reconstruct; skip to avoid corruption.
+            # Size mismatch. Cannot safely reconstruct, so skip to avoid corruption.
             return
 
         hidden = hf_qkv.shape[1]
