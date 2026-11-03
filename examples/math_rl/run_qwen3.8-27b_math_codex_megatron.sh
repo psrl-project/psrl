@@ -6,9 +6,18 @@ set -xeuo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 PSRL_PATH=$(cd "${SCRIPT_DIR}/../.." && pwd)
 
+# The workspace env sets cluster transport variables and may change `python`.
+# Keep the interpreter this script was launched with, matching the other recipes.
+SCRIPT_PYTHON=$(command -v python || true)
 if [[ -f "${PSRL_WORKSPACE:-}/env/env.sh" ]]; then
     # shellcheck source=/dev/null
     source "${PSRL_WORKSPACE}/env/env.sh"
+elif [[ -f "${PSRL_WORKSPACE:-}/env.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${PSRL_WORKSPACE}/env.sh"
+fi
+if [[ -n "${SCRIPT_PYTHON}" ]]; then
+    export PATH="$(dirname "${SCRIPT_PYTHON}"):$PATH"
 fi
 
 export PYTHONPATH="${PSRL_PATH}:${PYTHONPATH:-}"
