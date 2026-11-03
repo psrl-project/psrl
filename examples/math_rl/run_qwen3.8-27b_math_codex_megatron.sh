@@ -163,10 +163,10 @@ VAL_INSTANCES=$(( (TRAIN_NNODES * TRAIN_NGPUS_PER_NODE) / VAL_TP ))
 VAL_NGPUS_PER_NODE_PER_INSTANCE=${VAL_TP}
 
 # --- Batch and sequence budgets ---
-train_prompt_bsz=32
-n_resp_per_prompt=8
+train_prompt_bsz=${TRAIN_BSZ:-32}
+n_resp_per_prompt=${ROLLOUT_N:-8}
 n_resp_per_prompt_val=1
-train_prompt_mini_bsz=32
+train_prompt_mini_bsz=${TRAIN_MINI_BSZ:-${train_prompt_bsz}}
 max_prompt_length=16384
 max_response_length=16384
 packing_length=$((max_prompt_length + max_response_length))
