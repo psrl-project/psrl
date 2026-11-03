@@ -202,6 +202,7 @@ val_top_p=0.7
 
 # --- Training hyperparameters ---
 actor_lr=1e-6
+lr_warmup_steps=${LR_WARMUP_STEPS:-10}
 offload=True
 
 PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo \
@@ -290,7 +291,7 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo \
     train_actor_rollout_ref.actor.clip_ratio_high="${clip_ratio_high}" \
     train_actor_rollout_ref.actor.clip_ratio_c=10.0 \
     train_actor_rollout_ref.actor.optim.lr="${actor_lr}" \
-    train_actor_rollout_ref.actor.optim.lr_warmup_steps=10 \
+    train_actor_rollout_ref.actor.optim.lr_warmup_steps="${lr_warmup_steps}" \
     train_actor_rollout_ref.actor.optim.weight_decay=0.1 \
     train_actor_rollout_ref.actor.optim.clip_grad=1.0 \
     train_actor_rollout_ref.actor.use_dynamic_bsz=False \
