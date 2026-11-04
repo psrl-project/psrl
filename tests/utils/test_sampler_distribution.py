@@ -134,8 +134,31 @@ def test_missing_capture_is_not_silently_disabled():
 
 def test_capture_does_not_duplicate_head_in_agent_response():
     body = {"top_p": 0.9, "temperature": 0.7}
-    configure_capture(body, SamplerCapture("support", 128))
+    configure_capture(body, SamplerCapture("support", 128), protocol="chat")
     assert body["top_logprobs"] == 0
     assert body["sampler_top_logprobs"] == 129
     with pytest.raises(ValueError, match="Truncated sampling"):
-        configure_capture(body, SamplerCapture("topk", 128))
+        configure_capture(body, SamplerCapture("topk", 128), protocol="chat")
+
+
+def test_a_responses_request_carries_the_logprobs_include():
+    capture = SamplerCapture(mode="topk", budget=32)
+    body = {"input": "hi", "include": ["reasoning.encrypted_content"]}
+    configure_capture(body, capture, protocol="responses")
+    assert body["logprobs"] is True
+    assert body["top_logprobs"] == 0
+    assert body["include"] == ["reasoning.encrypted_content", "message.output_text.logprobs"]
+    assert body["sampler_top_logprobs"] == capture.width
+
+
+def test_a_responses_request_that_already_asks_for_logprobs_is_not_duplicated():
+    body = {"input": "hi", "include": ["message.output_text.logprobs"]}
+    configure_capture(body, SamplerCapture(mode="topk", budget=32), protocol="responses")
+    assert body["include"] == ["message.output_text.logprobs"]
+
+
+def test_a_chat_request_does_not_gain_an_include_field():
+    body = {"messages": []}
+    configure_capture(body, SamplerCapture(mode="topk", budget=32), protocol="chat")
+    assert body["top_logprobs"] == 0
+    assert "include" not in body

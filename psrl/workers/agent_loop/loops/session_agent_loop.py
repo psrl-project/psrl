@@ -205,7 +205,7 @@ class SessionAgentLoop(AgentLoopBase):
         if request.get("seed") is not None:
             params["seed"] = int(request["seed"])
         capture = SamplerCapture() if request.get("validate", False) else self.sampler_capture
-        configure_capture(params, capture)
+        configure_capture(params, capture, protocol="chat")
         return params
 
     async def chat_completion(

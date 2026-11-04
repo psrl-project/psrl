@@ -425,11 +425,7 @@ class SessionRouter:
         try:
             # Always apply the capture contract: a disabled capture still sets the OpenAI logprob
             # fields TITO needs, while Anthropic Messages only carries sampler_top_logprobs.
-            configure_capture(
-                body,
-                capture,
-                set_response_fields=protocol in ("chat", "responses"),
-            )
+            configure_capture(body, capture, protocol=protocol)
         except (ValueError, TypeError) as error:
             return JSONResponse(status_code=400, content={"error": str(error)})
         content = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode()

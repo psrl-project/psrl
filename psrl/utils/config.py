@@ -401,6 +401,7 @@ def validate_config(
                 "min_p": rollout_config.get("min_p", 0.0),
             },
             capture,
+            protocol="chat",
         )
         # Upstream's rollout validation derives its own support checks from the sampler head and
         # receipt, so no additional sampler_support flag is mirrored into veRL.

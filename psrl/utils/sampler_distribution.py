@@ -83,17 +83,29 @@ def resolve_capture_mode(mode: str, *, top_p: float, top_k: int) -> str:
     return mode
 
 
-def configure_capture(body: dict, capture: SamplerCapture, *, set_response_fields: bool = True) -> None:
+def configure_capture(body: dict, capture: SamplerCapture, *, protocol: str) -> None:
     """
     Apply the sampler capture contract to a request body.
 
-    ``set_response_fields`` writes the OpenAI ``logprobs``/``top_logprobs`` pair. It is used for the
-    chat and Responses protocols. Anthropic Messages lowers to the canonical chat IR inside SMG and
-    only carries ``sampler_top_logprobs``.
+    ``protocol`` names the wire protocol the body speaks. The OpenAI ``logprobs`` and
+    ``top_logprobs`` pair is written for chat and Responses. Anthropic Messages lowers to the
+    canonical chat IR inside SMG and only carries ``sampler_top_logprobs``.
+
+    A Responses request that asks for ``top_logprobs`` must also name the logprobs include.
+    The upstream rejects the request otherwise, so the field is added here rather than left to
+    the caller.
     """
-    if set_response_fields:
+    if protocol not in ("chat", "responses", "messages"):
+        raise ValueError(f"Unknown request protocol {protocol!r}.")
+    if protocol in ("chat", "responses"):
         body["logprobs"] = True
         body["top_logprobs"] = 0
+        if protocol == "responses":
+            include = body.get("include")
+            items = list(include) if isinstance(include, (list, tuple)) else []
+            if "message.output_text.logprobs" not in items:
+                items.append("message.output_text.logprobs")
+            body["include"] = items
     body["sampler_top_logprobs"] = capture.width
     if not capture.enabled:
         return
