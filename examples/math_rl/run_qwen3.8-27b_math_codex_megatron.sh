@@ -281,6 +281,11 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo \
     train_actor_rollout_ref.rollout.multi_turn.max_turns="${max_turns}" \
     train_actor_rollout_ref.rollout.agent.trajectory_timeout="${trajectory_timeout}" \
     train_actor_rollout_ref.rollout.agent.trajectory_timeout_action=keep \
+    train_actor_rollout_ref.rollout.agent.default_agent_loop=math_codex \
+    train_actor_rollout_ref.rollout.agent.agent_loop_config_path="${AGENT_CONFIG}" \
+    train_actor_rollout_ref.rollout.agent.sandbox.default_backend=p3b \
+    train_actor_rollout_ref.rollout.agent.sandbox.backends.p3b.endpoint="${PSRL_P3B_ENDPOINT}" \
+    ~train_actor_rollout_ref.rollout.agent.sandbox.backends.docker \
     train_actor_rollout_ref.rollout.val_kwargs.temperature="${temperature}" \
     train_actor_rollout_ref.rollout.val_kwargs.do_sample=True \
     train_actor_rollout_ref.rollout.val_kwargs.top_p="${val_top_p}" \

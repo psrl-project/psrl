@@ -117,6 +117,7 @@ def test_prepare_harness_task_builds_the_sandbox():
     assert task.sandbox_spec.source.reference == "math-rl-codex:local"
     assert task.sandbox_spec.resource_class == "rollout"
     assert task.sandbox_spec.idempotency_key == "math-rl:u_1:rollout"
+    assert task.sandbox_spec.backend is None
     assert task.backend == "p3b"
 
 

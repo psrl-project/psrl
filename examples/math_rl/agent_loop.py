@@ -270,7 +270,6 @@ class MathHarnessAgentLoop(HarnessAgentLoop):
             idempotency_key=f"math-rl:{request_uid}:rollout",
             state_policy=SandboxStatePolicy(enabled=self.snapshot_verifier),
             resource_class=self.resource_class,
-            backend=self.backend,
             exec_mode=ExecMode.ONE_SHOT,
         )
 
