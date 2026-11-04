@@ -234,6 +234,15 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo \
     psrl.deployment.sandbox_placement.enabled=false \
     psrl.nixl.server_port="${NIXL_PORT}" \
     psrl.rollout_gateway.trajectory_id_strategy=auto \
+    psrl.rollout_coordination.routing_strategy.method=cache_aware_v1 \
+    psrl.rollout_coordination.routing_strategy.cache_aware_policy.lmcache_overlap_weight=0.5 \
+    psrl.rollout_coordination.routing_strategy.enable_trajectory_sticky=True \
+    psrl.rollout_coordination.routing_strategy.enable_group_sticky=True \
+    psrl.rollout_coordination.routing_strategy.kv_transfer.enable=False \
+    psrl.rollout_coordination.routing_strategy.kv_transfer.transfer_mode=async \
+    psrl.rollout_coordination.routing_strategy.max_num_waiting_reqs_after_preemption=0 \
+    psrl.rollout_coordination.session_strategy.thunder_agent.enable=True \
+    psrl.rollout_coordination.sync_and_mig_strategy.mig.enable=False \
     psrl.rollout_gateway.tito_tool_normalization=codex \
     psrl.rollout_gateway.tito_debug=false \
     psrl.rollout_gateway.tool_call_parser=qwen_xml \
@@ -364,4 +373,5 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo \
     trainer.save_freq=50 \
     trainer.total_epochs=100 \
     trainer.total_training_steps="${TOTAL_TRAINING_STEPS}" \
+    "$@" \
     2>&1 | tee "${LOG_DIR}/train.log"
