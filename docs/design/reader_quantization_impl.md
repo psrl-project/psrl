@@ -84,8 +84,8 @@ available and bandwidth matters.
 ```text
 trainer BF16 live shard
     -> NIXL READ into a bounded staging buffer (source dtype)
-    -> VllmFp8BlockQuantizer.quantize
-    -> rollout FP8 shard + _scale_inv
+    -> VllmFp8BlockQuantizer.quantize_into
+    -> rollout FP8 shard + _scale_inv (written in place)
 ```
 
 The pull engine:
@@ -243,8 +243,9 @@ What phase 1 costs per rollout replica, per node, and across the whole cluster, 
 terms the implementation already measures or bounds -- not a separate model.
 
 **Per-reader compute.** A reader's quantize cost is `O(local shard elements)`: the
-128x128 blockwise cast and the derived-scale write (`VllmFp8BlockQuantizer.quantize`)
-touch only the bytes the reader already owns. It does not grow with model size for a
+128x128 blockwise cast and the derived-scale write (`VllmFp8BlockQuantizer.quantize_into`)
+touch only the bytes the reader already owns. The weight is written into its registered
+FP8 view, so the cast reads and writes each byte once. It does not grow with model size for a
 fixed shard size, so a reader's cost at a 30B MoE and at a 1T MoE is the same once TP/EP
 hold the per-rank slice constant. This is what makes the design avoid a trainer-side
 publish copy: the quantize work moves to wherever there is idle compute (the reader),

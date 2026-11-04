@@ -24,7 +24,7 @@ from psrl.utils.nixl.handshake_notif import NotifKind
 from psrl.utils.nixl.nixl_spec import NIXLClientType, NIXLSharding
 from psrl.utils.nixl.pull_engine import ChunkUnavailable, NIXLPullEngine
 from psrl.utils.nixl.server import NIXLMetaServer
-from psrl.utils.quantization import QuantizationPlan
+from psrl.utils.quantization import QuantizationPlan, VllmFp8BlockQuantizer
 
 from tests.nixl.coord_judge import check_by_layout, check_fp8_exact, fill_by_layout, fill_fp8_exact
 from tests.nixl.memcpy_agent import MemcpyAgent, NotifBus
@@ -1057,6 +1057,81 @@ def test_reader_quantization_pulls_bf16_and_quantizes_in_place(train_tp, gen_tp)
         cluster.clients[name].publish_version(8)
     cluster.pull(epoch=2)
     _judge_fp8(cluster, version=8)
+
+
+class _RegisteredDestinationQuantizer(VllmFp8BlockQuantizer):
+    """Refuse the allocating path, so a pull must quantize into the registered views."""
+
+    def __init__(self, plan: QuantizationPlan):
+        super().__init__(plan)
+        self.calls: list[tuple[torch.Tensor, torch.Tensor]] = []
+
+    def quantize(self, source: torch.Tensor):
+        raise AssertionError("quantized into a temporary tensor instead of the registered views.")
+
+    def quantize_into(self, source, destination, scale):
+        self.calls.append((destination, scale))
+        super().quantize_into(source, destination, scale)
+
+
+def _require_registered_destinations(cluster) -> None:
+    """Swap every reader's quantizer for one that only accepts registered destinations."""
+    for name in cluster.gen:
+        cluster.clients[name]._quantizer = _RegisteredDestinationQuantizer(FP8_PLAN)
+
+
+@pytest.mark.parametrize("train_tp,gen_tp", [(2, 2), (4, 2)])
+def test_reader_quantization_quantizes_into_the_registered_fp8_views(train_tp, gen_tp):
+    """No FP8 temporary and no second copy when the scale grid is the publish tile."""
+    cluster = _fp8_cluster(train_tp, gen_tp, instances=2, peer_diffusion=True, reader_quantization=True)
+    _require_registered_destinations(cluster)
+
+    cluster.pull(epoch=1)
+    _judge_fp8(cluster, version=7)
+
+    for name in cluster.gen:
+        mapping = cluster.clients[name].get_original_tensor_mapping()
+        weights = {id(view) for (key, _), view in mapping.items() if not key.endswith("_scale_inv")}
+        scales = {id(view) for (key, _), view in mapping.items() if key.endswith("_scale_inv")}
+        calls = cluster.clients[name]._quantizer.calls
+        assert calls, name
+        assert all(id(destination) in weights for destination, _ in calls), name
+        assert all(id(scale) in scales for _, scale in calls), name
+
+
+def test_reader_quantization_writes_the_registered_weight_with_a_refined_scale_grid():
+    """A finer rollout grid still quantizes the weight into its registered view.
+
+    Gen TP 16 cuts the 32-row tile, so the coarse scale repeats past the registered
+    grid and has to be cropped to the shard's own tile count.
+    """
+    cluster = _fp8_cluster(
+        2, 16, instances=2, peer_diffusion=True, scale_tile=(16, 16), reader_quantization=True
+    )
+    _require_registered_destinations(cluster)
+
+    cluster.pull(epoch=1)
+    _judge_fp8(cluster, version=7)
+
+    for name in cluster.gen:
+        mapping = cluster.clients[name].get_original_tensor_mapping()
+        weights = {id(view) for (key, _), view in mapping.items() if not key.endswith("_scale_inv")}
+        calls = cluster.clients[name]._quantizer.calls
+        assert calls, name
+        assert all(id(destination) in weights for destination, _ in calls), name
+
+
+def test_reader_quantization_falls_back_when_the_registered_view_is_not_addressable(monkeypatch):
+    """A destination the fused kernel cannot flatten still lands through `copy_`."""
+    cluster = _fp8_cluster(2, 2, instances=2, peer_diffusion=True, reader_quantization=True)
+    monkeypatch.setattr(
+        VllmFp8BlockQuantizer,
+        "can_quantize_into",
+        lambda self, source, destination, scale: False,
+    )
+
+    cluster.pull(epoch=1)
+    _judge_fp8(cluster, version=7)
 
 
 def test_reader_quantization_peer_diffusion_shares_training_reads_across_separate_instances():

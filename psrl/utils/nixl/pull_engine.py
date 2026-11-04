@@ -996,15 +996,19 @@ class NIXLPullEngine:
         The scale is derived from the same source tile as the weight. A finer rollout
         scale grid receives the coarse 128x128 scale repeated over the cells it covers,
         matching what the trainer-side publisher wrote.
+
+        The bytes are written straight into the registered view. Quantizing into a
+        temporary and copying it in would read and write every FP8 byte twice.
         """
         quantizer = self.client._quantizer
         assert quantizer is not None
         block = quantizer.plan.block
         assert block is not None
         target = item.local_view
-        q, s = quantizer.quantize(source)
         scale_key = quantizer.scale_key_of(item.key)
         scale_view = self.client.get_original_tensor_mapping().get((scale_key, item.shard))
+        scale_dest = scale_view
+        refine = None
         if scale_view is not None:
             scale_tile = getattr(
                 self.client.local_client_info.tensor_infos[scale_key].sharding,
@@ -1013,13 +1017,50 @@ class NIXLPullEngine:
             ) or block
             repeat = tuple(int(b // t) for b, t in zip(block, scale_tile))
             if repeat != (1, 1):
-                s = quantizer.refine_scale(s, repeat)
-            assert tuple(scale_view.shape) == tuple(s.shape), (
-                f"{scale_key} shard {item.shard}: derived scale {tuple(s.shape)} does not "
-                f"match the registered {tuple(scale_view.shape)}."
+                # The weight still lands in its registered view. Only the coarse scale
+                # needs a temporary, and it is 1/16384 of the weight.
+                scale_dest = torch.empty(
+                    quantizer.scale_shape(source),
+                    dtype=quantizer.scale_dtype,
+                    device=source.device,
+                )
+                refine = repeat
+            else:
+                assert tuple(scale_view.shape) == tuple(quantizer.scale_shape(source)), (
+                    f"{scale_key} shard {item.shard}: registered scale {tuple(scale_view.shape)} "
+                    f"does not match the tile grid {tuple(quantizer.scale_shape(source))}."
+                )
+        if scale_dest is None:
+            scale_dest = torch.empty(
+                quantizer.scale_shape(source),
+                dtype=quantizer.scale_dtype,
+                device=source.device,
             )
-            scale_view.copy_(s)
-        target.copy_(q)
+
+        def refined_scale(coarse: torch.Tensor) -> torch.Tensor:
+            """Repeat the coarse grid, then crop to the shard's actual tile count."""
+            assert refine is not None
+            refined = quantizer.refine_scale(coarse, refine)
+            if tuple(refined.shape) == tuple(scale_view.shape):
+                return refined
+            assert all(r >= v for r, v in zip(refined.shape, scale_view.shape)), (
+                f"{scale_key} shard {item.shard}: refined scale {tuple(refined.shape)} is smaller "
+                f"than the registered {tuple(scale_view.shape)}."
+            )
+            return refined[tuple(slice(0, n) for n in scale_view.shape)]
+
+        if quantizer.can_quantize_into(source, target, scale_dest):
+            quantizer.quantize_into(source, target, scale_dest)
+            if refine is not None:
+                scale_view.copy_(refined_scale(scale_dest))
+        else:
+            # A destination the fused kernel cannot address is still writable by `copy_`.
+            q, s = quantizer.quantize(source)
+            target.copy_(q)
+            if scale_view is not None:
+                if refine is not None:
+                    s = refined_scale(s)
+                scale_view.copy_(s)
         pending = self._quantize_pending.get(item.key, 1) - 1
         if pending <= 0:
             self._quantize_pending.pop(item.key, None)

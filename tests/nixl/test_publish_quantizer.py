@@ -50,6 +50,33 @@ def test_quantize_into_writes_the_publish_copies():
     assert torch.equal(scale, reference_scales)
 
 
+def test_can_quantize_into_rejects_a_destination_the_kernel_cannot_address(monkeypatch):
+    """A view that cannot be flattened for the fused kernel must take the copy path."""
+    from psrl.utils.nixl import fp8_kernels
+
+    monkeypatch.setattr(fp8_kernels, "available", lambda tensor: True)
+    quantizer = VllmFp8BlockQuantizer(PLAN)
+    source = torch.empty(8, 128, 128, dtype=torch.bfloat16)
+    scale = torch.empty(8, 1, 1, dtype=torch.float32)
+    base = torch.empty(8, 256, 256, dtype=torch.float8_e4m3fn)
+    unaddressable = base[:, :128, :128]
+    assert quantizer.can_quantize_into(source, unaddressable, scale) is False
+    addressable = torch.empty(8, 128, 128, dtype=torch.float8_e4m3fn)
+    assert quantizer.can_quantize_into(source, addressable, scale) is True
+
+
+def test_can_quantize_into_accepts_a_destination_on_the_copy_path(monkeypatch):
+    """Without the fused kernel every strided destination is legal, because `copy_` accepts it."""
+    from psrl.utils.nixl import fp8_kernels
+
+    monkeypatch.setattr(fp8_kernels, "available", lambda tensor: False)
+    quantizer = VllmFp8BlockQuantizer(PLAN)
+    source = torch.empty(8, 128, 128, dtype=torch.bfloat16)
+    scale = torch.empty(8, 1, 1, dtype=torch.float32)
+    base = torch.empty(8, 256, 256, dtype=torch.float8_e4m3fn)
+    assert quantizer.can_quantize_into(source, base[:, :128, :128], scale) is True
+
+
 def test_a_shard_that_cuts_a_tile_is_rejected():
     quantizer = VllmFp8BlockQuantizer(PLAN)
     with pytest.raises(ValueError, match="whole"):

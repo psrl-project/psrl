@@ -52,6 +52,15 @@ class PublishQuantizer(ABC):
     ) -> None:
         """Write the quantized bytes and scale for `source` into preallocated tensors."""
 
+    def can_quantize_into(
+        self,
+        source: torch.Tensor,
+        destination: torch.Tensor,
+        scale: torch.Tensor,
+    ) -> bool:
+        """Whether `quantize_into` can write these buffers without a temporary."""
+        return True
+
     def scale_key_of(self, weight_key: str) -> str:
         """The auxiliary key that belongs to `weight_key`."""
         scale_key = self.plan.scale_key_of(weight_key)
@@ -121,6 +130,30 @@ class VllmFp8BlockQuantizer(PublishQuantizer):
         from psrl.utils.nixl import fp8_kernels
 
         return fp8_kernels.available(shard)
+
+    def can_quantize_into(
+        self,
+        source: torch.Tensor,
+        destination: torch.Tensor,
+        scale: torch.Tensor,
+    ) -> bool:
+        """Whether the fused kernel can address these destination buffers.
+
+        `quantize_into` flattens the weight and the scale before it launches. A target
+        that cannot be flattened without a copy must take the `copy_` path instead.
+        """
+        if not self.can_quantize_in_place(source):
+            return True
+        block = self.plan.block
+        assert block is not None, "A quantized plan must declare a block."
+        rows = source.numel() // source.shape[-1]
+        cols = source.shape[-1]
+        try:
+            destination.view(rows, cols)
+            scale.view(rows // block[0], cols // block[1])
+        except RuntimeError:
+            return False
+        return True
 
     def quantize_into(
         self,
