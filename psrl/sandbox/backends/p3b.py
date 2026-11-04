@@ -575,9 +575,16 @@ class P3bBackend(SandboxBackend):
         self._require_open()
         await self._load_contract()
         self._ensure_owner_heartbeat()
-        sandbox = await _service_call(
-            self._client.create(_to_service_spec(spec, self._owner_id, self._resource_class))
-        )
+        service_spec = _to_service_spec(spec, self._owner_id, self._resource_class)
+        if service_spec.backend:
+            # The service's backend names are not PSRL's manager keys. A pin that
+            # reaches this line names a runtime the service may not host.
+            psrl_logger.warning(
+                "P3bBackend forwards a backend pin %r with idempotency key %r.",
+                service_spec.backend,
+                spec.idempotency_key,
+            )
+        sandbox = await _service_call(self._client.create(service_spec))
         return P3bSession(self, sandbox, spec)
 
     async def connect(self, sandbox_id: str) -> SandboxSession:
