@@ -72,3 +72,36 @@ python -m examples.math_rl.project_dataset
 
 The audit is read-only. The projection writes `train.parquet`, `val.parquet`, and
 `manifest.json` under `examples/math_rl/data`.
+
+## Mode S end-to-end smoke
+
+Configuration: Qwen3.8-27B trained on one eight-GPU node with tensor parallelism 4
+and pipeline parallelism 2, four rollout instances on the second node, train batch 4,
+two rollouts per prompt, two training steps, and the mock verifier in `hashed` mode.
+The mock marks roughly half of the proofs correct, so a reward near one half is the
+sanity signal that the loop and the grader are wired, not a statement about the model.
+
+| Metric | Value |
+|---|---:|
+| Training steps completed | 2 |
+| Wall time per step | about 12 minutes |
+| Validation reward mean@1 | 0.486 |
+| Validation accuracy mean@1 | 0.486 |
+| Gold ceiling mean@1 | 1.0 |
+| Grading failures | 0.0 |
+| Prefix merge sharing ratio | 0.42 to 0.43 |
+
+Validation accuracy matches the reward mean and the gold ceiling stays at 1.0, so the
+verdict mapping, the ungraded handling, and the reward plumbing all agree. Grading
+failures are zero, which is the ungraded path staying out of the metric.
+
+## Reproduce the smoke
+
+```bash
+export HF_MODEL_PATH=<Qwen3.8-27B checkpoint>
+export MATH_RL_DATA_DIR=$PWD/examples/math_rl/data
+export MATH_RL_VERIFIER_MODE=mock
+export PSRL_P3B_ENDPOINT=<sandbox fleet endpoint>
+export TOTAL_TRAINING_STEPS=2 TRAIN_BSZ=4 ROLLOUT_N=2 TRAIN_MINI_BSZ=4
+bash examples/math_rl/run_qwen3.8-27b_math_codex_megatron.sh
+```
