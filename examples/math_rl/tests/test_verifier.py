@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from contextlib import asynccontextmanager
 
 import aiohttp
@@ -23,6 +24,7 @@ def _config(endpoint: str, **overrides) -> VerifierConfig:
         "verifier_harness_version": "V3",
         "model": "mock-verifier",
         "reasoning_effort": "max",
+        "transport": "blocking",
         "stage_timeout_s": 600.0,
         "max_retries": 2,
     }
@@ -41,6 +43,29 @@ async def serve(handler):
     finally:
         await reset_verifier_clients()
         await server.close()
+
+
+@asynccontextmanager
+async def serve_stream(handler):
+    """Serve only the streaming route, so the derived URL is exercised."""
+    app = web.Application()
+    app.router.add_post("/verify/stream", handler)
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        yield str(server.make_url("/verify"))
+    finally:
+        await reset_verifier_clients()
+        await server.close()
+
+
+async def _sse(request, events) -> web.StreamResponse:
+    response = web.StreamResponse(headers={"Content-Type": "text/event-stream", "x-verifier-receipt": "run-9"})
+    await response.prepare(request)
+    for event, payload in events:
+        await response.write(f"event: {event}\ndata: {json.dumps(payload)}\n\n".encode())
+    await response.write_eof()
+    return response
 
 
 async def test_verify_sends_exactly_four_fields_and_reads_the_receipt():
@@ -204,3 +229,146 @@ async def test_the_mock_server_answers_the_contract():
     finally:
         await reset_verifier_clients()
         await server.close()
+
+
+async def test_the_stream_transport_reads_the_terminal_event():
+    async def handler(request):
+        return await _sse(
+            request,
+            [
+                ("progress", {"run_id": "run-9", "stage": "accepted"}),
+                ("progress", {"run_id": "run-9", "stage": "contract", "elapsed_seconds": 1.0}),
+                ("progress", {"run_id": "run-9", "stage": "audit"}),
+                ("progress", {"run_id": "run-9", "stage": "grading"}),
+                (
+                    "result",
+                    {
+                        "run_id": "run-9",
+                        "stage": "completed",
+                        "result": {"verdict": "6", "reason": "minor gap"},
+                        "receipt": {
+                            "run_id": "run-9",
+                            "harness_sha256": "h",
+                            "prompt_sha256": "p",
+                            "skill_sha256": "s",
+                            "duration_seconds": 12.5,
+                            "usage": {"input_tokens": 30},
+                        },
+                    },
+                ),
+            ],
+        )
+
+    async with serve_stream(handler) as endpoint:
+        verdict = await evaluate(_config(endpoint, transport="stream"), "P", "S")
+
+    assert verdict.verdict == "6"
+    assert verdict.reason == "minor gap"
+    assert verdict.run_id == "run-9"
+    assert verdict.duration_s == 12.5
+    assert verdict.usage == {"input_tokens": 30}
+    assert verdict.cached is False
+
+
+async def test_a_stream_error_event_is_not_retried():
+    calls = {"count": 0}
+
+    async def handler(request):
+        calls["count"] += 1
+        return await _sse(
+            request,
+            [
+                ("progress", {"stage": "accepted"}),
+                ("error", {"stage": "failed", "failed_stage": "audit"}),
+            ],
+        )
+
+    async with serve_stream(handler) as endpoint:
+        with pytest.raises(VerifierError) as caught:
+            await evaluate(_config(endpoint, transport="stream"), "P", "S")
+
+    assert calls["count"] == 1
+    assert caught.value.kind == "upstream"
+    assert caught.value.retryable is False
+    assert "audit" in str(caught.value)
+
+
+async def test_a_stream_failure_before_the_first_event_is_retried():
+    calls = {"count": 0}
+
+    async def handler(request):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return web.json_response({"detail": "busy"}, status=503)
+        return await _sse(
+            request,
+            [("result", {"result": {"verdict": "7", "reason": ""}, "receipt": {"run_id": "r", "usage": {}}})],
+        )
+
+    async with serve_stream(handler) as endpoint:
+        verdict = await evaluate(_config(endpoint, transport="stream"), "P", "S")
+
+    assert calls["count"] == 2
+    assert verdict.verdict == "7"
+
+
+async def test_a_stream_without_a_result_is_ungraded():
+    async def handler(request):
+        return await _sse(request, [("progress", {"stage": "accepted"})])
+
+    async with serve_stream(handler) as endpoint:
+        with pytest.raises(VerifierError) as caught:
+            await evaluate(_config(endpoint, transport="stream"), "P", "S")
+
+    assert caught.value.kind == "malformed"
+
+
+async def test_the_whole_request_body_is_bounded():
+    calls = {"count": 0}
+
+    async def handler(request):
+        calls["count"] += 1
+        return web.json_response({"verdict": "7", "reason": ""})
+
+    async with serve(handler) as endpoint:
+        with pytest.raises(VerifierError) as caught:
+            await evaluate(
+                _config(endpoint, max_solution_bytes=100, max_request_bytes=200),
+                "P" * 200,
+                "S",
+            )
+
+    assert calls["count"] == 0
+    assert caught.value.kind == "payload"
+
+
+async def test_the_mock_server_streams_the_same_contract():
+    app = build_app("mock-v1", "hashed")
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        endpoint = str(server.make_url("/verify"))
+        streamed = await evaluate(
+            _config(endpoint, verifier_harness_version="mock-v1", transport="stream"), "P", "S"
+        )
+        blocking = await evaluate(
+            _config(endpoint, verifier_harness_version="mock-v1", transport="blocking"), "P", "S"
+        )
+    finally:
+        await reset_verifier_clients()
+        await server.close()
+
+    assert streamed.verdict in {"0", "1", "6", "7"}
+    assert streamed.run_id.startswith("mock_")
+    assert streamed.usage
+    assert streamed.verdict == blocking.verdict
+
+
+def test_the_config_carries_the_outbound_proxy():
+    config = VerifierConfig(
+        endpoint="http://unused/verify",
+        verifier_harness_version="V3",
+        model="m",
+        proxy="http://proxy:3128",
+    )
+    assert config.proxy == "http://proxy:3128"

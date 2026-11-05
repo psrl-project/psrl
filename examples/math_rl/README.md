@@ -13,7 +13,7 @@ to `/workspace/solution.md`, and the external verifier returns one verdict in
 | `${OPP_DATASET_ROOT}` | checkout of the Open Problem Pool |
 | `${MATH_RL_ASSETS_ROOT}` | directory that contains the Rethlas checkout |
 | `${PSRL_P3B_ENDPOINT}` | p3b control plane, `host:port` |
-| `${MATH_RL_VERIFIER_URL}` | private verifier endpoint ending in `/verify` |
+| `${MATH_RL_VERIFIER_URL}` | verifier endpoint ending in `/verify` or `/verify/stream` |
 
 ## Quickstart
 
@@ -38,27 +38,37 @@ python -m examples.math_rl.project_dataset
 Output is `examples/math_rl/data/train.parquet`, `val.parquet`, and `manifest.json`.
 The script prints the manifest to stdout.
 
-**3. Point at the verifier.** The verifier is a private deployment. Disable web
-search and general network access in the service environment so a verdict does not
-depend on the public web.
+**3. Point at the verifier.** The recipe needs the endpoint, the version the
+deployment serves, and a model or a profile.
 
 ```bash
-export VERIFIER_WEB_SEARCH=disabled
-export VERIFIER_SANDBOX_NETWORK=false
-```
-
-The recipe needs the endpoint, the version the deployment serves, and a model or a
-profile.
-
-```bash
-export MATH_RL_VERIFIER_URL=http://<verifier-host>:<port>/verify
+export MATH_RL_VERIFIER_URL=http://<verifier-host>/verify
 export MATH_RL_VERIFIER_VERSION=V3
-export MATH_RL_VERIFIER_MODEL=<verifier model>
+export MATH_RL_VERIFIER_MODEL=glm-5.3
 export MATH_RL_VERIFIER_EFFORT=max
 ```
 
+The client follows `/verify/stream` by default, which reports the contract, audit,
+and grading stages, and falls back to a blocking post when
+`MATH_RL_VERIFIER_TRANSPORT=blocking`. A request body is capped at 16 MiB by the
+service, so the solution limit is 8 MiB. Retries happen only when no stage started,
+because a retry re-runs three model stages and is billed again.
+
+A served deployment reports its network policy in `/health`. `serve` always enables
+hosted web search and sandbox network access, and the offline policy exists only in
+the `benchmark` command. Record the policy that was chosen before a run, because
+verdicts from a live-search deployment can depend on current web results.
+
 The launcher checks `/health` before training and stops when the served version
-differs from `MATH_RL_VERIFIER_VERSION`.
+differs from `MATH_RL_VERIFIER_VERSION`, or when the requested model is missing or
+not configured.
+
+Run the preflight before a run. It checks the deployment and grades one correct and
+one broken synthetic proof, so no dataset problem leaves the machine.
+
+```bash
+python -m examples.math_rl.verify_probe
+```
 
 For a smoke run without a deployment, start the mock verifier with
 `MATH_RL_VERIFIER_MODE=mock`. The launcher then serves the same four field contract

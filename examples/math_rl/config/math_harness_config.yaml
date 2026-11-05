@@ -7,10 +7,13 @@
     model: ${oc.env:MATH_RL_VERIFIER_MODEL,''}
     profile: ${oc.env:MATH_RL_VERIFIER_PROFILE,''}
     reasoning_effort: ${oc.env:MATH_RL_VERIFIER_EFFORT,''}
+    proxy: ${oc.env:MATH_RL_VERIFIER_PROXY,''}
+    transport: ${oc.env:MATH_RL_VERIFIER_TRANSPORT,stream}
     stage_timeout_s: ${oc.decode:${oc.env:MATH_RL_VERIFIER_STAGE_TIMEOUT_S,600}}
     max_retries: ${oc.decode:${oc.env:MATH_RL_VERIFIER_MAX_RETRIES,2}}
     max_concurrency: ${oc.decode:${oc.env:MATH_RL_VERIFIER_MAX_CONCURRENCY,64}}
-    max_solution_bytes: 16777216
+    max_solution_bytes: 8388608
+    max_request_bytes: 16769024
     cache_size: 256
     reward_mode: ${oc.env:MATH_RL_REWARD_MODE,graded}
     graded_mapping:

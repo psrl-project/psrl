@@ -41,16 +41,19 @@ else
 fi
 MATH_RL_VERIFIER_MODE=${MATH_RL_VERIFIER_MODE:-api}
 MATH_RL_VERIFIER_VERSION=${MATH_RL_VERIFIER_VERSION:-V3}
-MATH_RL_VERIFIER_MODEL=${MATH_RL_VERIFIER_MODEL:-gpt-6.1-sol}
+MATH_RL_VERIFIER_MODEL=${MATH_RL_VERIFIER_MODEL:-glm-5.3}
 MATH_RL_VERIFIER_EFFORT=${MATH_RL_VERIFIER_EFFORT:-max}
-MATH_RL_VERIFIER_STAGE_TIMEOUT_S=${MATH_RL_VERIFIER_STAGE_TIMEOUT_S:-600}
-MATH_RL_VERIFIER_MAX_RETRIES=${MATH_RL_VERIFIER_MAX_RETRIES:-2}
-MATH_RL_VERIFIER_MAX_CONCURRENCY=${MATH_RL_VERIFIER_MAX_CONCURRENCY:-64}
+MATH_RL_VERIFIER_PROXY=${MATH_RL_VERIFIER_PROXY:-${https_proxy:-${HTTPS_PROXY:-${http_proxy:-${HTTP_PROXY:-}}}}}
+MATH_RL_VERIFIER_TRANSPORT=${MATH_RL_VERIFIER_TRANSPORT:-stream}
+MATH_RL_VERIFIER_STAGE_TIMEOUT_S=${MATH_RL_VERIFIER_STAGE_TIMEOUT_S:-900}
+MATH_RL_VERIFIER_MAX_RETRIES=${MATH_RL_VERIFIER_MAX_RETRIES:-1}
+MATH_RL_VERIFIER_MAX_CONCURRENCY=${MATH_RL_VERIFIER_MAX_CONCURRENCY:-16}
 MATH_RL_REWARD_MODE=${MATH_RL_REWARD_MODE:-graded}
-GRADING_TIMEOUT=${GRADING_TIMEOUT:-1980}
+GRADING_TIMEOUT=${GRADING_TIMEOUT:-2900}
 export MATH_RL_SANDBOX_IMAGE MATH_RL_RUNTIME_IN_IMAGE MATH_RL_HARNESS_RUNTIME_MOUNT
 export MATH_RL_VERIFIER_MODE MATH_RL_VERIFIER_VERSION MATH_RL_VERIFIER_MODEL MATH_RL_VERIFIER_EFFORT
-export MATH_RL_VERIFIER_STAGE_TIMEOUT_S MATH_RL_VERIFIER_MAX_RETRIES MATH_RL_VERIFIER_MAX_CONCURRENCY
+export MATH_RL_VERIFIER_PROXY MATH_RL_VERIFIER_TRANSPORT MATH_RL_VERIFIER_STAGE_TIMEOUT_S MATH_RL_VERIFIER_MAX_RETRIES
+export MATH_RL_VERIFIER_MAX_CONCURRENCY
 export MATH_RL_REWARD_MODE
 export PYTHONDONTWRITEBYTECODE=1
 
@@ -114,13 +117,14 @@ ray status >/dev/null 2>&1 || echo "WARNING: ray status failed. Start the cluste
 python -m psrl.sandbox.reclaimer --once >/dev/null 2>&1 \
     || echo "WARNING: reclaiming sandboxes from a previous run failed."
 
-VERIFIER_HEALTH_URL="${MATH_RL_VERIFIER_URL%/verify}/health"
-python - "${VERIFIER_HEALTH_URL}" "${MATH_RL_VERIFIER_VERSION}" <<'PY'
+VERIFIER_HEALTH_URL="${MATH_RL_VERIFIER_URL%/verify/stream}"
+VERIFIER_HEALTH_URL="${VERIFIER_HEALTH_URL%/verify}/health"
+python - "${VERIFIER_HEALTH_URL}" "${MATH_RL_VERIFIER_VERSION}" "${MATH_RL_VERIFIER_MODEL}" <<'PY'
 import json
 import sys
 import urllib.request
 
-url, version = sys.argv[1], sys.argv[2]
+url, version, model = sys.argv[1], sys.argv[2], sys.argv[3]
 try:
     with urllib.request.urlopen(url, timeout=10) as response:
         health = json.load(response)
@@ -129,8 +133,13 @@ except Exception as error:
 served = health.get("verifier_harness_version") or health.get("version") or ""
 if served != version:
     raise SystemExit(f"The verifier serves {served!r}, but the recipe asks for {version!r}.")
+models = health.get("models") or {}
+if models and model not in models:
+    raise SystemExit(f"The verifier does not serve model {model!r}. Configured: {sorted(models)}.")
+if models and not models[model].get("configured", False):
+    raise SystemExit(f"The verifier reports model {model!r} as not configured.")
 print(
-    f"Verifier healthy: version {served}, model {health.get('model')}, "
+    f"Verifier healthy: version {served}, model {model}, "
     f"web_search {health.get('web_search')}, network_access {health.get('network_access')}."
 )
 PY
