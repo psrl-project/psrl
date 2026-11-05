@@ -9,6 +9,7 @@ import torch
 import transfer_queue as tq
 from tensordict import TensorDict
 from transfer_queue import KVBatchMeta
+from verl.trainer.distillation.losses import get_distillation_loss_settings
 from verl.utils import tensordict_utils as tu
 from verl.utils.tensordict_utils import list_of_dict_to_tensordict
 
@@ -88,10 +89,6 @@ class RewardLoopManager(CommandExtension):
         self.log_prefix = "ValidationRewardLoopManager" if is_validate else "RewardLoopManager"
         psrl_logger.addHandler(DualOutputHandler(self.config.psrl.logging_path, self.log_prefix))
         psrl_logger.info(f"Initialized {self.log_prefix}.")
-
-    def set_sleep_wake_orchestrator(self, orchestrator):
-        """Inject the SleepWakeOrchestrator (colocated modes 2/3)."""
-        self.sleep_wake_orchestrator = orchestrator
 
     def start_busy_loop(self):
         """Start reward request processing tasks."""
@@ -591,7 +588,7 @@ class RewardLoopManager(CommandExtension):
             response_length = max(row.pop("response_len", 1), 1)
             if self._requires_teacher():
                 loss = self.config.distillation.distillation_loss
-                use_topk = loss.loss_mode == "forward_kl_topk"
+                use_topk = get_distillation_loss_settings(loss.loss_mode).use_topk
                 width = int(loss.topk) if use_topk else 1
                 if request_key in padding_keys:
                     row.update(teacher_logprobs=torch.zeros(1, width), teacher_weight=0.0)

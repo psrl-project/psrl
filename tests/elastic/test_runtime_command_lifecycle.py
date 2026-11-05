@@ -113,12 +113,12 @@ def test_failed_runtime_refresh_publishes_no_partial_cache(modules):
             remote=AsyncMock(
                 return_value={
                     ("replica-1", 0): {
-                        "is_sleeping": True,
+                        "status": modules.topology.InstanceStatus.ASLEEP,
                         "engine_stats": {},
                         "model_version": 4,
                         "wake_model_version": 4,
                     },
-                    second: {"is_sleeping": True, "engine_stats": None},
+                    second: {"status": modules.topology.InstanceStatus.ASLEEP, "engine_stats": None},
                 }
             )
         )
@@ -262,7 +262,7 @@ def test_sleep_completion_updates_flags_and_topology(modules):
 
 
 @pytest.mark.parametrize("result", [None, False, {"status": "unexpected"}])
-def test_unconfirmed_sleep_does_not_commit_local_state(modules, result):
+def test_unconfirmed_sleep_leaves_local_state_unknown(modules, result):
     async def scenario():
         coord = SimpleNamespace(exec_command=SimpleNamespace(remote=AsyncMock(return_value=result)))
         executor = _executor(modules, coord)
@@ -270,7 +270,7 @@ def test_unconfirmed_sleep_does_not_commit_local_state(modules, result):
         iid = ("replica-1", 0)
         with pytest.raises(RuntimeError, match="did not confirm completion"):
             await executor._scale_down_instances([{"role_name": role, "model_name": "model", "instance_id": iid}])
-        assert executor.instances_status_flags[role]["model"][iid] is modules.topology.InstanceStatus.AWAKEN
+        assert executor.instances_status_flags[role]["model"][iid] is modules.topology.InstanceStatus.UNKNOWN
 
     asyncio.run(scenario())
 
@@ -402,7 +402,7 @@ def test_runtime_snapshot_reconciles_only_settled_state(modules, in_progress):
                 remote=AsyncMock(
                     return_value={
                         iid: {
-                            "is_sleeping": True,
+                            "status": modules.topology.InstanceStatus.ASLEEP,
                             "engine_stats": {},
                             "model_version": 3,
                             "wake_model_version": 3,
@@ -417,6 +417,81 @@ def test_runtime_snapshot_reconciles_only_settled_state(modules, in_progress):
         expected = modules.topology.InstanceStatus.AWAKEN if in_progress else modules.topology.InstanceStatus.ASLEEP
         assert executor.instances_status_flags[modules.role.Rollout]["model"][iid] is expected
         assert executor.topology.get_status(modules.role.Rollout, "model", iid) is expected
+
+    asyncio.run(scenario())
+
+
+def test_unknown_runtime_state_blocks_decisions_and_keeps_gpu_ownership(modules):
+    async def scenario():
+        status = modules.topology.InstanceStatus
+        role = modules.role.Rollout
+        iid = ("replica-1", 0)
+        coord = SimpleNamespace(
+            get_instance_runtime_snapshot=SimpleNamespace(
+                remote=AsyncMock(
+                    return_value={
+                        iid: {
+                            "status": status.UNKNOWN,
+                            "engine_stats": {},
+                            "model_version": 2,
+                            "wake_model_version": 3,
+                        }
+                    }
+                )
+            )
+        )
+        executor = _executor(modules, coord)
+        slots = frozenset({modules.topology.GPUSlot("node", 0)})
+        executor.topology.update_gpu_slots(role, "model", iid, slots)
+        other_role = modules.role.RewardModel
+        other_iid = ("reward", 0)
+        executor.topology.register(other_role, "reward", other_iid, slots)
+        assert await executor._sync_engine_status_from_coordinators() is False, (
+            "Unknown inference state must block new scaling decisions."
+        )
+        assert executor.instances_status_flags[role]["model"][iid] is status.UNKNOWN, (
+            "Coordinator snapshots must preserve unknown state in the scheduler."
+        )
+        assert executor.topology.get_status(role, "model", iid) is status.UNKNOWN, (
+            "GPU ownership must retain the authoritative unknown status."
+        )
+        assert executor.topology.get_occupied_gpu_slots() == set(slots), (
+            "Unknown replicas may still own GPU allocations."
+        )
+        assert executor.topology.has_other_role_occupying_shared_gpu(other_role, "reward", other_iid), (
+            "Another role must not wake on GPUs held by an unknown replica."
+        )
+        with pytest.raises(RuntimeError, match="Cannot select"):
+            executor.topology.select_non_conflicting_awake_ids(other_role, "reward", [other_iid], 1)
+        coord.get_instance_runtime_snapshot.remote.return_value[iid]["status"] = status.ASLEEP
+        assert await executor._sync_engine_status_from_coordinators() is True, (
+            "Confirmed sleep must allow scheduling to resume."
+        )
+        assert executor.topology.get_occupied_gpu_slots() == set(), (
+            "Only confirmed sleep may free the unknown replica's GPUs."
+        )
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("command_type", ["SLEEP", "WAKE_UP"])
+def test_failed_transition_keeps_scheduler_status_unknown(modules, command_type):
+    async def scenario():
+        role = modules.role.Rollout
+        iid = ("replica-1", 0)
+        executor = _executor(modules, None)
+        executor._await_elastic_coordinator_command = AsyncMock(side_effect=RuntimeError("Transition failed."))
+        with pytest.raises(RuntimeError, match="Transition failed"):
+            await executor._transition_role_instances(
+                getattr(modules.command.CommandType, command_type),
+                [{"role_name": role, "model_name": "model", "instance_id": iid}],
+            )
+        assert executor.instances_status_flags[role]["model"][iid] is modules.topology.InstanceStatus.UNKNOWN, (
+            "Failed transitions must not claim a known inference state."
+        )
+        assert executor.topology.get_status(role, "model", iid) is modules.topology.InstanceStatus.UNKNOWN, (
+            "Failed transitions must not release GPU ownership."
+        )
 
     asyncio.run(scenario())
 
@@ -438,7 +513,7 @@ def test_runtime_refresh_cannot_overwrite_a_transition_completed_during_fetch(mo
         async def snapshot():
             observed = {
                 iid: {
-                    "is_sleeping": sleeping,
+                    "status": status,
                     "engine_stats": {
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                         "scheduler_stats": {},
@@ -624,6 +699,9 @@ def test_serialized_actor_configures_worker_loggers_and_writes_files(modules, mo
         roles=[(modules.role.Rollout, "model")],
         coordinators={},
     )
+    executor.instances_status_flags[modules.role.Rollout]["model"][("replica-1", 0)] = (
+        modules.topology.InstanceStatus.UNKNOWN
+    )
     try:
 
         async def scenario():
@@ -647,6 +725,7 @@ def test_serialized_actor_configures_worker_loggers_and_writes_files(modules, mo
         monitor_text = (tmp_path / "ElasticMonitor.log").read_text()
         assert "Elastic monitor initialized" in monitor_text
         assert "engine_ready=False, router_ready=True" in monitor_text
+        assert "'status': 'UNKNOWN'" in monitor_text, "Unknown state must remain visible in monitor logs."
         assert "'running': 3" in monitor_text
         executor_text = (tmp_path / "ElasticExecutor.log").read_text()
         assert not executor_text, "Routine monitoring and command tracing must stay below INFO."
@@ -785,7 +864,7 @@ def test_stale_awake_metrics_invalidate_decision_inputs(modules, timestamp, capl
                 remote=AsyncMock(
                     return_value={
                         ("replica-1", 0): {
-                            "is_sleeping": False,
+                            "status": modules.topology.InstanceStatus.AWAKEN,
                             "engine_stats": {"timestamp": timestamp},
                             "model_version": 3,
                             "wake_model_version": 3,

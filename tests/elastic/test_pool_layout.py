@@ -11,11 +11,80 @@ from unittest.mock import MagicMock
 import pytest
 from omegaconf import OmegaConf
 from psrl.utils.config.deployment_mode import expand_ngpus_per_node
-from psrl.workers.elastic.pool_layout import ReplicaPlacement, elastic_pool_specs, plan_replicas
+from psrl.workers.elastic.pool_layout import ReplicaPlacement, elastic_pool_specs, plan_idle_replicas, plan_replicas
 
 pytestmark = pytest.mark.cpu_test
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_colocated_layout_allocates_only_the_existing_trainer_pool():
+    cfg = _config()
+    cfg.psrl.deployment.mode = "colocated"
+    assert elastic_pool_specs(cfg.psrl.deployment) == {"train_pool": [8]}, (
+        "Full colocation must not reserve an additional shared rollout pool."
+    )
+
+
+def test_fixed_idle_models_use_one_disjoint_trainer_bundle_cursor():
+    cfg = _config()
+    placements = plan_idle_replicas(cfg.psrl.deployment, [("rollout", 2, 1), ("judge-a", 1, 2), ("judge-b", 1, 4)])
+    occupied = set()
+    for placement in placements.values():
+        bundles = set(range(placement.start_bundle_index, placement.start_bundle_index + placement.world_size))
+        assert not occupied.intersection(bundles), "Fixed rollout and reward borrowers must never overlap."
+        occupied.update(bundles)
+    assert occupied == set(range(8)), "Borrowers must stay inside the trainer pool."
+    with pytest.raises(ValueError, match="disjoint"):
+        plan_idle_replicas(cfg.psrl.deployment, [("rollout", 5, 1), ("judge", 1, 4)])
+
+
+def test_fixed_idle_driver_preserves_main_pools_and_registers_sliced_borrowers():
+    from psrl.trainer.main_ppo import TaskRunner
+    from psrl.trainer.ppo.utils import PSRL_Role
+
+    cfg = _config(rm_tp=2)
+    cfg.psrl.colocate_validate_and_train = True
+    cfg.psrl.deployment.update(
+        mode="trainer_pool_only",
+        n_rollout_instances=2,
+        rollout_nnodes_per_instance=1,
+        rollout_ngpus_per_node_per_instance=1,
+        trainer_pool_idle_rollout_instances=2,
+        trainer_pool_idle_rm_instances=1,
+        n_validate_instances=1,
+        validate_nnodes_per_instance=1,
+        validate_ngpus_per_node_per_instance=8,
+    )
+    cfg.psrl.deployment.elastic.enable = False
+    rm = cfg.reward.manager
+    rm.update(
+        model={"path": "models/reward"},
+        num_replicas=1,
+        enable_resource_pool=True,
+        n_gpus_per_node=2,
+        nnodes=1,
+        rollout_ngpus_per_instance_per_node=2,
+        rollout_nnodes_per_instance=1,
+    )
+    cfg.reward.active_managers = ["judge"]
+    cfg.reward.managers = {"judge": rm}
+    runner = object.__new__(TaskRunner.__ray_metadata__.modified_class)
+    runner.mapping = {}
+    manager = runner.init_resource_pool_mgr(cfg)
+    assert manager.mapping[PSRL_Role.Rollout] == [f"rollout_{index}" for index in range(4)], (
+        "Configured main replicas and fixed borrowers must have distinct worker groups."
+    )
+    assert cfg.reward.managers.judge.num_replicas == 2, "Idle reward workers must join their named model manager."
+    placements = manager.elastic_replica_placements
+    assert placements["rollout_0"].pool_id == "rollout_pool_0", "Main rollout must keep its independent GPU pool."
+    assert placements["reward_model_reward_0"].pool_id == "reward_pool_reward_0", (
+        "Main rewards must keep their independent GPU pool."
+    )
+    assert placements["rollout_2"] == ReplicaPlacement("train_pool", 0, 1), "Idle rollout must use a sliced bundle."
+    assert placements["reward_model_reward_1"] == ReplicaPlacement("train_pool", 2, 2), (
+        "Idle reward storage must follow the disjoint rollout borrower bundles."
+    )
 
 
 def _config(enabled=True, rm_tp=1):

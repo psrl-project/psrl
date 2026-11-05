@@ -563,7 +563,7 @@ launch_elastic() {
     mkdir -p "${PSRL_WORKSPACE}/logs/${project_name}"
 
     DEPLOY_ARGS=(
-        +psrl.deployment.mode=elastic_rl
+        psrl.deployment.mode=elastic_rl
         psrl.staleness=${PSRL_DEPLOY_STALENESS}
         reward.launch_reward_fn_async=${PSRL_DEPLOY_RM_ASYNC}
         psrl.deployment.elastic.shared_nnodes=${PSRL_DEPLOY_SHARED_NNODES}

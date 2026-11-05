@@ -14,7 +14,7 @@ from psrl.utils.agent.thinking import (
     wants_thinking_disabled,
 )
 from psrl.utils.common.chat_template import resolve_chat_template_value
-from psrl.utils.config.deployment_mode import validate_trainer_sleep_optimizer_offload
+from psrl.utils.config.deployment_mode import resolve_deployment_mode, validate_trainer_sleep_optimizer_offload
 
 
 def resolve_fine_grain_chunk_size(config, dp_size: int) -> tuple[str, int]:
@@ -119,13 +119,31 @@ def validate_fine_grain_elastic(config) -> None:
         return
     deployment = config.psrl.get("deployment", None)
     elastic = None if deployment is None else deployment.get("elastic", None)
-    if elastic is None or not bool(elastic.get("enable", False)):
+    if elastic is None or (not bool(elastic.get("enable", False)) and deployment.get("mode") != "trainer_pool_only"):
         return
     raise ValueError(
         "psrl.fine_grain_overlap.granularity cannot be combined with "
         "psrl.deployment.elastic.enable=True. "
         f"Got granularity={str(fgo.get('granularity', 'none'))!r}."
     )
+
+
+def validate_nixl_actor_offload(config: DictConfig) -> None:
+    """
+    Keep FSDP actor storage stable while NIXL holds registered parameter views.
+    """
+    if config.psrl.ps_mode not in ("nixl_cpu", "nixl_gpu"):
+        return
+    actor = config.train_actor_rollout_ref.actor
+    if actor.strategy not in ("fsdp", "fsdp2"):
+        return
+    for option in ("param_offload", "offload_policy"):
+        if actor.fsdp_config.get(option, False):
+            raise ValueError(
+                f"NIXL requires train_actor_rollout_ref.actor.fsdp_config.{option}=False. "
+                "FSDP parameter offloading invalidates registered GPU parameter views. "
+                "PSRL manages actor storage through its NIXL sleep and wake lifecycle."
+            )
 
 
 # TODO(zyf): After refactoring, elastic rl's configuration check should be considered.
@@ -184,6 +202,8 @@ def validate_config(
         use_critic (bool): is critic needed
     """
 
+    resolve_deployment_mode(config)
+    validate_nixl_actor_offload(config)
     validate_opd_config(config)
 
     train_n_gpus = config.psrl.deployment.train_ngpus_per_node * config.psrl.deployment.train_nnodes

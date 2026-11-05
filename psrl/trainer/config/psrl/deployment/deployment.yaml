@@ -4,6 +4,13 @@ defaults:
   - elastic/throughput_optimal@elastic.throughput_optimal
   - _self_
 
+# A null mode selects disaggregated or elastic_rl from elastic.enable.
+mode: null
+
+# Fixed extra replicas borrow disjoint trainer GPU bundles while training waits.
+trainer_pool_idle_rollout_instances: 0
+trainer_pool_idle_rm_instances: 0
+
 # Number for rollout instances
 n_rollout_instances: 1
 

@@ -5,8 +5,8 @@ responses sampled by the student. PSRL manages each teacher as a reward model,
 sharing its resource pools, SMG gateway, concurrency limits, sleep and wake-up
 lifecycle. Teachers return token targets and a scalar reward of zero.
 
-PSRL's losses and per-trajectory teacher selection follow
-[veRL's implementation](https://github.com/verl-project/verl/tree/e5ca4acb/verl/trainer/distillation).
+PSRL uses the shared distillation losses from its patched
+[veRL dependency](https://github.com/verl-project/verl/tree/e5ca4acb/verl/trainer/distillation).
 The algorithm terminology follows [veRL's OPD guide](https://verl.readthedocs.io/en/latest/algo/opd.html),
 by Jacob Helwig. For more details, please check
 [veRL's documentation further](https://verl.readthedocs.io/en/latest/algo/opd.html).
@@ -23,10 +23,12 @@ by Jacob Helwig. For more details, please check
   Token IDs are passed directly, without decoding or retokenization.
 - Reserve teacher context for the complete student prompt and response **plus
   one output token**. OPD rejects overlong inputs instead of truncating them.
-- Use text trajectories and `gen_actor_rollout_ref.rollout.agent.traj_reward_mode=traj`.
+- Set `gen_actor_rollout_ref.rollout.agent.traj_reward_mode=traj`.
   Single-turn and multi-turn rollouts are supported. Tool observations remain in
   teacher context and are excluded from training through `response_mask`.
-  Multimodal teacher scoring is unsupported.
+- Image trajectories forward the same images and expanded token IDs to the teacher.
+  Student and teacher image processors must produce compatible image token spans.
+  Video and audio teacher scoring are unsupported.
 
 ## Configure a Teacher Reward Model
 
@@ -108,7 +110,9 @@ Configure losses under `distillation.distillation_loss`.
 | Update | `loss_mode` | `use_policy_gradient` | Teacher targets |
 |---|---|---|---|
 | PG OPD | `k1` | `true` | Observed response token logprobs, K=1 |
+| Supervised sampled-token OPD | `k3` | `false` | Observed response token logprobs, K=1 |
 | Supervised Top-k | `forward_kl_topk` | `false` | The K highest teacher logprobs and their raw token IDs |
+| Supervised Top-k with tail | `forward_kl_topk_tail` | `false` | The same K teacher tokens and one aggregate tail bucket |
 
 ### PG OPD
 
@@ -130,7 +134,7 @@ Only `policy_loss_mode=vanilla` is supported. Direct supervised `k1` is rejected
 because its gradient does not depend on the teacher.
 
 The estimator aliases `kl`, `abs`, `mse`, `k2`, `low_var_kl`, and `k3` are also
-available. The default loss mode is `k3` with policy gradient enabled.
+available. The default loss mode is `k3` with direct backpropagation.
 
 ### Supervised Top-k
 
@@ -149,8 +153,19 @@ train_actor_rollout_ref:
 
 The logits processor computes the truncated forward KL on teacher-selected
 vocabulary entries. Negative truncated KL values are clamped to zero. Gradients
-flow through the student logits. Both FSDP2 and Megatron use PSRL's loss.
+flow through the student logits. Both FSDP2 and Megatron use veRL's shared loss.
 Teacher services automatically request sufficient vLLM logprob capacity for K.
+
+To include probability mass outside the teacher's Top-k, set
+`loss_mode: forward_kl_topk_tail` and `log_prob_min_clamp: null`. This computes
+the forward KL between two distributions with K selected tokens and one
+aggregate tail bucket. `tail_mass_eps: 1.0e-6` bounds the student tail probability
+for numerical stability. Per-token logprob clamping is rejected in this mode
+because it changes the probability mass. Tail KL is not clamped to zero.
+
+Megatron packs teacher targets with the student's FP8 alignment and context
+parallel group. Keep `use_fused_kernels: false` when the engine does not return
+Top-k distillation outputs.
 
 ### Task Rewards and Weighting
 
@@ -162,10 +177,12 @@ L = L_{\mathrm{task}} +
 \mathrm{distillation\_loss\_coef}\,L_{\mathrm{distill}}.
 $$
 
-Both modes clamp each token divergence with `loss_max_clamp` before multiplying
-by `teacher_weight`. Masking and aggregation follow veRL. Defaults are
-`loss_max_clamp: 10.0`, `log_prob_min_clamp: -10.0`, and
-`distillation_loss_coef: 1.0`. Set either clamp to `null` to disable it.
+Both modes apply an optional `loss_max_clamp` before multiplying each token
+divergence by `teacher_weight`. Masking and aggregation follow veRL. Defaults
+are `loss_max_clamp: null`, `log_prob_min_clamp: null`, and
+`distillation_loss_coef: 1.0`. Set a clamp explicitly to enable it.
+`log_prob_min_clamp` applies only to Top-k distributions, not sampled-token
+estimators such as `k1`.
 
 ## Data Contract and Diagnostics
 
@@ -173,7 +190,8 @@ SMG scores raw prompt and response IDs with `temperature=1` and
 `max_new_tokens=1`. It returns input token IDs and prompt logprobs, with no
 probability for the first input token. PG selects the observed response token's
 probability. Top-k selects alternatives by descending probability, preserving
-raw vocabulary IDs.
+raw vocabulary IDs. Each scoring request must return exactly one object in the
+SMG response array.
 
 Reward workers return teacher outputs keyed by `request_key`. TransferQueue
 stores `teacher_logprobs` as float32 `[R,K]`, `teacher_ids` as int64 `[R,K]` in
@@ -183,9 +201,34 @@ padding has weight zero. Missing or malformed targets fail before actor updates.
 
 Monitor `distillation/loss`, token loss minima and maxima, and
 `distillation/abs_loss` for sampled-token estimators. Top-k also reports teacher
-and student probability mass on the selected tokens.
+and student probability mass on the selected tokens and their Top-k overlap.
+Tail mode also reports the selected-token and tail contributions separately.
 
 ## Run Examples and Tests
+
+Run Qwen3.5-4B distillation from Qwen3.5-35B-A3B on Geo3K:
+
+```bash
+bash examples/opd_trainer/run_qwen3_5_4b_fsdp.sh --dry-run
+bash examples/opd_trainer/run_qwen3_5_4b_fsdp.sh
+```
+
+Prepare `models/Qwen3.5-4B`, `models/Qwen3.5-35B-A3B`, and
+`data/geo3k/{train,test}.parquet` under `PSRL_WORKSPACE`. Use the instruction
+teacher checkpoint. The `Base` checkpoint defines a different teacher.
+Override locations with `STUDENT_MODEL`, `TEACHER_MODEL`, `TRAIN_FILE`, and
+`VAL_FILE`. The launcher sources `env/psrl.sh` and accepts Hydra overrides.
+
+Defaults use `k1` policy gradient, no task policy loss, one response per prompt,
+a batch of 128, and 1024 prompt plus 2048 response tokens. Student training
+reserves eight GPUs. Four student rollout replicas use one GPU each. One teacher
+replica uses four GPUs with TP=4 and EP=4, for 16 GPUs total. Four TP=2 validation
+replicas share the training GPUs.
+
+Set `NNODES` and `NGPUS_PER_NODE` for training. Set `ROLLOUT_GPUS_PER_NODE` and
+`ROLLOUT_TP` for student rollout, and `TEACHER_WORLD_SIZE`, `TEACHER_TP`, and
+`TEACHER_EP` for the teacher. Set `VAL_TP` independently for validation. Every
+inference replica must fit on one node.
 
 `examples/opd_trainer/opd_qwen_gsm8k.sh` configures PG OPD. The larger launchers
 show DAPO task rewards and teacher tensor parallelism. They source your local
@@ -196,7 +239,7 @@ teacher checkpoints, and GPUs matching their configured resource pools. Set
 Run CPU protocol, loss, and HTTP pipeline tests in the PSRL environment:
 
 ```bash
-python -m pytest tests/workers/reward/test_opd_pipeline.py tests/trainer/distillation/test_losses.py
+python -m pytest tests/workers/reward/test_opd_pipeline.py tests/trainer/distillation
 ```
 
 The pipeline suite starts an HTTP teacher and includes real local Ray and

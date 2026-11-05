@@ -1,4 +1,4 @@
-"""Score complete text trajectories through a reward model's SMG gateway."""
+"""Score complete trajectories through a reward model's SMG gateway."""
 
 import math
 from typing import Any
@@ -6,8 +6,10 @@ from typing import Any
 import aiohttp
 import torch
 from tensordict import TensorDict
+from verl.trainer.distillation.losses import get_distillation_loss_settings
 from verl.utils import tensordict_utils as tu
 
+from psrl.utils.rollout.vision_utils import serialize_image_inputs
 from psrl.workers.reward.reward_loop.base import RewardLoopBase
 from psrl.workers.reward.reward_loop.registry import register
 from psrl.workers.reward.reward_protocol import RewardModelRuntimeInfo
@@ -99,12 +101,12 @@ class OPDRewardLoop(RewardLoopBase):
             raise ValueError("OPD student and teacher tokenizers must have identical token ID vocabularies.")
         self.vocab_size = len(tokenizer)
         loss = config.distillation.distillation_loss
-        self.topk = loss.topk if loss.loss_mode == "forward_kl_topk" else 0
+        self.topk = loss.topk if get_distillation_loss_settings(loss.loss_mode).use_topk else 0
         if (
             isinstance(self.topk, bool)
             or not isinstance(self.topk, int)
             or not 0 <= self.topk <= self.vocab_size
-            or (loss.loss_mode == "forward_kl_topk" and not self.topk)
+            or (get_distillation_loss_settings(loss.loss_mode).use_topk and not self.topk)
         ):
             raise ValueError(f"Invalid teacher Top-k width {self.topk!r}.")
         rm_config = reward_model_manager.reward_model_config
@@ -117,9 +119,9 @@ class OPDRewardLoop(RewardLoopBase):
     async def run_single(self, data: TensorDict) -> dict:
         if len(data) != 1:
             raise ValueError("OPD scoring requires exactly one trajectory.")
-        multimodal = tu.get(data, "multi_modal_data", [None])[0]
-        if multimodal:
-            raise ValueError("OPD teacher scoring supports text trajectories only.")
+        multimodal = tu.get(data, "multi_modal_data", [None])[0] or {}
+        if multimodal.get("videos") or multimodal.get("audios"):
+            raise ValueError("OPD through SMG supports image trajectories. Video and audio are unsupported.")
         prompts, responses = data["prompts"][0], data["responses"][0]
         mask = data["attention_mask"][0].bool()
         prompt_ids = prompts[mask[: len(prompts)]].tolist()
@@ -142,10 +144,19 @@ class OPDRewardLoop(RewardLoopBase):
             "return_text_in_logprobs": False,
             "stream": False,
         }
+        images = multimodal.get("images")
+        if images:
+            payload.update(
+                image_data=await serialize_image_inputs(images),
+                multimodal_token_mode="preexpanded",
+                modalities=["multi-images" if len(images) > 1 else "image"],
+            )
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=300)) as client:
             async with client.post(f"{self.gateway_url}/generate", json=payload) as response:
                 if response.status != 200:
                     raise RuntimeError(f"Teacher scoring failed with HTTP {response.status}: {await response.text()}.")
                 result = await response.json()
-        targets = parse_teacher_response(result, input_ids, len(prompt_ids), self.topk, self.vocab_size)
+        if not isinstance(result, list) or len(result) != 1:
+            raise ValueError("Teacher scoring must return exactly one SMG response in an array.")
+        targets = parse_teacher_response(result[0], input_ids, len(prompt_ids), self.topk, self.vocab_size)
         return {"reward_score": 0.0, "reward_extra_info": {}, "reward_metrics": {}, **targets}

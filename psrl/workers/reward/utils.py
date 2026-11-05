@@ -37,7 +37,7 @@ def attach_reward_trajectories(inputs: TensorDict, outputs: list) -> None:
                 {
                     "prompts": output.prompt_ids,
                     "responses": output.response_ids,
-                    "has_multimodal_data": bool(output.multi_modal_data),
+                    "multi_modal_data": output.multi_modal_data,
                 }
                 for output in outputs
             ]

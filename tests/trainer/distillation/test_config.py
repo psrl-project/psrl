@@ -1,6 +1,7 @@
 """Validate explicit OPD reward service and dataset selections."""
 
 import copy
+from pathlib import Path
 
 import pytest
 from omegaconf import OmegaConf
@@ -84,3 +85,30 @@ def test_invalid_teacher_config(damage):
 def test_invalid_topk(topk):
     with pytest.raises(ValueError, match="topk"):
         DistillationLossConfig(loss_mode="forward_kl_topk", use_policy_gradient=False, topk=topk)
+
+
+def test_loss_defaults_match_yaml():
+    path = Path(__file__).resolve().parents[3] / "psrl/trainer/config/distillation/distillation.yaml"
+    configured = OmegaConf.load(path).distillation_loss
+    defaults = DistillationLossConfig()
+    for field in ("loss_mode", "topk", "use_policy_gradient", "loss_max_clamp", "log_prob_min_clamp", "tail_mass_eps"):
+        assert getattr(defaults, field) == configured[field], f"The default for {field!r} must match the YAML."
+    assert not defaults.use_policy_gradient, "Default OPD must directly backpropagate the divergence."
+    assert defaults.loss_max_clamp is None, "Default OPD must preserve the complete divergence."
+
+
+@pytest.mark.parametrize("mode", ["k1", "kl"])
+def test_sampled_k1_requires_policy_gradient(mode):
+    with pytest.raises(ValueError, match="does not depend on teacher"):
+        DistillationLossConfig(loss_mode=mode, use_policy_gradient=False)
+
+
+@pytest.mark.parametrize("epsilon", [0.0, 1.0, -1.0, float("nan")])
+def test_tail_rejects_invalid_epsilon(epsilon):
+    with pytest.raises(ValueError, match="tail_mass_eps"):
+        DistillationLossConfig(loss_mode="forward_kl_topk_tail", tail_mass_eps=epsilon)
+
+
+def test_tail_rejects_per_token_probability_clamp():
+    with pytest.raises(ValueError, match="log_prob_min_clamp"):
+        DistillationLossConfig(loss_mode="forward_kl_topk_tail", log_prob_min_clamp=-10.0)

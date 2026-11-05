@@ -9,9 +9,9 @@ step body.
 from __future__ import annotations
 
 import ray
+from verl.trainer.distillation.losses import is_distillation_enabled
 from verl.utils.debug import marked_timer
 
-from psrl.trainer.distillation.losses import is_distillation_enabled
 from psrl.trainer.ppo.strategies.base import StepStrategy, psrl_logger
 from psrl.utils.logger import EventType, log_dual_events
 
@@ -26,6 +26,10 @@ class FullBatchStepStrategy(StepStrategy):
 
     def run_step(self, buffer_id: int, metrics: dict, timing_raw: dict):
         t = self.trainer
+        await_rewards = t.config.reward.launch_reward_fn_async or is_distillation_enabled(
+            getattr(t.config, "distillation", None)
+        )
+        rewards_committed = False
         with marked_timer("wait_for_gen", timing_raw, color="gray"):
             with log_dual_events(
                 f"Wait for training batch {buffer_id}",
@@ -33,9 +37,12 @@ class FullBatchStepStrategy(StepStrategy):
                 event_type=EventType.WAIT,
             ):
                 if t.elastic_mode:
-                    ray.get(t.elastic_executor.release_trainer_pool_for_wait.remote(buffer_id))
+                    t.release_trainer_for_wait(buffer_id)
                 batch = ray.get(t.agent_loop_manager.wait_for_training_batch.remote(buffer_id))
                 t.replay_buffer.sample(batch.keys, batch.partition_id)
+                if t.config.psrl.deployment.mode == "colocated" and await_rewards:
+                    batch = self._wait_for_rewards(batch, timing_raw)
+                    rewards_committed = True
             with log_dual_events(
                 "Switch to trainer mode",
                 psrl_logger,
@@ -75,14 +82,9 @@ class FullBatchStepStrategy(StepStrategy):
                 ):
                     batch = t._compute_values(batch, metrics=metrics)
 
-        if t.config.reward.launch_reward_fn_async or is_distillation_enabled(getattr(t.config, "distillation", None)):
-            with marked_timer("async_reward_get", timing_raw, color="yellow"):
-                with log_dual_events(
-                    "Wait for async reward model score",
-                    psrl_logger,
-                    event_type=EventType.OTHER,
-                ):
-                    batch = ray.get(t.reward_manager.wait_for_reward_of_requests.remote(batch))
+        if await_rewards:
+            if not rewards_committed:
+                batch = self._wait_for_rewards(batch, timing_raw)
         else:
             with log_dual_events(
                 "Normalize reward",
@@ -125,3 +127,9 @@ class FullBatchStepStrategy(StepStrategy):
         )
 
         return batch
+
+    def _wait_for_rewards(self, batch, timing_raw):
+        """Commit reward data before a shared GPU is reserved for actor computation."""
+        with marked_timer("async_reward_get", timing_raw, color="yellow"):
+            with log_dual_events("Wait for async reward model score", psrl_logger, event_type=EventType.OTHER):
+                return ray.get(self.trainer.reward_manager.wait_for_reward_of_requests.remote(batch))

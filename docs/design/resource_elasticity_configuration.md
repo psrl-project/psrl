@@ -85,9 +85,26 @@ rollout and reward replica counts by tiling each eligible pool independently.
 awake elastic allocation.** They are replaced with placement-derived limits.
 Use the policy and minimum awake count to control the live allocation.
 
-The recipes also set `+psrl.deployment.mode=elastic_rl`. When adapting a launcher,
-set `elastic.enable`, `elastic.enable_policy`, and `elastic.enable_trainer_pool`
-explicitly, as the supplied recipes do.
+Set `psrl.deployment.mode` before allocating workers. A null mode selects
+`elastic_rl` when `elastic.enable=true`, otherwise `disaggregated`.
+
+| Mode | GPU ownership |
+|------|---------------|
+| `disaggregated` | Independent rollout and reward pools |
+| `colocated` | Rollout, each reward model, validation, and training take turns on the trainer pool |
+| `rollout_rm_colocated` | Rollout and each reward model take turns on the shared pool. Training and validation use the trainer pool |
+| `trainer_pool_only` | Independent main pools plus fixed borrowers on idle trainer GPUs |
+| `elastic_rl` | Placement aware policy decisions across eligible pools |
+
+For `trainer_pool_only`, set `trainer_pool_idle_rollout_instances` and
+`trainer_pool_idle_rm_instances`. The reward count applies to each active model.
+All borrowers must fit on disjoint trainer GPU bundles. They sleep before training
+or validation reclaims the pool.
+
+Phased modes admit concurrent requests for one role or reward model, then drain
+those users before another role wakes. Fully colocated training waits for its
+batch's reward fields before taking GPU ownership. External agent sessions retain
+their generation lease until the external agent returns.
 
 ## Lifecycle and Monitor
 

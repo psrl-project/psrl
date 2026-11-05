@@ -5,9 +5,9 @@ from unittest.mock import Mock
 
 import pytest
 import torch
-from psrl.trainer.distillation import losses
 from psrl.trainer.distillation.data import align_teacher_targets
 from psrl.workers.config import DistillationConfig, DistillationLossConfig
+from verl.trainer.distillation import losses
 from verl.utils.tensordict_utils import list_of_dict_to_tensordict
 
 pytestmark = pytest.mark.cpu_test
@@ -162,18 +162,49 @@ def test_alignment_and_minimal_padding():
     assert data["teacher_logprobs"][0].shape == (5, 3), "Targets must span the complete actor sequence."
 
 
-def test_megatron_dispatch(monkeypatch):
+def test_padding_preserves_prediction_position_teacher_layout():
+    from verl.trainer.ppo.padding_utils import construct_minimal_padding_template
+
+    aligned = align_teacher_targets(batch(3), 3, True)
+    source = {field: value[0] for field, value in aligned.items()}
+    padding, _ = construct_minimal_padding_template(source, {}, 0, pad_uid=-1)
+    assert padding["teacher_logprobs"].shape == (2, 3), "Prediction targets must cover both padding input tokens."
+    assert padding["teacher_ids"].shape == (2, 3), "Prediction token IDs must retain the same layout."
+    assert padding["teacher_weight"] == 0, "Prediction padding must have zero teacher weight."
+
+
+@pytest.mark.parametrize("mode", ["forward_kl_topk", "forward_kl_topk_tail"])
+@pytest.mark.parametrize("fp8", [False, True])
+def test_megatron_dispatch_preserves_student_packing(monkeypatch, mode, fp8):
     import sys
 
-    from psrl.trainer.distillation import megatron
+    from verl.trainer.distillation import megatron
 
     kernel = Mock(return_value={"distillation_losses": torch.zeros(1, 4)})
     module = SimpleNamespace(compute_forward_kl_topk=kernel)
     monkeypatch.setattr(megatron, "losses", module, raising=False)
-    monkeypatch.setitem(sys.modules, "psrl.trainer.distillation.megatron.losses", module)
+    monkeypatch.setitem(sys.modules, "verl.trainer.distillation.megatron.losses", module)
     data = {"teacher_logprobs": torch.zeros(1, 4, 2), "teacher_ids": torch.zeros(1, 4, 2, dtype=torch.int64)}
-    losses.compute_topk_loss(SimpleNamespace(strategy="megatron"), None, data, torch.zeros(1, 4, 8), "thd")
-    kernel.assert_called_once()
+    distill = DistillationConfig(
+        enabled=True,
+        distillation_loss=DistillationLossConfig(loss_mode=mode, topk=2, use_policy_gradient=False),
+    )
+    logits = torch.zeros(1, 4, 8)
+    losses.compute_topk_loss(
+        SimpleNamespace(strategy="megatron"), distill, data, logits, "thd", use_fp8_padding=fp8, local_cp_size=2
+    )
+    expected = {
+        "student_logits": logits,
+        "teacher_topk_log_probs": data["teacher_logprobs"],
+        "teacher_topk_ids": data["teacher_ids"],
+        "config": distill,
+        "data_format": "thd",
+        "use_fp8_padding": fp8,
+        "local_cp_size": 2,
+    }
+    if mode == "forward_kl_topk_tail":
+        expected["include_tail"] = True
+    kernel.assert_called_once_with(**expected)
 
 
 def test_global_aggregation_is_initialized_without_task_loss(monkeypatch):
@@ -201,10 +232,11 @@ def test_global_aggregation_is_initialized_without_task_loss(monkeypatch):
     }, "Pure OPD must aggregate with the current global batch counts."
 
 
-@pytest.mark.parametrize("topk", [False, True])
-def test_padding_only_microbatch_is_finite_and_has_zero_gradient(topk):
+@pytest.mark.parametrize("mode", ["k1", "forward_kl_topk", "forward_kl_topk_tail"])
+def test_padding_only_microbatch_is_finite_and_has_zero_gradient(mode):
     from verl.utils import tensordict_utils as tu
 
+    topk = mode != "k1"
     data = tu.index_select_tensor_dict(batch(3 if topk else 1, padding=True), [2])
     data = align_teacher_targets(data, 3 if topk else 1, topk)
     logits = torch.randn(1, 2, 8, requires_grad=True)
@@ -214,7 +246,7 @@ def test_padding_only_microbatch_is_finite_and_has_zero_gradient(topk):
     distill = DistillationConfig(
         enabled=True,
         distillation_loss=DistillationLossConfig(
-            loss_mode="forward_kl_topk" if topk else "k1",
+            loss_mode=mode,
             topk=3,
             use_policy_gradient=not topk,
             use_task_rewards=False,

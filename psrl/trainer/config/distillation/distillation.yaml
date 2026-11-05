@@ -10,7 +10,7 @@ distillation_loss:
   # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
   _target_: psrl.workers.config.DistillationLossConfig
 
-  # Loss function mode: k1, k2, k3, kl, abs, mse, low_var_kl, or forward_kl_topk.
+  # Loss function mode: k1, k2, k3, kl, abs, mse, low_var_kl, forward_kl_topk, or forward_kl_topk_tail.
   loss_mode: k3
 
   # Number of teacher top-k tokens requested when loss_mode uses top-k.
@@ -23,13 +23,16 @@ distillation_loss:
   distillation_loss_coef: 1.0
 
   # Optional max clamp value for distillation loss. Null disables clamping.
-  loss_max_clamp: 10.0
+  loss_max_clamp: null
 
   # Optional min clamp value for log probabilities. Null disables clamping.
-  log_prob_min_clamp: -10.0
+  log_prob_min_clamp: null
+
+  # Minimum student probability mass in the aggregate tail bucket.
+  tail_mass_eps: 1.0e-6
 
   # Whether to incorporate distillation loss as a policy-gradient reward.
-  use_policy_gradient: true
+  use_policy_gradient: false
 
   # Policy loss used when use_policy_gradient is true.
   policy_loss_mode: vanilla

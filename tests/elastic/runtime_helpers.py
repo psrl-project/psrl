@@ -143,7 +143,10 @@ def _executor(modules, coord):
     executor._last_monitor_instance_log_ms = 0.0
     executor.router_backlog_by_role = {}
     executor.config = SimpleNamespace(
-        psrl=SimpleNamespace(rollout_coordination=SimpleNamespace(partial_rollout=SimpleNamespace(enable=True))),
+        psrl=SimpleNamespace(
+            rollout_coordination=SimpleNamespace(partial_rollout=SimpleNamespace(enable=True)),
+            deployment=SimpleNamespace(mode="elastic_rl"),
+        ),
     )
     executor._post_scale_up_abort_waiting_ratio = 1.0
     return executor

@@ -227,9 +227,6 @@ class PSRL_AgentLoopManager:
         psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "INFO"))
         psrl_logger.addHandler(DualOutputHandler(self.config.psrl.logging_path, self.log_prefix))
 
-        # SleepWakeOrchestrator handle (colocated modes 2/3). None otherwise.
-        self.sleep_wake_orchestrator = None
-
     # AGENT(VERL): `generate_sequences`, `_run_agent_loop` are moved to agent loop workers.
     # The manager only handles data distribution and coordination.
 
@@ -311,14 +308,6 @@ class PSRL_AgentLoopManager:
     def set_reward_manager(self, reward_manager: ray.actor.ActorHandle):
         """Set the reward manager for awaiting async reward completion."""
         self.reward_manager = reward_manager
-
-    def set_sleep_wake_orchestrator(self, orchestrator):
-        """Inject the SleepWakeOrchestrator (colocated modes 2/3).
-
-        Stored for phase gating / rollout-complete notifications. Unused when the
-        deployment mode is not colocated.
-        """
-        self.sleep_wake_orchestrator = orchestrator
 
     async def start_busy_loop(self):
         """Start the busy loop for continuous data processing from the queue."""

@@ -3,7 +3,6 @@
 import logging
 import os
 from contextlib import nullcontext
-from functools import partial
 from typing import TYPE_CHECKING
 
 import ray
@@ -24,7 +23,6 @@ from verl.utils.memory_utils import aggressive_empty_cache
 from verl.workers.engine_workers import ActorRolloutRefWorker
 
 from psrl.trainer.distillation.data import align_teacher_targets
-from psrl.trainer.distillation.losses import distillation_ppo_loss
 from psrl.utils.common.patch_utils import apply_tms_patch
 from psrl.utils.converter import create_parameter_mapping
 from psrl.utils.converter.param_sync import ParamSyncPlan
@@ -79,6 +77,26 @@ except ImportError:
 
 psrl_logger = logging.getLogger(__file__)
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
+
+
+def clear_megatron_memory_caches(models) -> None:
+    """
+    Drop cached tensors that are absent from the synchronized model state.
+    """
+    from megatron.core import parallel_state
+    from transformer_engine.pytorch.cpp_extensions.gemm import get_cublas_workspace
+    from transformer_engine.pytorch.module import base
+
+    for model in models:
+        for module in model.modules():
+            for name in ("forward", "get_cos_sin", "get_freqs_non_repeated"):
+                method = getattr(module, name, None)
+                if method is not None and hasattr(method, "cache_clear"):
+                    method.cache_clear()
+    get_cublas_workspace.cache_clear()
+    base._dummy_wgrads.clear()
+    parallel_state.get_global_memory_buffer().buffer.clear()
+    torch._C._cuda_clearCublasWorkspaces()
 
 
 class PSRL_EngineTrainWorker(ActorRolloutRefWorker, PSRL_BaseTrainWorker):
@@ -254,6 +272,17 @@ class PSRL_EngineTrainWorker(ActorRolloutRefWorker, PSRL_BaseTrainWorker):
             arena_handle.assert_fsdp_bindings_unchanged()
         self.nixl_storage_client.register_local_tensors(self.unified_state_dict, self.unified_sharding_dict)
 
+    def sleep_for_validation(self):
+        """Preserve CPU transport actor state while validation owns the GPUs."""
+        if self.config.actor.strategy == "megatron":
+            clear_megatron_memory_caches(self.actor.engine.module)
+        self.actor.to(device="cpu", model=True, optimizer=True, grad=True)
+        aggressive_empty_cache(force_sync=True)
+
+    def wake_from_validation(self):
+        """Restore the actor state preserved by CPU transport validation."""
+        self.actor.to(device="device", model=True, optimizer=True, grad=True)
+
     def _actor_weight_arena_config(self):
         """Return validated actor arena settings for this engine-worker path."""
         arena_config = self.psrl_config.nixl.get("weight_arena", None)
@@ -320,6 +349,8 @@ class PSRL_EngineTrainWorker(ActorRolloutRefWorker, PSRL_BaseTrainWorker):
         Uses torch_memory_saver.pause() when TMS range covers training,
         otherwise falls back to manual storage-resize helpers.
         """
+        if self.config.actor.strategy == "megatron":
+            clear_megatron_memory_caches(self.actor.engine.module)
         if self.memory_logger is not None:
             self.memory_logger.log_now(prefix=f"Before TrainWorker_R{self.rank} sleep")
 
@@ -404,8 +435,7 @@ class PSRL_EngineTrainWorker(ActorRolloutRefWorker, PSRL_BaseTrainWorker):
                 f"Count={len(ps_buffers)}."
             )
         elif strategy == "megatron":
-            from megatron.core.models.common.embeddings.rotary_pos_embedding import RotaryEmbedding
-
+            clear_megatron_memory_caches(self.actor.engine.module)
             ps_buffers = self._get_non_persistent_buffers_from_ps()
 
             inv_freq_tensors = {
@@ -421,7 +451,9 @@ class PSRL_EngineTrainWorker(ActorRolloutRefWorker, PSRL_BaseTrainWorker):
             restored = 0
             for model_chunk in self.actor.engine.module:
                 for module in model_chunk.modules():
-                    if isinstance(module, RotaryEmbedding) and hasattr(module, "inv_freq"):
+                    if isinstance(getattr(module, "inv_freq", None), torch.Tensor):
+                        if module.inv_freq.shape != reference_inv_freq.shape:
+                            raise RuntimeError("Rotary frequency shape does not match the parameter server buffer.")
                         # Cached trigonometric tensors reference released GPU memory.
                         if hasattr(module.forward, "cache_clear"):
                             module.forward.cache_clear()
@@ -527,7 +559,7 @@ class PSRL_EngineTrainWorker(ActorRolloutRefWorker, PSRL_BaseTrainWorker):
                         param.grad.untyped_storage().resize_(param._sleep_grad_storage_size)
                         param.grad.zero_()
 
-    def ray_push_model(self) -> None:
+    def ray_push_model(self, version: int | None = None) -> None:
         """Push model weights to the parameter server via CPU Ray object store.
 
         Modes:
@@ -536,7 +568,7 @@ class PSRL_EngineTrainWorker(ActorRolloutRefWorker, PSRL_BaseTrainWorker):
         """
         ps_manager_handle = self.train_interface.ps_manager_handle
         curr_version = ray.get(ps_manager_handle.get_ps_model_version.remote(debug_info="engine_train_worker"))
-        next_version = curr_version + 1
+        next_version = curr_version + 1 if version is None else version
 
         psrl_logger.info("Gathering per-tensor params for CPU push.")
         per_tensor_param, _ = self.actor.engine.get_per_tensor_param()
@@ -584,6 +616,8 @@ class PSRL_EngineTrainWorker(ActorRolloutRefWorker, PSRL_BaseTrainWorker):
                     elif strategy == "megatron":
                         self.config.actor.megatron.load_weight = False
 
+            if self.distillation_enabled and self._is_actor:
+                self.distillation_config = omega_conf_to_dataclass(self.distillation_config)
             try:
                 ActorRolloutRefWorker.init_model(self)
             finally:
@@ -594,14 +628,6 @@ class PSRL_EngineTrainWorker(ActorRolloutRefWorker, PSRL_BaseTrainWorker):
                             self.config.actor.fsdp_config.load_weight = True
                         elif strategy == "megatron":
                             self.config.actor.megatron.load_weight = True
-            if self.distillation_enabled and self._is_actor:
-                self.distillation_config = omega_conf_to_dataclass(self.distillation_config)
-                self.loss_fn = partial(
-                    distillation_ppo_loss,
-                    config=omega_conf_to_dataclass(self.config.actor),
-                    distillation_config=self.distillation_config,
-                )
-                self.actor.set_loss_fn(self.loss_fn)
             self._materialize_actor_weight_arena()
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))

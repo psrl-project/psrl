@@ -11,9 +11,9 @@ from typing import TYPE_CHECKING
 
 import ray
 from transfer_queue.metadata import KVBatchMeta
+from verl.trainer.distillation.losses import is_distillation_enabled
 from verl.utils.debug import marked_timer
 
-from psrl.trainer.distillation.losses import is_distillation_enabled
 from psrl.trainer.ppo.strategies.base import StepStrategy, psrl_logger
 from psrl.utils.config.validation import resolve_fine_grain_chunk_size
 from psrl.utils.logger import EventType, log_dual_events

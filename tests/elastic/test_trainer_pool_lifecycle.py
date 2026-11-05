@@ -238,6 +238,40 @@ def test_initial_validation_sleep_uses_role_coordinator(modules):
     asyncio.run(scenario())
 
 
+def test_fixed_idle_borrowers_wake_after_actor_sleep_and_release_before_actor_restore(modules):
+    async def scenario():
+        executor, events = _trainer_pool_executor(modules)
+        executor.config.psrl.deployment.mode = "trainer_pool_only"
+        executor._reclaim_trainer_pool = modules.executor.ElasticExecutor._reclaim_trainer_pool.__get__(executor)
+        role = modules.role.Rollout
+        main, idle = ("replica-1", 0), ("idle", 0)
+        status = modules.topology.InstanceStatus
+        executor.instances_status_flags[role]["model"][idle] = status.ASLEEP
+        executor.instances_engine_stats[role]["model"][idle] = {}
+        executor.instance_pool_ids[(role, "model", idle)] = "train_pool"
+        executor.topology.register(role, "model", idle, frozenset({modules.topology.GPUSlot("node", 0)}))
+
+        async def execute(coordinator, command, *, stage):
+            events.append(command.type.name)
+            assert command.get_args()["instance_ids"] == [idle], "Independent main replicas must remain resident."
+
+        executor._await_elastic_coordinator_command = AsyncMock(side_effect=execute)
+        await executor.release_trainer_pool()
+        assert events == ["nixl_sleep", "WAKE_UP"], "Borrowers may allocate only after actor memory is released."
+        assert executor.instances_status_flags[role]["model"][idle] is status.AWAKEN, (
+            "Idle capacity must become usable."
+        )
+        await executor.acquire_trainer_pool()
+        assert events[2:] == ["SLEEP", "nixl_wake_up", "broadcast", "pull_model"], (
+            "Fixed borrowers must release before actor storage and weights are restored."
+        )
+        assert executor.instances_status_flags[role]["model"][main] is status.AWAKEN, (
+            "Trainer transitions must not interrupt independent rollout pools."
+        )
+
+    asyncio.run(scenario())
+
+
 def test_validation_waits_for_scaling_then_reserves_pool_until_release(modules):
     async def scenario():
         executor, events = _trainer_pool_executor(modules)

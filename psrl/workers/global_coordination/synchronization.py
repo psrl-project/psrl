@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 
+from psrl.workers.elastic.cluster_topology import InstanceStatus
 from psrl.workers.gen.smg_adapter import build_weight_version_updates
 
 from .commands import CommandService
@@ -31,6 +32,8 @@ class WeightSynchronization:
         model.ready_buffers.discard(version - 1)
 
     async def quarantine(self, model: ModelState, replica_ids: list[str]) -> None:
+        for rid in replica_ids:
+            model.replicas[rid].status = InstanceStatus.UNKNOWN
         await asyncio.gather(
             *(model.replicas[rid].server.fail_sync.remote() for rid in replica_ids), return_exceptions=True
         )

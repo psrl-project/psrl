@@ -9,6 +9,7 @@ import json
 
 import aiohttp
 
+from psrl.workers.elastic.cluster_topology import InstanceStatus
 from psrl.workers.gen.smg_adapter import (
     WORKERS_PAUSE_PATH,
     WORKERS_RESUME_PATH,
@@ -75,12 +76,15 @@ class GatewayClient:
 
 
 class ReplicaLifecycle:
-    def __init__(self, gateway: GatewayClient) -> None:
+    def __init__(self, gateway: GatewayClient, use_nixl: bool = True) -> None:
         self.gateway = gateway
+        self.use_nixl = use_nixl
 
     async def awake(self, model: ModelState, instance_ids: list) -> list:
         instance_ids = model.expand_instances(instance_ids)
-        replica_ids = sorted({iid[0] for iid in instance_ids if not model.replicas[iid[0]].sleeping})
+        replica_ids = sorted(
+            {iid[0] for iid in instance_ids if model.replicas[iid[0]].status is InstanceStatus.AWAKEN}
+        )
         sleeping = await asyncio.gather(*(model.replicas[rid].server.is_sleeping.remote() for rid in replica_ids))
         awake = {rid for rid, asleep in zip(replica_ids, sleeping, strict=True) if not asleep}
         return [iid for iid in instance_ids if iid[0] in awake]
@@ -89,22 +93,25 @@ class ReplicaLifecycle:
         replica_ids = sorted({iid[0] for iid in model.expand_instances(instance_ids)})
         async with await model.reserve(replica_ids):
             sleeping = await asyncio.gather(*(model.replicas[rid].server.is_sleeping.remote() for rid in replica_ids))
-            wake_ids = []
+            release_ids = []
             for rid, asleep in zip(replica_ids, sleeping, strict=True):
                 replica = model.replicas[rid]
-                if asleep:
-                    replica.sleeping = True
-                if not replica.sleeping:
-                    wake_ids.append(rid)
+                if replica.status is InstanceStatus.UNKNOWN or not asleep:
+                    release_ids.append(rid)
+                else:
+                    replica.status = InstanceStatus.ASLEEP
             await self.gateway.pause_replicas(model, replica_ids)
 
             async def release(rid):
                 replica = model.replicas[rid]
-                method = replica.server.nixl_sleep if model.dynamic_weights else replica.server.sleep
-                await method.remote(level=2)
-                replica.sleeping = True
+                force = replica.status is InstanceStatus.UNKNOWN
+                replica.status = InstanceStatus.UNKNOWN
+                method = replica.server.nixl_sleep if model.dynamic_weights and self.use_nixl else replica.server.sleep
+                kwargs = {"level": 2, **({"force": True} if force else {})}
+                await method.remote(**kwargs)
+                replica.status = InstanceStatus.ASLEEP
 
-            results = await asyncio.gather(*(release(rid) for rid in wake_ids), return_exceptions=True)
+            results = await asyncio.gather(*(release(rid) for rid in release_ids), return_exceptions=True)
             self._raise_failures("Sleep", results)
         return True
 
@@ -115,16 +122,23 @@ class ReplicaLifecycle:
             wake_ids = [
                 rid
                 for rid, asleep in zip(replica_ids, sleeping, strict=True)
-                if asleep or model.replicas[rid].sleeping
+                if asleep or model.replicas[rid].status is not InstanceStatus.AWAKEN
             ]
+            recovery_ids = {rid for rid in wake_ids if model.replicas[rid].status is InstanceStatus.UNKNOWN}
             await self.gateway.pause_replicas(model, wake_ids)
             for rid in wake_ids:
-                model.replicas[rid].sleeping = True
+                model.replicas[rid].status = InstanceStatus.UNKNOWN
 
             async def restore(rid):
                 replica = model.replicas[rid]
+                if rid in recovery_ids:
+                    release = (
+                        replica.server.nixl_sleep if model.dynamic_weights and self.use_nixl else replica.server.sleep
+                    )
+                    await release.remote(level=2, force=True)
                 if model.dynamic_weights:
-                    await replica.server.nixl_wake_up.remote()
+                    method = replica.server.nixl_wake_up if self.use_nixl else replica.server.wake_up
+                    await method.remote()
                     version = await replica.server.pull_model_for_sync.remote(model.ps_version)
                     instances = [iid for iid in model.versions if iid[0] == rid]
                     await self.gateway.publish_versions(model, build_weight_version_updates(instances, version))
@@ -139,7 +153,7 @@ class ReplicaLifecycle:
             ready = [rid for rid in replica_ids if rid not in failed]
             await self.gateway.eligibility(model, ready, True)
             for rid in ready:
-                model.replicas[rid].sleeping = False
+                model.replicas[rid].status = InstanceStatus.AWAKEN
             self._raise_failures("Wake", results)
         return True
 

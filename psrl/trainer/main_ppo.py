@@ -15,10 +15,10 @@ from verl.utils.device import auto_set_device, is_cuda_available
 
 from psrl.trainer.constants_ppo import get_ppo_ray_runtime_env
 from psrl.trainer.ppo.utils import PSRL_Role
-from psrl.utils.config.deployment_mode import expand_ngpus_per_node
+from psrl.utils.config.deployment_mode import expand_ngpus_per_node, resolve_deployment_mode
 from psrl.utils.config.validation import validate_config
 from psrl.workers.config.reward_model import resolve_active_managers
-from psrl.workers.elastic.pool_layout import elastic_pool_specs, plan_replicas
+from psrl.workers.elastic.pool_layout import ReplicaPlacement, elastic_pool_specs, plan_idle_replicas, plan_replicas
 
 psrl_logger = logging.getLogger(__file__)
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
@@ -294,7 +294,7 @@ class TaskRunner:
             psrl_logger.info(
                 f"[Elastic] Maximum number of rollout instances = {deployment_config.n_rollout_instances}"
             )
-            resource_pool_spec["shared_rollout_pool"] = elastic_pools["shared_rollout_pool"]
+            resource_pool_spec.update(elastic_pools)
             rollout_pool_id_list = []
             for i, placement in enumerate(rollout_placements):
                 tag = f"rollout_{i}"
@@ -306,20 +306,6 @@ class TaskRunner:
                 resource_pool_spec[rollout_pool_id] = [
                     deployment_config.rollout_ngpus_per_node_per_instance
                 ] * deployment_config.rollout_nnodes_per_instance
-
-            # Append fixed idle rollout replicas to the existing trainer pool without replacing its actor resource
-            # spec.
-            if deployment_config.get("mode", None) == "trainer_pool_only":
-                idle_rollout = int(deployment_config.get("trainer_pool_idle_rollout_instances", 0))
-                if idle_rollout < 0:
-                    raise ValueError("trainer_pool_idle_rollout_instances must be >= 0.")
-                rollout_pool_id_list = rollout_pool_id_list + [train_pool_id] * idle_rollout
-                deployment_config.n_rollout_instances = len(rollout_pool_id_list)
-                print(
-                    f"[Trainer-pool-only] rollout instances = {deployment_config.n_rollout_instances} "
-                    f"(main={deployment_config.n_rollout_instances - idle_rollout}, "
-                    f"train_pool_idle={idle_rollout})"
-                )
 
         # Set the resource pool spec for each validation instance.
         if config.psrl.colocate_validate_and_train:
@@ -381,6 +367,49 @@ class TaskRunner:
 
         self.mapping[PSRL_Role.RewardModel] = total_reward_pool_id_list
 
+        if deployment_config.get("mode") == "trainer_pool_only":
+            requests = []
+            rollout = config.gen_actor_rollout_ref.rollout
+            rollout_size = (
+                rollout.tensor_model_parallel_size * rollout.pipeline_model_parallel_size * rollout.data_parallel_size
+            )
+            requests.append(("idle_rollout", int(deployment_config.trainer_pool_idle_rollout_instances), rollout_size))
+            rewards = [rm for rm in resolve_active_managers(config.reward) if rm.reward_loop_type in ("gen", "opd")]
+            for rm in rewards:
+                name = rm.get("reward_model_name") or rm.model.path.split("/")[-1]
+                size = (
+                    rm.rollout.tensor_model_parallel_size
+                    * rm.rollout.pipeline_model_parallel_size
+                    * rm.rollout.data_parallel_size
+                )
+                requests.append((f"idle_reward_{name}", int(deployment_config.trainer_pool_idle_rm_instances), size))
+            idle = plan_idle_replicas(deployment_config, requests)
+            rollout_tags = []
+            for index, pool_id in enumerate(rollout_pool_id_list):
+                tag = f"rollout_{index}"
+                elastic_replica_placements[tag] = ReplicaPlacement(pool_id, 0, sum(resource_pool_spec[pool_id]))
+                rollout_tags.append(tag)
+            for index in range(int(deployment_config.trainer_pool_idle_rollout_instances)):
+                tag = f"rollout_{len(rollout_tags)}"
+                elastic_replica_placements[tag] = idle[f"idle_rollout_{index}"]
+                rollout_tags.append(tag)
+            self.mapping[PSRL_Role.Rollout] = rollout_tags
+            deployment_config.n_rollout_instances = len(rollout_tags)
+            reward_tags = []
+            for rm in rewards:
+                name = rm.get("reward_model_name") or rm.model.path.split("/")[-1]
+                main_count = rm.num_replicas
+                for index in range(main_count):
+                    tag, pool_id = f"reward_model_{name}_{index}", f"reward_pool_{name}_{index}"
+                    elastic_replica_placements[tag] = ReplicaPlacement(pool_id, 0, sum(resource_pool_spec[pool_id]))
+                    reward_tags.append(tag)
+                for index in range(int(deployment_config.trainer_pool_idle_rm_instances)):
+                    tag = f"reward_model_{name}_{main_count + index}"
+                    elastic_replica_placements[tag] = idle[f"idle_reward_{name}_{index}"]
+                    reward_tags.append(tag)
+                rm.num_replicas = main_count + int(deployment_config.trainer_pool_idle_rm_instances)
+            self.mapping[PSRL_Role.RewardModel] = reward_tags
+
         from psrl.trainer.ppo.utils import ResourcePoolManager
 
         resource_pool_manager = ResourcePoolManager(
@@ -416,6 +445,7 @@ class TaskRunner:
             config: Training configuration object containing all parameters needed
                    for setting up and running the PPO training process.
         """
+        resolve_deployment_mode(config)
         # Print the initial configuration. `resolve=True` will evaluate symbolic values.
         from pprint import pprint
 

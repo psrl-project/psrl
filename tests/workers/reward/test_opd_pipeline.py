@@ -11,8 +11,8 @@ import pytest
 import torch
 from aiohttp import web
 from omegaconf import OmegaConf
+from PIL import Image
 from psrl.trainer.distillation.data import align_teacher_targets
-from psrl.trainer.distillation.losses import distillation_ppo_loss
 from psrl.utils.dataset.utils import as_object_sample, normalize_reward_model_dicts
 from psrl.workers.config.distillation import DistillationConfig, DistillationLossConfig
 from psrl.workers.reward import reward_manager as manager_module
@@ -22,6 +22,7 @@ from psrl.workers.reward.reward_protocol import RewardModelRuntimeInfo
 from psrl.workers.reward.reward_worker import RewardLoopWorker, RewardSpec
 from psrl.workers.reward.utils import attach_reward_trajectories
 from transfer_queue import KVBatchMeta
+from verl.trainer.distillation.losses import distillation_ppo_loss
 from verl.utils import tensordict_utils as tu
 from verl.utils.tensordict_utils import list_of_dict_to_tensordict
 
@@ -48,13 +49,14 @@ def teacher_response(ids, bias=0.0):
 
 
 @asynccontextmanager
-async def teacher_service():
+async def teacher_service(response_count=1):
     requests = []
 
     async def generate(request):
         payload = await request.json()
         requests.append(payload)
-        return web.json_response(teacher_response(payload["input_ids"], 0.05 if payload["model"] == "b" else 0.0))
+        response = teacher_response(payload["input_ids"], 0.05 if payload["model"] == "b" else 0.0)
+        return web.json_response(response if response_count is None else [response] * response_count)
 
     app = web.Application()
     app.router.add_post("/generate", generate)
@@ -68,7 +70,7 @@ async def teacher_service():
         await runner.cleanup()
 
 
-def config(tmp_path, topk=False, launch_async=True):
+def config(tmp_path, loss_mode="k1", launch_async=True):
     pool = {"result_queue_size": 8, "result_drain_batch_size": 8}
     return OmegaConf.create(
         {
@@ -84,7 +86,7 @@ def config(tmp_path, topk=False, launch_async=True):
             "distillation": {
                 "enabled": True,
                 "distillation_loss": {
-                    "loss_mode": "forward_kl_topk" if topk else "k1",
+                    "loss_mode": loss_mode,
                     "topk": 3,
                 },
             },
@@ -130,7 +132,7 @@ def request(uid="sample", teacher="a", trajectories=None, scalar=True):
             SimpleNamespace(
                 prompt_ids=row["prompts"],
                 response_ids=row["responses"],
-                multi_modal_data=None,
+                multi_modal_data=row.get("multi_modal_data"),
             )
             for row in trajectories
         ],
@@ -142,6 +144,7 @@ def make_worker(cfg, loops):
     cls = RewardLoopWorker.__ray_metadata__.modified_class
     worker = object.__new__(cls)
     worker.config, worker.is_validate, worker.worker_id = cfg, False, 0
+    worker.inference_orchestrator = None
     worker.completed = worker.failed = 0
     scalar = SimpleNamespace(run_single=AsyncMock(return_value={"reward_score": 4.0, "reward_extra_info": {}}))
     worker.reward_spec_to_manager = {RewardSpec("opd", "default", name): loop for name, loop in loops.items()}
@@ -149,7 +152,45 @@ def make_worker(cfg, loops):
     return worker
 
 
-def student_update(data, topk):
+@pytest.mark.parametrize("mode", ["k1", "forward_kl_topk"])
+async def test_teacher_images_follow_each_trajectory(tmp_path, mode):
+    import base64
+    import io
+
+    cfg = config(tmp_path, mode)
+    images = [Image.new("RGB", (28, 28), color) for color in ("red", "blue")]
+    trajectories = [
+        {"prompts": [1, index + 2], "responses": [4, 5], "multi_modal_data": {"images": [image]}}
+        for index, image in enumerate(images)
+    ]
+    data = request(trajectories=trajectories, scalar=False)
+    tu.assign_non_tensor_stack(data, "request_keys", [["first", "second"]])
+    async with teacher_service() as (url, calls):
+        worker = make_worker(cfg, {"a": make_loop(cfg, url)})
+        result = await worker._compute_score(worker.pre_process(data))
+    assert set(result["teacher_outputs"]) == {"first", "second"}, "Every image trajectory needs its own targets."
+    assert {tuple(call["input_ids"]) for call in calls} == {(1, 2, 4, 5), (1, 3, 4, 5)}, (
+        "Teacher scoring must preserve expanded student token IDs."
+    )
+    for call in calls:
+        image = images[call["input_ids"][1] - 2]
+        assert call["multimodal_token_mode"] == "preexpanded", "Image placeholders must not expand twice."
+        decoded = Image.open(io.BytesIO(base64.b64decode(call["image_data"][0].split(",", 1)[1])))
+        assert decoded.tobytes() == image.tobytes(), "Teacher pixels must match their own student trajectory."
+
+
+@pytest.mark.parametrize("modality", ["videos", "audios"])
+async def test_teacher_rejects_unsupported_modalities(tmp_path, modality):
+    cfg = config(tmp_path)
+    loop = make_loop(cfg, "http://127.0.0.1:1")
+    data = make_worker(cfg, {}).pre_process(request())
+    tu.assign_non_tensor_stack(data, "multi_modal_data", [{modality: [object()]}])
+    with pytest.raises(ValueError, match="Video and audio"):
+        await loop.run_single(data)
+
+
+def student_update(data, mode):
+    topk = mode != "k1"
     data = align_teacher_targets(data, 3 if topk else 1, topk)
     student = torch.nn.Embedding(8, 8)
     optimizer = torch.optim.SGD(student.parameters(), lr=0.1)
@@ -161,7 +202,7 @@ def student_update(data, topk):
     distill = DistillationConfig(
         enabled=True,
         distillation_loss=DistillationLossConfig(
-            loss_mode="forward_kl_topk" if topk else "k1",
+            loss_mode=mode,
             topk=3,
             use_policy_gradient=not topk,
             use_task_rewards=False,
@@ -193,10 +234,11 @@ def student_update(data, topk):
     assert not torch.equal(before, student.weight), "OPD must update student weights."
 
 
-@pytest.mark.parametrize("topk", [False, True])
+@pytest.mark.parametrize("mode", ["k1", "forward_kl_topk", "forward_kl_topk_tail"])
 @pytest.mark.parametrize("launch_async", [False, True])
-async def test_http_to_reward_queue_and_student(tmp_path, monkeypatch, topk, launch_async, real_queue=False):
-    cfg = config(tmp_path, topk, launch_async)
+async def test_http_to_reward_queue_and_student(tmp_path, monkeypatch, mode, launch_async, real_queue=False):
+    topk = mode != "k1"
+    cfg = config(tmp_path, mode, launch_async)
     stored = {}
     queue_put = manager_module.tq.async_kv_batch_put
 
@@ -248,7 +290,7 @@ async def test_http_to_reward_queue_and_student(tmp_path, monkeypatch, topk, lau
                         "response_mask": torch.tensor([1, 0, 1] if key != "sample_1" else [1, 1]),
                     }
                 )
-            student_update(list_of_dict_to_tensordict(rows), topk)
+            student_update(list_of_dict_to_tensordict(rows), mode)
             assert len(calls) == 3, "Every trajectory must be scored once."
             assert all(call["top_logprobs_num"] == (3 if topk else 0) for call in calls), "K must match the loss mode."
             assert all(call["return_logprob"] and call["logprob_start_len"] == 0 for call in calls), (
@@ -283,6 +325,21 @@ def test_protocol_response_slice_and_topk_sort(topk):
             result["teacher_logprobs"][0, 0]
             == teacher_response([1, 2, 3, 4])["meta_info"]["input_token_logprobs"][2][0]
         ), "PG must use the observed token."
+
+
+@pytest.mark.parametrize("response_count", [None, 0, 2])
+async def test_http_rejects_invalid_response_cardinality(tmp_path, response_count):
+    async with teacher_service(response_count=response_count) as (url, _):
+        loop = make_loop(config(tmp_path), url)
+        data = tu.get_tensordict(
+            tensor_dict={
+                "prompts": torch.tensor([[1, 2]]),
+                "responses": torch.tensor([[3]]),
+                "attention_mask": torch.ones(1, 3, dtype=torch.int64),
+            }
+        )
+        with pytest.raises(ValueError, match="exactly one SMG response"):
+            await loop.run_single(data)
 
 
 @pytest.mark.parametrize("damage", ["ids", "length", "first", "missing", "topk", "duplicate", "vocab", "nan"])
@@ -376,8 +433,8 @@ async def test_stale_results_errors_and_validation_isolation(tmp_path, monkeypat
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize("topk", [False, True])
-async def test_real_transfer_queue_pipeline(tmp_path, monkeypatch, ray_cluster, topk):
+@pytest.mark.parametrize("mode", ["k1", "forward_kl_topk", "forward_kl_topk_tail"])
+async def test_real_transfer_queue_pipeline(tmp_path, monkeypatch, ray_cluster, mode):
     import transfer_queue as tq
 
     tq.init(
@@ -395,7 +452,7 @@ async def test_real_transfer_queue_pipeline(tmp_path, monkeypatch, ray_cluster, 
         )
     )
     try:
-        await test_http_to_reward_queue_and_student(tmp_path, monkeypatch, topk, True, real_queue=True)
+        await test_http_to_reward_queue_and_student(tmp_path, monkeypatch, mode, True, real_queue=True)
     finally:
         tq.close()
 

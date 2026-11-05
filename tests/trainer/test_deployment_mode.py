@@ -27,7 +27,12 @@ def _make_config(
     tms_range=None,
 ):
     if colocate_validate_and_train is None:
-        colocate_validate_and_train = elastic_enable or mode in ("elastic_rl", "colocated", "rollout_rm_colocated")
+        colocate_validate_and_train = elastic_enable or mode in (
+            "elastic_rl",
+            "colocated",
+            "rollout_rm_colocated",
+            "trainer_pool_only",
+        )
     cfg = OmegaConf.create(
         {
             "psrl": {

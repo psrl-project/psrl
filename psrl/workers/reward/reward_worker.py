@@ -17,6 +17,7 @@ from verl.utils.fs import copy_to_local
 
 from psrl.utils.dataset.utils import normalize_reward_model_dicts
 from psrl.utils.logger import DualOutputHandler
+from psrl.workers.elastic.sleep_wake_orchestrator import inference_lease
 from psrl.workers.reward.client import RewardManagerClient
 from psrl.workers.reward.reward_loop import load_reward_loop
 from psrl.workers.reward.reward_loop.base import RewardLoopBase
@@ -73,6 +74,7 @@ class RewardLoopWorker:
         self.worker_id = worker_id
         self.worker_num = worker_num
         self.is_validate = is_validate
+        self.inference_orchestrator = None
 
         tq.init()
 
@@ -107,6 +109,10 @@ class RewardLoopWorker:
 
     def set_reward_manager(self, reward_manager_handle: ray.actor.ActorHandle):
         self.reward_manager_client = RewardManagerClient(reward_manager_handle, self.max_concurrency)
+
+    def set_inference_orchestrator(self, orchestrator):
+        """Install model scoped GPU admission for generative reward calls."""
+        self.inference_orchestrator = orchestrator
 
     async def add_reward_requests(self, requests: list[TensorDict]):
         if any(bool(tu.get(request, "validate", False)) != self.is_validate for request in requests):
@@ -320,7 +326,9 @@ class RewardLoopWorker:
         if len(teachers) > 1 or (required and len(teachers) != 1):
             raise ValueError("Each OPD training request must select exactly one teacher reward model.")
         scalar_indices = [i for i in range(len(managers)) if i not in teachers]
-        results = await asyncio.gather(*(managers[i].run_single(reward_data) for i in scalar_indices))
+        results = await asyncio.gather(
+            *(self._run_scoring_manager(managers[i], specs[i], reward_data) for i in scalar_indices)
+        )
         reward = {
             "reward_score": float(sum(r["reward_score"] * coefs[i] for i, r in zip(scalar_indices, results))),
             "reward_extra_info": {keys[i]: r["reward_extra_info"] for i, r in zip(scalar_indices, results)},
@@ -339,18 +347,18 @@ class RewardLoopWorker:
                     raise ValueError("OPD trajectory count does not match request_keys.")
                 trajectory_data = []
                 for trajectory in trajectories:
-                    if trajectory.get("has_multimodal_data", False):
-                        raise ValueError("OPD teacher scoring supports text trajectories only.")
                     row = tu.get_tensordict(
                         tensor_dict={
                             "prompts": torch.tensor([trajectory["prompts"]], dtype=torch.int64),
                             "responses": torch.tensor([trajectory["responses"]], dtype=torch.int64),
                         },
                     )
-                    if "multi_modal_data" in reward_data:
-                        row["multi_modal_data"] = reward_data["multi_modal_data"]
+                    if trajectory["multi_modal_data"]:
+                        tu.assign_non_tensor_stack(row, "multi_modal_data", [trajectory["multi_modal_data"]])
                     trajectory_data.append(self.pre_process(row))
-            outputs = await asyncio.gather(*(managers[index].run_single(row) for row in trajectory_data))
+            outputs = await asyncio.gather(
+                *(self._run_scoring_manager(managers[index], specs[index], row) for row in trajectory_data)
+            )
             reward["teacher_outputs"] = {
                 key: {
                     **{field: output[field] for field in ("teacher_logprobs", "teacher_ids") if field in output},
@@ -361,3 +369,9 @@ class RewardLoopWorker:
                 for key, output in zip(request_keys, outputs)
             }
         return reward
+
+    async def _run_scoring_manager(self, manager, specification: dict, data: TensorDict):
+        """Serialize shared model storage while allowing independent CPU scoring."""
+        orchestrator = self.inference_orchestrator if specification.get("reward_loop_type") in ("gen", "opd") else None
+        async with inference_lease(orchestrator, "reward", specification.get("reward_model_name", "")):
+            return await manager.run_single(data)

@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from psrl.workers.elastic.cluster_topology import InstanceStatus
 from psrl.workers.gen.smg_adapter import WORKERS_UPDATE_STATS_PATH, build_worker_stats_update
 from psrl.workers.gen.stats_collector import EngineStats
 
@@ -80,10 +81,12 @@ class TelemetryService:
             for rank, observation in engines.items():
                 iid = (rid, rank)
                 stats = model.engine_status[iid]
-                sleeping = observation["is_sleeping"] or model.replicas[rid].sleeping
+                status = model.replicas[rid].status
+                if status is InstanceStatus.AWAKEN and observation["is_sleeping"]:
+                    status = InstanceStatus.ASLEEP
                 snapshot = (
                     EngineStats.get_default_snapshot()
-                    if sleeping
+                    if status is not InstanceStatus.AWAKEN
                     else {
                         **stats.snapshot,
                         "timestamp": observation["timestamp"],
@@ -95,9 +98,9 @@ class TelemetryService:
                     snapshot["generation_throughput"] = 0.0
                 model.engine_status[iid] = EngineStats(stats.replica_idx, rank, stats.model_version, snapshot)
                 result[iid] = {
-                    "is_sleeping": sleeping,
+                    "status": status,
                     "engine_stats": snapshot,
-                    "model_version": model.ps_version if sleeping else model.versions[iid],
+                    "model_version": model.ps_version if status is InstanceStatus.ASLEEP else model.versions[iid],
                     "wake_model_version": model.ps_version,
                 }
         return result

@@ -55,11 +55,11 @@ MODE_OVERRIDES=""
 case "$MODE" in
   disaggregated)
     # Mode 1: three independent pools, concurrent async pipeline. No extra requirements.
-    MODE_OVERRIDES="+psrl.deployment.mode=disaggregated psrl.staleness=2"
+    MODE_OVERRIDES="psrl.deployment.mode=disaggregated psrl.staleness=2"
     ;;
   colocated)
     # Mode 2: all three roles share train_pool, time-multiplexed per step.
-    MODE_OVERRIDES="+psrl.deployment.mode=colocated \
+    MODE_OVERRIDES="psrl.deployment.mode=colocated \
       psrl.ps_mode=nixl_cpu \
       psrl.staleness=0 \
       reward.launch_reward_fn_async=True"
@@ -67,7 +67,7 @@ case "$MODE" in
   rollout_rm_colocated)
     # Mode 3: rollout+rm share shared_rollout_pool. trainer on train_pool.
     # shared pool carries the rollout/rm replicas. train_pool carries the actor.
-    MODE_OVERRIDES="+psrl.deployment.mode=rollout_rm_colocated \
+    MODE_OVERRIDES="psrl.deployment.mode=rollout_rm_colocated \
       psrl.ps_mode=nixl_cpu \
       psrl.staleness=0 \
       psrl.deployment.elastic.shared_nnodes=1 \
@@ -77,15 +77,15 @@ case "$MODE" in
   trainer_pool_only)
     # Mode 4: three independent pools + fixed extra replicas on train_pool while idle.
     # Tune the idle counts to fit train_pool GPUs (must be divisible by instance world size).
-    MODE_OVERRIDES="+psrl.deployment.mode=trainer_pool_only \
+    MODE_OVERRIDES="psrl.deployment.mode=trainer_pool_only \
       psrl.ps_mode=nixl_cpu \
       psrl.staleness=2 \
-      +psrl.deployment.trainer_pool_idle_rollout_instances=2 \
-      +psrl.deployment.trainer_pool_idle_rm_instances=1"
+      psrl.deployment.trainer_pool_idle_rollout_instances=2 \
+      psrl.deployment.trainer_pool_idle_rm_instances=1"
     ;;
   elastic_rl)
     # Mode 5: current elastic auto-scaling.
-    MODE_OVERRIDES="+psrl.deployment.mode=elastic_rl \
+    MODE_OVERRIDES="psrl.deployment.mode=elastic_rl \
       psrl.ps_mode=nixl_cpu \
       psrl.staleness=2 \
       psrl.deployment.elastic.enable=True \

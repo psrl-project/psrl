@@ -91,7 +91,7 @@ class TMSWorkerPatch(vLLMPatch[Worker]):
         free_bytes_before_sleep = torch.cuda.mem_get_info()[0]
 
         # Save the buffers before level 2 sleep
-        if level == 2:
+        if level == 2 and not getattr(self, "_sleep_saved_buffers", {}):
             stage_start = time.perf_counter()
             model = self.model_runner.model
             self._sleep_saved_buffers = {name: buffer.cpu().clone() for name, buffer in model.named_buffers()}

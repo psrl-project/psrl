@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import ray
 from omegaconf import DictConfig, OmegaConf, open_dict
 from verl.single_controller.ray import RayWorkerGroup
+from verl.trainer.distillation.losses import get_distillation_loss_settings
 from verl.utils import hf_tokenizer, omega_conf_to_dataclass
 from verl.utils.fs import copy_to_local
 
@@ -49,7 +50,7 @@ class RewardModelManager:
         self.hf_model_config = model_cfg
         if reward_model_config.reward_loop_type == "opd":
             loss = config.distillation.distillation_loss
-            width = int(loss.topk) if loss.loss_mode == "forward_kl_topk" else 0
+            width = int(loss.topk) if get_distillation_loss_settings(loss.loss_mode).use_topk else 0
             with open_dict(reward_model_config.rollout):
                 if "engine_kwargs" not in reward_model_config.rollout:
                     reward_model_config.rollout.engine_kwargs = {}

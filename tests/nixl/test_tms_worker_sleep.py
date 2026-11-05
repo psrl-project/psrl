@@ -46,10 +46,12 @@ def test_release_inactive_cuda_cache_runs_in_current_process(monkeypatch) -> Non
         ("TMS:GRAPH", ["weights", "kv_cache", "graph"]),
     ],
 )
+@pytest.mark.parametrize("has_backup", [False, True])
 def test_sleep_clears_default_allocator_after_tms_pools(
     monkeypatch,
     patches: str,
     expected_pauses: list[str],
+    has_backup: bool,
 ) -> None:
     events = []
 
@@ -96,13 +98,48 @@ def test_sleep_clears_default_allocator_after_tms_pools(
         local_rank=0,
         model_runner=SimpleNamespace(model=SimpleNamespace(named_buffers=lambda: [])),
         log_tms_timing=lambda operation, stage, elapsed_s, tag=None: timings.append((operation, stage, tag)),
+        _sleep_saved_buffers={"frequency": object()} if has_backup else {},
     )
 
     gpu_worker.TMSWorkerPatch.sleep(worker, level=2)
 
+    assert ("frequency" in worker._sleep_saved_buffers) is has_backup, (
+        "Recovery sleep must retain CPU buffers saved before an incomplete wake."
+    )
     assert events == [
         *(("pause", tag) for tag in expected_pauses),
         ("empty_cache", "default_allocator"),
     ]
     assert ("sleep", "empty_cache", "default_allocator") in timings
     assert timings[-1] == ("sleep", "total", None)
+
+
+@pytest.mark.parametrize("paused", [False, True])
+def test_force_sleep_releases_partial_executor_storage_only_after_scheduler_pause(monkeypatch, paused):
+    from unittest.mock import Mock
+
+    from vllm.v1.engine import core
+    from vllm_patches.patches.engine_core import _patch_engine_core_psrl_methods
+
+    class Engine:
+        def is_scheduler_paused(self):
+            return paused
+
+    monkeypatch.setattr(core, "EngineCore", Engine)
+    _patch_engine_core_psrl_methods()
+    engine = Engine()
+    engine.model_executor = SimpleNamespace(
+        is_sleeping=True,
+        sleeping_tags={"kv_cache"},
+        collective_rpc=Mock(),
+    )
+    if not paused:
+        with pytest.raises(RuntimeError, match="paused scheduler"):
+            engine.psrl_sleep_memory(2)
+        engine.model_executor.collective_rpc.assert_not_called()
+    else:
+        engine.psrl_sleep_memory(2)
+        engine.model_executor.collective_rpc.assert_called_once_with("sleep", kwargs={"level": 2})
+        assert {"weights", "kv_cache"}.issubset(engine.model_executor.sleeping_tags), (
+            "A successful recovery release must cover every remaining memory tag."
+        )

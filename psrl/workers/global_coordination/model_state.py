@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any, TypeAlias
 
 from psrl.utils.server.command import CommandExtension
+from psrl.workers.elastic.cluster_topology import InstanceStatus
 from psrl.workers.gen.stats_collector import EngineStats
 from psrl.workers.gen.utils import RolloutInstanceId
 
@@ -27,7 +28,7 @@ class ReplicaState:
     server: Any
     tag: str
     dp_size: int
-    sleeping: bool = False
+    status: InstanceStatus = InstanceStatus.AWAKEN
     operation_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 

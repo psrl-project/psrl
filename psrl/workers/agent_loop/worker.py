@@ -12,7 +12,6 @@ import torch
 import transfer_queue as tq
 from omegaconf import DictConfig, OmegaConf
 from tensordict import TensorDict
-from verl.trainer.distillation import is_distillation_enabled
 from verl.utils import tensordict_utils as tu
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.dataset.rl_dataset import get_dataset_class
@@ -100,11 +99,6 @@ class PSRL_AgentLoopWorker:
         # TransferQueue bootstrap (connects to controller/storage spun up by the driver).
         tq.init()
 
-        self.distillation_config = config.get("distillation", None)
-        self.distillation_enabled = is_distillation_enabled(self.distillation_config)
-        if self.distillation_enabled:
-            raise NotImplementedError("Distillation is not supported in PSRL yet.")
-
         self.dataset_cls = get_dataset_class(config.data)
 
         self.tokenizer = self.model_config.tokenizer
@@ -115,6 +109,7 @@ class PSRL_AgentLoopWorker:
         self.ps_manager_handle = ps_manager_handle
         self.agent_loop_manager = None
         self.reward_manager = None
+        self.inference_orchestrator = None
         self.reward_rpc_capacity = reward_producer_concurrency(
             config.reward.reward_loop_worker,
             producer_count=worker_num,
@@ -228,6 +223,10 @@ class PSRL_AgentLoopWorker:
             agent_loop_manager: Handle to the agent loop manager actor.
         """
         self.agent_loop_manager = agent_loop_manager
+
+    def set_inference_orchestrator(self, orchestrator):
+        """Install shared GPU admission before any agent starts."""
+        self.inference_orchestrator = orchestrator
 
     def set_reward_managers(
         self,
@@ -405,6 +404,7 @@ class PSRL_AgentLoopWorker:
                     processor=self.processor,
                     dataset_cls=self.dataset_cls,
                     data_config=DictConfigWrap(self.config.data),
+                    inference_orchestrator=self.inference_orchestrator,
                 )
                 # Keep framework objects out of Hydra's dataclass conversion path.
                 agent_loop_factory = hydra.utils.instantiate(
@@ -550,7 +550,7 @@ class PSRL_AgentLoopWorker:
 
         outputs = output if isinstance(output, list) else [output]
 
-        keys, fields = self._build_output_fields(outputs, batch, uid, version_tag, terminate_reason)
+        keys, fields = self._build_output_fields(outputs, batch, uid, prompt_id, version_tag, terminate_reason)
 
         await tq.async_kv_batch_put(
             keys=keys,
@@ -576,6 +576,7 @@ class PSRL_AgentLoopWorker:
         outputs: list,
         batch: TensorDict,
         uid: int,
+        prompt_id: int,
         version_tag: int,
         terminate_reason: TerminateReason = TerminateReason.FINISHED,
     ) -> tuple[list[str], list[dict]]:
@@ -636,9 +637,8 @@ class PSRL_AgentLoopWorker:
             field["prompt_len"] = prompt_len
             field["response_len"] = response_len
             field["uid"] = uid
+            field["parent_id"] = prompt_id
             field.setdefault("version_tag", version_tag)
-            if "parent_id" in batch:
-                field["parent_id"] = tu.get(batch, "parent_id")[0]
             field["trajectory_index"] = i
             field["trajectory_num"] = len(outputs)
             # Carried for metrics so the trainer can report reward and gradient share per
