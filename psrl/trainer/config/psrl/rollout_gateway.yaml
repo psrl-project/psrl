@@ -35,6 +35,11 @@ enable_kv_event_replay: False
 # Enale TITO debug in SMG
 tito_debug: False
 
+# Session snapshot wire format consumed by the agent loop: `expanded` returns one
+# trajectory per leaf; `compact` returns the tree nodes once and reconstructs the
+# trajectories in PSRL.
+tito_snapshot_format: compact
+
 # Harness tool-input canonicalizer for TITO prefix hashing. "none" disables it and "claude_code"
 # mirrors Claude Code's normalizeToolInput so replayed histories keep matching the stored prefix.
 tito_tool_normalization: claude_code

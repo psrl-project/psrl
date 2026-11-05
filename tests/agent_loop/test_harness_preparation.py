@@ -86,7 +86,11 @@ async def test_grader_preparation_overlaps_rollout_without_allocating_a_grader(h
     loop.attach_runtime_mount = lambda value: value
     loop.create_session = AsyncMock(return_value="session")
     loop.session_root_url = lambda *args: "http://router"
-    loop.harness_config = SimpleNamespace(callback_base_url=None)
+    # Isolation is a prompt convention; this scheduling test only needs a no-op.
+    loop.harness_config = SimpleNamespace(
+        callback_base_url=None,
+        task_prompt=lambda prompt, workdir: prompt,
+    )
     loop.model_config = SimpleNamespace(path="model")
     loop.compaction_budget = None
     loop.max_turns = 1

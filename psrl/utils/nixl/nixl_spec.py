@@ -53,6 +53,12 @@ class NIXLSharding:
     shard_indices: list[tuple[int, ...]]
     # Elements per scale entry along the last two dims, declared by the rollout for a block FP8 scale key.
     scale_tile: tuple[int, int] | None = None
+    #: The rollout parameter this tensor feeds a scale for, when a fused parameter's wire views
+    #: are quantized together. None for a tensor whose views are each whole tiles.
+    quant_unit: str | None = None
+    #: This client computes the tensor while quantizing another, so no client provides it
+    #: and the transfer plan leaves it out.
+    local_only: bool = False
 
     def __init__(self, **kwargs):
         """Initialize the sharding"""
@@ -60,6 +66,9 @@ class NIXLSharding:
         assert "shard_indices" in kwargs, "shard_indices is required"
         self.shard_mesh = kwargs["shard_mesh"]
         self.shard_indices = kwargs["shard_indices"]
+        self.scale_tile = kwargs.get("scale_tile")
+        self.quant_unit = kwargs.get("quant_unit")
+        self.local_only = bool(kwargs.get("local_only", False))
         self._validate_and_set_local_shard_mesh()
 
     def __deepcopy__(self, memo):
@@ -69,6 +78,8 @@ class NIXLSharding:
         new_obj.shard_indices = deepcopy(self.shard_indices, memo)
         new_obj._local_shard_mesh = deepcopy(self._local_shard_mesh, memo)
         new_obj.scale_tile = self.scale_tile
+        new_obj.quant_unit = self.quant_unit
+        new_obj.local_only = self.local_only
         return new_obj
 
     @property

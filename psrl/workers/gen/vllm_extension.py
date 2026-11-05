@@ -122,6 +122,10 @@ class vLLMWorkerExtension(vLLMColocateWorkerExtension):
             segment_registration=segment_registration,
         )
         psrl_logger.info(f"NIXL client initialized on port {self.nixl_storage_client.client_port}.")
+        if bool(nixl_config.get("reader_quantization", False)):
+            plan = QuantizationPlan.from_config(nixl_config.get("publish_quantization"))
+            self.nixl_storage_client.set_reader_quantization(plan)
+            psrl_logger.info("NIXL reader-side FP8 quantization enabled.")
 
     def nixl_convert_params(self, model_config: DictConfig, quantization: dict | None = None):
         """Convert the model parameters to unified format.
@@ -143,6 +147,19 @@ class vLLMWorkerExtension(vLLMColocateWorkerExtension):
             parameter_mapping=param_mapping,
             quantization=QuantizationPlan.from_config(quantization),
         )
+        unit_layers = sorted(
+            {
+                sharding.quant_unit
+                for sharding in self.local_sharding_dict.values()
+                if getattr(sharding, "quant_unit", None) is not None
+            }
+        )
+        if unit_layers and not self.nixl_storage_client._reader_quantization:
+            raise ValueError(
+                f"This model fuses {len(unit_layers)} parameter(s) whose checkpoint views are smaller "
+                f"than one quantization tile, first {unit_layers[0]!r}. The rollout must quantize them "
+                "as one unit, which requires psrl.nixl.reader_quantization=true."
+            )
 
     def nixl_protocol(self, model_config: DictConfig, mode: str = "full", quantization: dict | None = None):
         """Run the NIXL server protocol.
@@ -256,7 +273,13 @@ class vLLMWorkerExtension(vLLMColocateWorkerExtension):
         participants = None
         if allowed is not None:
             plan = self.nixl_storage_client.comm_plan
-            peers = {w for groups in plan.peer_groups.values() for wanters in groups.values() for w in wanters}
+            peers = {
+                w
+                for per_key in plan.peer_groups.values()
+                for per_shard in per_key.values()
+                for wanters in per_shard.values()
+                for w in wanters
+            }
             participants = {name for name in peers if gen_client_instance(name) in allowed}
             participants.add(self.nixl_storage_client.client_name)
         try:

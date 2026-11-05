@@ -7,6 +7,7 @@ from pathlib import PurePosixPath
 
 from psrl.sandbox import (
     SandboxCollectorError,
+    SandboxCommandTimeout,
     SandboxExitReason,
     SandboxPathNotFoundError,
     SandboxSession,
@@ -257,6 +258,38 @@ async def collect_git_patch(
             exc_info=True,
         )
         raise
+    except SandboxCommandTimeout as exc:
+        # The collector hit its budget with part of the patch already written. Each
+        # file's diff is complete on its own, so the partial patch grades the workspace
+        # the harness actually left; discarding it would cost a finished episode to the
+        # size of the repository rather than to the solution.
+        diagnostics, _unavailable = await _read_collector_diagnostics(session, diag_path)
+        try:
+            partial = await session.read_bytes(patch_path)
+        except SandboxPathNotFoundError:
+            # The collector stopped before it created the patch file, so it wrote nothing
+            # rather than something unreadable.
+            partial = b""
+        except Exception as read_error:  # noqa: BLE001 - the failure names both causes
+            raise SandboxCollectorError(
+                f"Harness patch collection timed out after {timeout_s:g}s and the partial "
+                f"patch could not be read: {read_error!r}.",
+                exit_code=None,
+                diagnostics=diagnostics,
+            ) from exc
+        if not partial.strip():
+            raise SandboxCollectorError(
+                f"Harness patch collection timed out after {timeout_s:g}s before writing any patch.",
+                exit_code=None,
+                diagnostics=diagnostics,
+            ) from exc
+        psrl_logger.warning(
+            "Harness patch collection for %r hit its %gs budget; grading the %d bytes written so far.",
+            workdir,
+            timeout_s,
+            len(partial),
+        )
+        return partial.decode(errors="replace")
     if result.exit_code != 0:
         diagnostics, unavailable = await _read_collector_diagnostics(session, diag_path)
         status, status_error, lost = await _sandbox_status(session)

@@ -129,6 +129,14 @@ class TokenOutput:
             "agent_reward_info": self.agent_reward_info,
             **self.extra_fields,  # Include any extra fields in the dictionary
         }
+        # A row is its own session primary unless a multi-trajectory loop says otherwise.
+        # The trainer reads these fields for every rollout, so they must always be
+        # present; a loop that sets them to None would otherwise drop the field from
+        # the TransferQueue row and fail the batch-wide field read.
+        if output.get("session_primary") is None:
+            output["session_primary"] = True
+        if output.get("loss_weight") is None:
+            output["loss_weight"] = 1.0
 
         output["prompts"] = torch.tensor(output.pop("prompt_ids"), dtype=torch.int64)
         output["responses"] = torch.tensor(output.pop("response_ids"), dtype=torch.int64)

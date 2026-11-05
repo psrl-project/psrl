@@ -173,6 +173,9 @@ class TestPeerDescriptorsAreIncluded:
                 for client in wanters:
                     self.peer_groups.setdefault(client, {})[key] = wanters
 
+        def peer_group_members(self, pull_client):
+            return {w for wanters in self.peer_groups.get(pull_client, {}).values() for w in wanters}
+
     def test_every_group_member_is_included_in_both_directions(self):
         clients = {**DIRECT, "gen1": NIXLClientType.PULL_SIDE}
         server = _Server(clients, comm_plan=self._Plan({"w": ("gen0", "gen1")}))

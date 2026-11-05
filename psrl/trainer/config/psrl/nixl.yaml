@@ -19,6 +19,15 @@ weight_quantization:
   ignore: []
   config_file: null
 
+# Quantize in the reader instead of the trainer. The trainer keeps its live BF16
+# parameters and allocates no publish copy; each rollout stages the BF16 shard and
+# writes its own FP8 parameters and `_scale_inv`. Only valid for Megatron direct
+# supply with weight_quantization.scheme=fp8. Peer diffusion shares a quantized
+# shard across readers at the individual finest-mesh shard, including readers whose
+# target layout differs (one TP/EP degree's shard overlapping another's). See
+# docs/design/reader_quantization_impl.md.
+reader_quantization: false
+
 # Pinned temp memory slots num for non-contiguous transfer
 max_pinned_temp_memory_slots: 16
 

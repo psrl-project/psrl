@@ -18,6 +18,7 @@ def _config(
     train_dtype: str = "bf16",
     rollout_dtype: str = "bfloat16",
     quantization_scheme: str = "none",
+    reader_quantization: bool = False,
     colocate: bool = False,
     decided="auto",
 ):
@@ -31,6 +32,7 @@ def _config(
                     "publish_train_dtype": train_dtype,
                     "publish_rollout_dtype": rollout_dtype,
                     "publish_quantization": {"scheme": quantization_scheme},
+                    "reader_quantization": reader_quantization,
                 },
             }
         }
@@ -84,3 +86,15 @@ def test_an_explicit_boolean_is_never_overridden(decided):
     config = _config(decided=decided)
     _resolve_write_gate(config)
     assert config.psrl.nixl.await_write_gate is decided
+
+
+def test_reader_side_fp8_quantization_reads_live_bf16_and_enables_the_gate():
+    config = _config(quantization_scheme="fp8", reader_quantization=True)
+    _resolve_write_gate(config)
+    assert config.psrl.nixl.await_write_gate is True
+
+
+def test_reader_quantization_needs_both_fp8_and_direct_supply():
+    config = _config(ps_mode="nixl_cpu", quantization_scheme="fp8", reader_quantization=True)
+    _resolve_write_gate(config)
+    assert config.psrl.nixl.await_write_gate is False

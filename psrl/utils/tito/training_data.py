@@ -14,11 +14,13 @@ import os
 import numpy as np
 import torch
 
-from psrl.utils.routed_experts import canonicalize_routed_experts, validate_routed_experts_array
+from psrl.utils.routed_experts import validate_routed_experts_array
 from psrl.utils.sampler_distribution import SamplerDistribution
 
 psrl_logger = logging.getLogger(__name__)
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
+
+_CAPTURE_FULL = "full"
 
 
 def _assemble_routed_experts(
@@ -26,17 +28,15 @@ def _assemble_routed_experts(
     prompt_length: int,
     response_length: int,
 ) -> torch.Tensor | None:
-    """Concatenate per-turn routed-expert segments into the canonical int16 tensor."""
-    if not any(record.get("routed_experts") is not None for record in records):
-        return None
-
+    """Place per-turn routed-expert segments at their absolute prompt offsets."""
+    sequence_length = prompt_length + response_length
     expected_shape: tuple[int, ...] | None = None
     expected_dtype: np.dtype | None = None
-    segments: list[np.ndarray] = []
+    segments: list[tuple[int, np.ndarray]] = []
     for turn_index, record in enumerate(records):
         routed_experts = record.get("routed_experts")
         if routed_experts is None:
-            raise ValueError(f"Missing routed_experts segment at TITO turn {turn_index}.")
+            continue
         array = np.load(io.BytesIO(base64.b64decode(routed_experts["data"])))
         array = validate_routed_experts_array(array)
 
@@ -57,10 +57,53 @@ def _assemble_routed_experts(
                 f"expected {expected_shape!r}/{expected_dtype!r}, "
                 f"got {array.shape[1:]!r}/{array.dtype!r}."
             )
-        segments.append(array)
+        start = int(routed_experts.get("prompt_start", 0))
+        segments.append((start, array))
 
-    compact = np.concatenate(segments, axis=0)
-    return canonicalize_routed_experts(compact, prompt_length, response_length)
+    if not segments or expected_shape is None:
+        return None
+
+    canonical = np.zeros((sequence_length, *expected_shape), dtype=np.int16)
+    covered = np.zeros(sequence_length, dtype=bool)
+    for start, array in segments:
+        end = start + array.shape[0]
+        if start < 0 or end > sequence_length:
+            raise ValueError(
+                "routed_experts segment is outside the canonical sequence: "
+                f"start={start}, rows={array.shape[0]}, sequence_length={sequence_length}."
+            )
+        if covered[start:end].any():
+            raise ValueError(
+                "routed_experts segments overlap in the canonical sequence: "
+                f"start={start}, rows={array.shape[0]}."
+            )
+        canonical[start:end] = array.astype(np.int16, copy=False)
+        covered[start:end] = True
+    return torch.from_numpy(canonical)
+
+
+def _record_owner(record: dict, trainable_trajectory_id: int | None) -> int | None:
+    owner = record.get("owner_trajectory_id")
+    if owner is None:
+        return trainable_trajectory_id
+    return int(owner)
+
+
+def _record_capture(record: dict) -> str:
+    return str(record.get("capture") or _CAPTURE_FULL)
+
+
+def _record_output_ids(record: dict) -> list[int]:
+    output_ids = record.get("output_token_ids")
+    if output_ids is not None:
+        return [int(token_id) for token_id in output_ids]
+    raw_lps = record.get("output_logprobs") or []
+    return [int(pair[1]) for pair in raw_lps]
+
+
+def _record_logprobs(record: dict) -> list[float]:
+    raw_lps = record.get("output_logprobs") or []
+    return [float(pair[0]) for pair in raw_lps]
 
 
 def build_training_data(
@@ -69,31 +112,30 @@ def build_training_data(
     max_trim_tokens: int = 0,
     prompt_ids_override: list[int] | None = None,
     strict_validation: bool = False,
+    trainable_trajectory_id: int | None = None,
+    shared_prefix: str = "owner",
 ) -> dict:
     """Convert one TITO trajectory into canonical training data.
 
     Args:
         accumulated_token_ids: Full token sequence from TITO store (prompt + all turns).
-        records: Per-turn records, each with:
-            - prompt_token_count: int
-            - output_logprobs: list of [logprob, token_id] pairs (or None)
-            - finish_reason: str
+        records: Per-turn records, each with ``prompt_token_count``, ``output_token_ids``
+            (or legacy ``output_logprobs``), and optional ``finish_reason``.
         max_trim_tokens: Maximum number of trailing boundary tokens tolerated on non-last turns.
-            A final turn must align with the accumulated stream exactly. Sourced from the SMG
-            session's ``max_trim_tokens`` field. A divergence beyond the ceiling raises
-            ``ValueError`` instead of being clamped, because it indicates a TITO merge bug rather
-            than a normal boundary-token situation.
-        prompt_ids_override: Optional initial prompt token ids rendered by the Python/verl
-            path. When provided, these ids are used as ``prompt_ids`` instead of slicing
-            TITO ``accumulated_token_ids`` by the first record's ``prompt_token_count``.
+        prompt_ids_override: Optional initial prompt token ids rendered by the Python/verl path.
+        strict_validation: Enable strict sampler distribution validation.
+        trainable_trajectory_id: The trajectory whose owned turns may train. None keeps the
+            legacy behavior where every turn is trainable.
+        shared_prefix: ``owner`` trains every owned node. ``context`` trains only owned
+            nodes that are not shared with another trajectory.
 
     Returns:
-        Dict with keys: prompt_ids, response_ids, response_mask, logprobs, num_turns.
+        Dict with keys: prompt_ids, response_ids, response_mask, logprobs,
+        routed_experts, sampler_distribution, num_turns.
 
     Raises:
         ValueError: If a turn contributed tokens to ``accumulated_token_ids`` but its
-            record carries no ``output_logprobs``, or if the fields appended per turn
-            drift apart. Both indicate a gateway/TITO contract violation.
+            record cannot describe them, or if the fields appended per turn drift apart.
     """
     if not records:
         return {
@@ -102,37 +144,96 @@ def build_training_data(
             "response_mask": [],
             "logprobs": [],
             "routed_experts": None,
+            "sampler_distribution": None,
             "num_turns": 0,
+            "trainable_turns": 0,
+        }
+
+    first_record = 0
+    if trainable_trajectory_id is not None:
+        owned_indices = [
+            index
+            for index, record in enumerate(records)
+            if _record_owner(record, trainable_trajectory_id) == trainable_trajectory_id
+        ]
+        if not owned_indices:
+            return {
+                "prompt_ids": [],
+                "response_ids": [],
+                "response_mask": [],
+                "logprobs": [],
+                "routed_experts": None,
+                "sampler_distribution": None,
+                "num_turns": 0,
+            }
+        first_record = owned_indices[0]
+
+    first_prompt_len = records[first_record]["prompt_token_count"]
+    prompt_ids = (
+        list(prompt_ids_override) if prompt_ids_override is not None else accumulated_token_ids[:first_prompt_len]
+    )
+    processed_records = records[first_record:]
+    owned_turns = sum(
+        1
+        for record in processed_records
+        if _record_owner(record, trainable_trajectory_id) == trainable_trajectory_id
+    )
+    trainable_turns = sum(
+        1
+        for record in processed_records
+        if _record_owner(record, trainable_trajectory_id) == trainable_trajectory_id
+        and record.get("contributes_to_session", True)
+    )
+    if trainable_trajectory_id is not None and trainable_turns == 0:
+        return {
+            "prompt_ids": [],
+            "response_ids": [],
+            "response_mask": [],
+            "logprobs": [],
+            "routed_experts": None,
+            "sampler_distribution": None,
+            "num_turns": 0,
+            "trainable_turns": 0,
         }
 
     all_response_ids: list[int] = []
     all_response_mask: list[int] = []
     all_logprobs: list[float] = []
-    capture_distribution = any(
-        record.get("sampler_distribution") is not None or record.get("sampler_capture_width", 0) > 0
-        for record in records
-    )
+    capture_distribution = any(record.get("sampler_distribution") is not None for record in processed_records)
     distribution_segments: list[SamplerDistribution] = []
 
-    cursor = 0
+    cursor = first_prompt_len
     total_acc_len = len(accumulated_token_ids)
     accumulated_arr = np.asarray(accumulated_token_ids)
-    for i, record in enumerate(records):
+    for offset, record in enumerate(processed_records):
+        turn_index = first_record + offset
         prompt_len = record["prompt_token_count"]
-        raw_lps = record.get("output_logprobs") or []
+        owner = _record_owner(record, trainable_trajectory_id)
+        capture = _record_capture(record)
+        is_owned = trainable_trajectory_id is None or owner == trainable_trajectory_id
+        shared = bool(record.get("shared", False))
+        contributes = bool(record.get("contributes_to_session", True))
+        train_here = (
+            is_owned
+            and contributes
+            and capture == _CAPTURE_FULL
+            and (shared_prefix == "owner" or not shared)
+        )
+
         distribution = None
         if capture_distribution:
             payload = record.get("sampler_distribution")
-            if payload is None and raw_lps:
-                raise ValueError(f"Missing sampler distribution at TITO turn {i}.")
-            distribution = (
-                SamplerDistribution.from_wire(payload, raw_lps, strict=strict_validation)
-                if payload is not None
-                else SamplerDistribution.empty(0)
-            )
+            raw_lps = record.get("output_logprobs") or []
+            if payload is None and train_here:
+                raise ValueError(f"Missing sampler distribution at TITO turn {turn_index}.")
+            if payload is not None and train_here:
+                distribution = SamplerDistribution.from_wire(payload, raw_lps, strict=strict_validation)
 
-        # Environment/user tokens between previous cursor and this turn's prompt end
-        if cursor > 0 and prompt_len > cursor:
+        if cursor > prompt_len:
+            raise ValueError(
+                f"TITO turn {turn_index} prompt length {prompt_len} is behind cursor {cursor}."
+            )
+        if prompt_len > cursor:
             env_ids = accumulated_token_ids[cursor:prompt_len]
             all_response_ids.extend(env_ids)
             all_response_mask.extend([0] * len(env_ids))
@@ -140,29 +241,17 @@ def build_training_data(
             if capture_distribution:
                 distribution_segments.append(SamplerDistribution.empty(len(env_ids)))
 
-            psrl_logger.debug(
-                "[TITO turn %d] env_ids: cursor=%d, prompt_len=%d, env_count=%d, env_ids[:5]=%s",
-                i,
-                cursor,
-                prompt_len,
-                len(env_ids),
-                str(env_ids[:5]),
+        output_ids = _record_output_ids(record)
+        output_logprobs = _record_logprobs(record)
+        if output_ids and output_logprobs and len(output_ids) != len(output_logprobs):
+            raise ValueError(
+                f"TITO turn {turn_index} token and logprob counts differ: "
+                f"{len(output_ids)} tokens, {len(output_logprobs)} logprobs."
             )
-
-        # Assistant output tokens: `output_logprobs` is the only source of the sampled tokens. The
-        # [logprob, token_id] split and the boundary match are vectorized over the whole turn.
-        if raw_lps:
-            raw = np.asarray(raw_lps, dtype=np.float64)
-            output_logprobs = raw[:, 0].tolist()
-            output_ids = raw[:, 1].astype(np.int64).tolist()
-        else:
-            output_ids, output_logprobs = [], []
-        is_last = i == len(records) - 1
+        is_last = turn_index == len(records) - 1
         if not output_ids and prompt_len < total_acc_len:
-            raise ValueError(f"Missing output_logprobs at TITO turn {i}.")
+            raise ValueError(f"Missing output tokens at TITO turn {turn_index}.")
 
-        # Greedy match the sampled output against the authoritative stream. The divergent suffix is
-        # the boundary tokens the template re-renders as the next turn's prefix, so it must be trimmed.
         matched = 0
         compare = min(len(output_ids), total_acc_len - prompt_len)
         if compare > 0:
@@ -172,7 +261,7 @@ def build_training_data(
         allowed = 0 if is_last else max_trim_tokens
         if trim_count > allowed:
             raise ValueError(
-                f"TITO output tokens diverge at turn {i}: trim_count={trim_count} exceeds "
+                f"TITO output tokens diverge at turn {turn_index}: trim_count={trim_count} exceeds "
                 f"allowed={allowed} (is_last={is_last}, max_trim_tokens={max_trim_tokens}). "
                 f"output_ids[-3:]={output_ids[-3:]}, "
                 f"accumulated[{prompt_len + matched}:{prompt_len + matched + 3}]="
@@ -183,16 +272,30 @@ def build_training_data(
             output_logprobs = output_logprobs[:matched]
             psrl_logger.debug(
                 "[TITO turn %d] trimmed %d trailing boundary tokens, remaining output_len=%d",
-                i,
+                turn_index,
                 trim_count,
                 len(output_ids),
             )
 
         all_response_ids.extend(output_ids)
-        all_response_mask.extend([1] * len(output_ids))
-        all_logprobs.extend(output_logprobs)
-        if distribution is not None:
-            distribution_segments.append(distribution.prefix(len(output_ids)))
+        if train_here:
+            all_response_mask.extend([1] * len(output_ids))
+            if len(output_logprobs) != len(output_ids):
+                raise ValueError(
+                    f"Missing output_logprobs at TITO turn {turn_index}: "
+                    f"{len(output_logprobs)} logprobs for {len(output_ids)} trainable tokens."
+                )
+            all_logprobs.extend(output_logprobs)
+        else:
+            all_response_mask.extend([0] * len(output_ids))
+            all_logprobs.extend([0.0] * len(output_ids))
+        if capture_distribution:
+            segment = (
+                distribution.prefix(len(output_ids))
+                if distribution is not None
+                else SamplerDistribution.empty(len(output_ids))
+            )
+            distribution_segments.append(segment)
 
         cursor = prompt_len + len(output_ids)
 
@@ -202,16 +305,11 @@ def build_training_data(
             f"cursor={cursor}, accumulated_length={total_acc_len}."
         )
 
-    first_prompt_len = records[0]["prompt_token_count"]
-    prompt_ids = (
-        list(prompt_ids_override) if prompt_ids_override is not None else accumulated_token_ids[:first_prompt_len]
-    )
-    routed_experts = _assemble_routed_experts(records, len(prompt_ids), len(all_response_ids))
+    routed_experts = _assemble_routed_experts(processed_records, len(prompt_ids), len(all_response_ids))
 
-    # These fields are extended together and indexed interchangeably downstream.
     if not (len(all_response_ids) == len(all_response_mask) == len(all_logprobs)):
         raise AssertionError(
-            f"[TITO build_training_data] length drift over {len(records)} turns: "
+            f"[TITO build_training_data] length drift over {len(processed_records)} turns: "
             f"response_ids={len(all_response_ids)} response_mask={len(all_response_mask)} "
             f"logprobs={len(all_logprobs)}. These are appended in lockstep per turn, so a "
             "mismatch means one append site diverged from the others."
@@ -225,28 +323,10 @@ def build_training_data(
         len(all_response_ids),
         sum(all_response_mask),
         len(all_logprobs),
-        len(records),
+        owned_turns,
         total_acc_len,
         None if routed_experts is None else routed_experts.shape[0],
     )
-
-    if not all_response_ids and records:
-        psrl_logger.error(
-            "[TITO] build_training_data: response_ids empty but num_turns=%d! "
-            "records=%s, accumulated_len=%d, prompt_len=%d",
-            len(records),
-            [
-                {
-                    "prompt_token_count": r.get("prompt_token_count"),
-                    "output_logprobs_len": len(r.get("output_logprobs") or []),
-                    "output_logprobs_type": type(r.get("output_logprobs")).__name__,
-                    "finish_reason": r.get("finish_reason"),
-                }
-                for r in records
-            ],
-            total_acc_len,
-            len(prompt_ids),
-        )
 
     sampler_distribution = SamplerDistribution.concatenate(distribution_segments) if capture_distribution else None
     if sampler_distribution is not None and len(sampler_distribution) != len(all_response_ids):
@@ -262,5 +342,6 @@ def build_training_data(
         "logprobs": all_logprobs,
         "routed_experts": routed_experts,
         "sampler_distribution": sampler_distribution,
-        "num_turns": len(records),
+        "num_turns": owned_turns if trainable_trajectory_id is not None else len(records),
+        "trainable_turns": trainable_turns if trainable_trajectory_id is not None else len(records),
     }

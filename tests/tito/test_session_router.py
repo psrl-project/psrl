@@ -19,7 +19,8 @@ async def mock_create():
 
 
 @mock_smg.get("/tito/sessions/{sid}")
-async def mock_get(sid: str):
+async def mock_get(sid: str, request: Request):
+    captured["get_query"] = dict(request.query_params)
     return {
         "session_id": sid,
         "max_trim_tokens": 0,
@@ -66,6 +67,7 @@ async def mock_chat(request: Request):
 async def mock_catchall(path: str, request: Request):
     captured["proxy_path"] = path
     captured["proxy_headers"] = dict(request.headers)
+    captured["proxy_body"] = await request.body()
     return {"proxied": True}
 
 
@@ -479,3 +481,259 @@ async def test_the_session_view_reports_the_turn_accounting(client, router):
     }
     # The gateway's own view is untouched: this router adds one key of its own.
     assert body["trajectories"][0]["accumulated_token_ids"] == [1, 2, 3]
+
+
+# --- Subagent policy and normalized agent headers -------------------------------------
+
+CLAUDE_CLASS_HEADER = "x-claude-code-request-class"
+CLAUDE_AGENT_HEADER = "x-claude-code-agent-id"
+CLAUDE_PARENT_HEADER = "x-claude-code-parent-agent-id"
+
+
+async def _create_with_policy(client, policy: dict, *, validate: bool = False):
+    headers = {"x-is-validate": "true"} if validate else {}
+    resp = await client.post("/sessions", json={"subagent_training": policy}, headers=headers)
+    assert resp.status_code == 200
+    return resp
+
+
+async def _response_turn(client, headers: dict | None = None):
+    return await client.post(
+        "/sessions/test-sid-123/v1/responses",
+        json={"model": "m", "input": [], "stream": False},
+        headers=headers or {},
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_session_stores_the_subagent_policy(client, router):
+    await _create_with_policy(
+        client,
+        {"mode": "selected", "train_agents": ["x"], "val_mode": "selected"},
+    )
+
+    state = router.states["test-sid-123"]
+    assert state.subagent_training.mode == "selected"
+    assert state.subagent_training.train_agents == ("x",)
+
+
+@pytest.mark.asyncio
+async def test_create_session_rejects_an_invalid_policy(client, router):
+    resp = await client.post("/sessions", json={"subagent_training": {"mode": "unknown"}})
+
+    assert resp.status_code == 400
+    assert "mode" in resp.json()["error"]["message"]
+    assert "test-sid-123" not in router.states
+
+
+@pytest.mark.asyncio
+async def test_codex_metadata_is_normalized_and_cannot_spoof_capture(client, router):
+    await _create_with_policy(client, {"mode": "main_only"})
+    await _response_turn(
+        client,
+        headers={
+            "x-codex-turn-metadata": json.dumps(
+                {"thread_source": "subagent", "thread_id": "sub-1", "parent_thread_id": "main-1"}
+            ),
+            "x-psrl-agent-role": "main",
+            "x-psrl-tito-capture": "full",
+        },
+    )
+
+    headers = captured["proxy_headers"]
+    assert headers["x-psrl-agent-role"] == "subagent"
+    assert headers["x-psrl-agent-id"] == "sub-1"
+    assert headers["x-psrl-parent-agent-id"] == "main-1"
+    assert headers["x-psrl-tito-capture"] == "tokens"
+
+
+@pytest.mark.asyncio
+async def test_main_call_gets_the_main_identity_and_full_capture(client, router):
+    await _create_with_policy(client, {"mode": "all"})
+    await _response_turn(client, headers={"x-codex-turn-metadata": json.dumps({"thread_source": "user"})})
+
+    headers = captured["proxy_headers"]
+    assert headers["x-psrl-agent-role"] == "main"
+    assert headers["x-psrl-agent-id"] == "main"
+    assert "x-psrl-parent-agent-id" not in headers
+    assert headers["x-psrl-tito-capture"] == "full"
+
+
+@pytest.mark.asyncio
+async def test_claude_code_request_class_is_normalized(client, router):
+    await _create_with_policy(client, {"mode": "all"})
+    await _response_turn(
+        client,
+        headers={
+            CLAUDE_CLASS_HEADER: "subagent",
+            CLAUDE_AGENT_HEADER: "claude-sub",
+            CLAUDE_PARENT_HEADER: "claude-main",
+        },
+    )
+
+    headers = captured["proxy_headers"]
+    assert headers["x-psrl-agent-role"] == "subagent"
+    assert headers["x-psrl-agent-id"] == "claude-sub"
+    assert headers["x-psrl-parent-agent-id"] == "claude-main"
+    assert headers["x-psrl-tito-capture"] == "full"
+
+
+@pytest.mark.asyncio
+async def test_claude_code_auxiliary_is_never_trained(client, router):
+    await _create_with_policy(client, {"mode": "all"})
+    await _response_turn(
+        client,
+        headers={CLAUDE_CLASS_HEADER: "auxiliary", CLAUDE_AGENT_HEADER: "claude-aux"},
+    )
+
+    headers = captured["proxy_headers"]
+    assert headers["x-psrl-agent-role"] == "auxiliary"
+    assert headers["x-psrl-tito-capture"] == "tokens"
+
+
+@pytest.mark.asyncio
+async def test_compaction_follows_the_main_agent(client, router):
+    await _create_with_policy(client, {"mode": "main_only"})
+    await _response_turn(client, headers={CLAUDE_CLASS_HEADER: "main"})
+    await _response_turn(
+        client,
+        headers={
+            CLAUDE_CLASS_HEADER: "compaction",
+            CLAUDE_AGENT_HEADER: "main",
+            CLAUDE_PARENT_HEADER: "unused",
+        },
+    )
+
+    headers = captured["proxy_headers"]
+    assert headers["x-psrl-agent-role"] == "compaction"
+    assert headers["x-psrl-agent-id"] == "main"
+    assert "x-psrl-parent-agent-id" not in headers
+    assert headers["x-psrl-tito-capture"] == "full"
+
+
+@pytest.mark.asyncio
+async def test_validation_captures_tokens_only(client, router):
+    await _create_with_policy(client, {"mode": "all", "val_mode": "all"}, validate=True)
+    await _response_turn(client)
+
+    assert captured["proxy_headers"]["x-psrl-tito-capture"] == "tokens"
+
+
+@pytest.mark.asyncio
+async def test_session_view_persists_policy_and_main_agent_id(client, router):
+    await _create_with_policy(client, {"mode": "all", "val_mode": "all"})
+    await _response_turn(
+        client,
+        headers={"x-codex-turn-metadata": json.dumps({"thread_source": "user", "thread_id": "main-7"})},
+    )
+
+    body = (await client.get("/sessions/test-sid-123")).json()
+
+    assert body["subagent_training"]["mode"] == "all"
+    assert body["main_agent_id"] == "main-7"
+
+
+@pytest.mark.asyncio
+async def test_responses_requests_ask_for_output_logprobs(client):
+    await _response_turn(client)
+
+    body = json.loads(captured["proxy_body"])
+    assert body["logprobs"] is True
+    assert "message.output_text.logprobs" in body["include"]
+
+
+@pytest.mark.asyncio
+async def test_a_second_non_subagent_thread_is_not_a_second_primary(client, router):
+    await _create_with_policy(client, {"mode": "all"})
+    await _response_turn(
+        client,
+        headers={"x-codex-turn-metadata": json.dumps({"thread_source": "user", "thread_id": "main-1"})},
+    )
+    await _response_turn(
+        client,
+        headers={"x-codex-turn-metadata": json.dumps({"thread_source": "user", "thread_id": "side-2"})},
+    )
+
+    headers = captured["proxy_headers"]
+    assert headers["x-psrl-agent-role"] == "auxiliary"
+    assert headers["x-psrl-agent-id"] == "side-2"
+    assert headers["x-psrl-parent-agent-id"] == "main-1"
+    assert headers["x-psrl-tito-capture"] == "tokens"
+
+
+@pytest.mark.asyncio
+async def test_a_second_thread_with_a_parent_is_a_subagent(client, router):
+    await _create_with_policy(client, {"mode": "all"})
+    await _response_turn(
+        client,
+        headers={"x-codex-turn-metadata": json.dumps({"thread_source": "user", "thread_id": "main-1"})},
+    )
+    await _response_turn(
+        client,
+        headers={
+            "x-codex-turn-metadata": json.dumps(
+                {"thread_source": "user", "thread_id": "child-2", "parent_thread_id": "main-1"}
+            )
+        },
+    )
+
+    headers = captured["proxy_headers"]
+    assert headers["x-psrl-agent-role"] == "subagent"
+    assert headers["x-psrl-agent-id"] == "child-2"
+    assert headers["x-psrl-parent-agent-id"] == "main-1"
+    assert headers["x-psrl-tito-capture"] == "full"
+
+
+@pytest.mark.asyncio
+async def test_get_session_forwards_the_snapshot_format(client):
+    resp = await client.get("/sessions/my-session?format=compact")
+
+    assert resp.status_code == 200
+    assert captured["get_query"] == {"format": "compact"}
+
+
+@pytest.mark.asyncio
+async def test_main_close_counts_distinct_inflight_background_agents(client, router):
+    state = await router._ensure_state("sid-bg")
+    async with state.lock:
+        state.inflight = 3
+        state.agent_inflight = {
+            ("main", "main"): 1,
+            ("subagent", "sub-a"): 1,
+            ("subagent", "sub-b"): 1,
+        }
+
+    resp = await client.post("/sessions/sid-bg/main-close")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"background_live_count": 2}
+    assert state.background_live_count == 2
+
+
+@pytest.mark.asyncio
+async def test_delete_does_not_wait_for_background_inflight(client, router):
+    state = await router._ensure_state("sid-bg-delete")
+    async with state.lock:
+        state.main_closed = True
+        state.inflight = 1
+        state.agent_inflight = {("subagent", "sub-a"): 1}
+
+    resp = await client.delete("/sessions/sid-bg-delete")
+
+    assert resp.status_code == 204
+    assert "sid-bg-delete" not in router.states
+
+
+@pytest.mark.asyncio
+async def test_main_close_uses_a_harness_reported_count(client, router):
+    state = await router._ensure_state("sid-reported")
+    async with state.lock:
+        state.inflight = 0
+
+    resp = await client.post(
+        "/sessions/sid-reported/main-close",
+        json={"background_subagents": 3},
+    )
+
+    assert resp.json() == {"background_live_count": 3}
+    assert state.background_live_count == 3

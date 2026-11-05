@@ -238,3 +238,22 @@ def test_valid_sample_mask_reads_the_mask() -> None:
     mask = torch.tensor([[1.0, 0.0], [0.0, 0.0], [1.0, 1.0]])
 
     assert valid_sample_mask(mask).tolist() == [True, False, True]
+
+
+def test_the_session_primary_is_measured_even_when_it_is_not_the_last_row() -> None:
+    """A subagent row can sort after the main row; the advantage still reads the main."""
+    rewards = [1.0, 0.0, 0.0]
+    masks = [1.0, 1.0, 1.0]
+    groups = [7, 7, 7]
+    data = _batch(rewards, masks, groups)
+    data.non_tensor_batch["session_primary"] = np.array([True, False, True])
+
+    result = compute_advantage_for_multi_trajectories(
+        data,
+        batch_keys=["11_0", "11_1", "12_0"],
+        adv_estimator=AdvantageEstimator.GRPO,
+        config={_SWITCH: True},
+    )
+
+    expected = round(_baseline([1.0, 0.0], 0), 6)
+    assert _advantages(result) == [expected, expected, round(_baseline([1.0, 0.0], 1), 6)]

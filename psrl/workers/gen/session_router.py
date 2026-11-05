@@ -4,6 +4,7 @@ import logging
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from urllib.parse import quote
 
 import aiohttp
 from fastapi import FastAPI, Request
@@ -20,6 +21,7 @@ from psrl.utils.common.http_utils import (
 )
 from psrl.utils.rollout.turn_output_writer import TurnOutputWriter
 from psrl.utils.sampler_distribution import SamplerCapture, configure_capture
+from psrl.utils.subagent_training import SubagentTrainingPolicy
 from psrl.workers.gen.harness.protocol import (
     anthropic_error_body,
     anthropic_error_response,
@@ -49,6 +51,37 @@ TRAJECTORY_ID_HEADER = "x-smg-tito-trajectory-id"
 # parent-agent budget without charging a subagent's work to it.
 CODEX_TURN_METADATA_HEADER = "x-codex-turn-metadata"
 CODEX_SUBAGENT_THREAD_SOURCE = "subagent"
+# Claude Code labels each request with its request class and agent identity when
+# CLAUDE_CODE_GATEWAY_HINT_HEADERS=1 is set.
+CLAUDE_REQUEST_CLASS_HEADER = "x-claude-code-request-class"
+CLAUDE_AGENT_ID_HEADER = "x-claude-code-agent-id"
+CLAUDE_PARENT_AGENT_ID_HEADER = "x-claude-code-parent-agent-id"
+CLAUDE_MAIN_REQUEST_CLASSES = frozenset({"main"})
+CLAUDE_SUBAGENT_REQUEST_CLASSES = frozenset({"subagent", "workflow"})
+CLAUDE_AUXILIARY_REQUEST_CLASSES = frozenset({"auxiliary", "side_reply"})
+
+# Normalized agent headers the router owns. A harness may send its native labels, but
+# only the router decides what the gateway sees.
+PSRL_AGENT_ROLE_HEADER = "x-psrl-agent-role"
+PSRL_AGENT_ID_HEADER = "x-psrl-agent-id"
+PSRL_PARENT_AGENT_ID_HEADER = "x-psrl-parent-agent-id"
+PSRL_TITO_CAPTURE_HEADER = "x-psrl-tito-capture"
+PSRL_AGENT_HEADERS = (
+    PSRL_AGENT_ROLE_HEADER,
+    PSRL_AGENT_ID_HEADER,
+    PSRL_PARENT_AGENT_ID_HEADER,
+    PSRL_TITO_CAPTURE_HEADER,
+)
+AGENT_ROLES = frozenset({"main", "subagent", "auxiliary", "compaction"})
+
+
+def _first_metadata_value(metadata: Mapping[str, object], *keys: str) -> str | None:
+    """Return the first non-empty metadata value among ``keys`` as a string."""
+    for key in keys:
+        value = metadata.get(key)
+        if value is not None and str(value).strip():
+            return str(value)
+    return None
 
 
 @dataclass(slots=True)
@@ -86,6 +119,26 @@ class SessionState:
     max_turns: int | None = None
     main_turns: int = 0
     subagent_turns: int = 0
+    # How agent trajectories in this session are selected and captured. Immutable after
+    # creation; the gateway snapshots the same policy into the session view.
+    subagent_training: SubagentTrainingPolicy = field(default_factory=SubagentTrainingPolicy)
+    # Identity of the parent agent, used to attribute compaction calls that do not carry
+    # their own agent id to the parent.
+    main_agent_id: str = "main"
+    # Whether a main call has been seen. A later main-labeled call with a different
+    # native id is a second thread, not a second artifact.
+    main_agent_seen: bool = False
+    # Fallback identity for one unidentified subagent call. Without a native id,
+    # concurrent calls cannot be grouped into one agent.
+    synthetic_agent_index: int = 0
+    # Whether the main episode has closed. Later subagent turns are background.
+    main_closed: bool = False
+    # In-flight model calls per (role, agent id).
+    agent_inflight: dict[tuple[str, str], int] = field(default_factory=dict)
+    # Live background subagents observed at the main-close boundary.
+    background_live_count: int = 0
+    # Set when no main-path request is in flight; background work is ignored.
+    main_drained: asyncio.Event = field(default_factory=asyncio.Event)
 
     def __post_init__(self) -> None:
         if self.inflight == 0:
@@ -94,6 +147,7 @@ class SessionState:
             self.drained.clear()
         # A fresh session is running: allow it to proceed.
         self.continue_event.set()
+        self.main_drained.set()
 
     @property
     def status(self) -> str:
@@ -120,6 +174,33 @@ class SessionState:
             self.subagent_turns += 1
         else:
             self.main_turns += 1
+
+    def is_background(self, role: str, agent_id: str | None) -> bool:
+        """Whether this in-flight call is background work after main close."""
+        if not self.main_closed:
+            return False
+        if role == "subagent":
+            return True
+        if role == "compaction":
+            return agent_id not in (None, "", "main", self.main_agent_id)
+        return False
+
+    @property
+    def main_inflight(self) -> int:
+        """Model calls on the main path; background work is excluded."""
+        background = sum(
+            count
+            for (role, agent_id), count in self.agent_inflight.items()
+            if count > 0 and self.is_background(role, agent_id)
+        )
+        return max(0, self.inflight - background)
+
+    def refresh_main_drained(self) -> None:
+        """Update the event the delete path waits on."""
+        if self.main_inflight == 0:
+            self.main_drained.set()
+        else:
+            self.main_drained.clear()
 
 
 class SessionRouter:
@@ -152,6 +233,7 @@ class SessionRouter:
     def setup_routes(self):
         self.app.post("/sessions")(self.create_session)
         self.app.get("/sessions/{sid}")(self.get_session)
+        self.app.post("/sessions/{sid}/main-close")(self.main_close)
         self.app.delete("/sessions/{sid}")(self.delete_session)
         self.app.post("/sessions/{sid}/v1/chat/completions")(self.session_chat_completions)
         self.app.post("/sessions/{sid}/v1/responses")(self.session_responses)
@@ -172,6 +254,18 @@ class SessionRouter:
             await self.client.close()
 
     async def create_session(self, request: Request) -> Response:
+        raw_body = await request.body()
+        try:
+            body = json.loads(raw_body) if raw_body else {}
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return JSONResponse(status_code=400, content={"error": {"message": "request body must be valid JSON"}})
+        if not isinstance(body, dict):
+            return JSONResponse(status_code=400, content={"error": {"message": "request body must be an object"}})
+        try:
+            subagent_training = SubagentTrainingPolicy.from_mapping(body.get("subagent_training"))
+        except (TypeError, ValueError) as error:
+            return JSONResponse(status_code=400, content={"error": {"message": str(error)}})
+
         result = await self._request_upstream("POST", TITO_SESSIONS_PATH)
         if result.status < 400:
             session_id = self.extract_session_id(result)
@@ -179,6 +273,7 @@ class SessionRouter:
             async with state.lock:
                 state.headers = self.session_headers(request.headers, session_id)
                 state.max_turns = self.parse_turn_budget(request.headers)
+                state.subagent_training = subagent_training
         return self.build_response(result)
 
     @staticmethod
@@ -199,21 +294,146 @@ class SessionRouter:
         return budget if budget > 0 else None
 
     @staticmethod
-    def is_subagent_request(request: Request) -> bool:
-        """Whether this model call is a subagent's rather than the parent agent's.
+    def classify_request(headers: Mapping[str, str]) -> tuple[str, str | None, str | None]:
+        """Normalize a harness's native agent markers into one role and identity.
 
-        Codex labels every call with its own turn metadata. A caller that sends no such
-        label has its calls charged to the parent, which is the stricter reading: a call
-        that cannot be attributed still spends the session's budget.
+        Codex labels every call with turn metadata and Claude Code labels calls with a
+        request class. A caller that sends neither is the parent because an
+        unattributable call must still be bounded by the parent's budget.
+
+        Args:
+            headers (Mapping[str, str]): Request headers.
+
+        Returns:
+            tuple[str, str | None, str | None]: Role, native agent id, native parent id.
         """
-        raw = request.headers.get(CODEX_TURN_METADATA_HEADER)
-        if not raw:
-            return False
-        try:
-            metadata = json.loads(raw)
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            return False
-        return isinstance(metadata, dict) and metadata.get("thread_source") == CODEX_SUBAGENT_THREAD_SOURCE
+        raw_metadata = headers.get(CODEX_TURN_METADATA_HEADER)
+        if raw_metadata:
+            try:
+                metadata = json.loads(raw_metadata)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                metadata = None
+            if isinstance(metadata, dict):
+                source = str(metadata.get("thread_source") or "").strip().lower()
+                if source == CODEX_SUBAGENT_THREAD_SOURCE:
+                    role = "subagent"
+                elif source == "compaction":
+                    role = "compaction"
+                elif source in ("auxiliary", "side_reply"):
+                    role = "auxiliary"
+                else:
+                    role = "main"
+                agent_id = _first_metadata_value(
+                    metadata,
+                    "agent_id",
+                    "agentId",
+                    "thread_id",
+                    "threadId",
+                )
+                parent_id = _first_metadata_value(
+                    metadata,
+                    "parent_agent_id",
+                    "parentAgentId",
+                    "parent_thread_id",
+                    "parentThreadId",
+                )
+                return role, agent_id, parent_id
+
+        request_class = headers.get(CLAUDE_REQUEST_CLASS_HEADER)
+        if request_class:
+            value = request_class.strip().lower()
+            if value in CLAUDE_SUBAGENT_REQUEST_CLASSES:
+                role = "subagent"
+            elif value == "compaction":
+                role = "compaction"
+            elif value in CLAUDE_AUXILIARY_REQUEST_CLASSES:
+                role = "auxiliary"
+            elif value in CLAUDE_MAIN_REQUEST_CLASSES:
+                role = "main"
+            else:
+                role = "main"
+            return (
+                role,
+                headers.get(CLAUDE_AGENT_ID_HEADER),
+                headers.get(CLAUDE_PARENT_AGENT_ID_HEADER),
+            )
+
+        # An older Claude Code runtime emits the agent ids without the request class.
+        # A main call has no agent id; an auxiliary call has an id but no parent.
+        claude_agent_id = headers.get(CLAUDE_AGENT_ID_HEADER)
+        if claude_agent_id:
+            claude_parent_id = headers.get(CLAUDE_PARENT_AGENT_ID_HEADER)
+            return ("subagent" if claude_parent_id else "auxiliary"), claude_agent_id, claude_parent_id
+
+        role = str(headers.get(PSRL_AGENT_ROLE_HEADER) or "main").strip().lower()
+        if role not in AGENT_ROLES:
+            role = "main"
+        return role, headers.get(PSRL_AGENT_ID_HEADER), headers.get(PSRL_PARENT_AGENT_ID_HEADER)
+
+    def is_subagent_request(self, request: Request) -> bool:
+        """Whether this model call is a subagent's rather than the parent agent's."""
+        role, _, _ = self.classify_request(request.headers)
+        return role == "subagent"
+
+    def resolve_agent_identity(
+        self,
+        state: SessionState,
+        headers: Mapping[str, str],
+    ) -> tuple[str, str | None, str | None, str]:
+        """Resolve the role, identity, parent, and capture mode for one model call.
+
+        This runs once per call, before the request is buffered, so the sampler capture
+        and the capture header sent to the gateway are decided from the same value. The
+        caller must hold ``state.lock`` because the first main call and an unidentified
+        subagent update session state.
+
+        Args:
+            state (SessionState): The session state.
+            headers (Mapping[str, str]): Request headers.
+
+        Returns:
+            tuple[str, str | None, str | None, str]: Role, agent id, parent agent id,
+                and capture mode (``full`` or ``tokens``).
+        """
+        role, agent_id, parent_agent_id = self.classify_request(headers)
+        if role == "main":
+            second_main_thread = (
+                state.main_agent_seen and agent_id is not None and agent_id != state.main_agent_id
+            )
+            if second_main_thread:
+                # A second non-subagent thread is not a second primary. A declared
+                # parent makes it a subagent; without one it is auxiliary.
+                role = "subagent" if parent_agent_id else "auxiliary"
+            else:
+                if agent_id:
+                    state.main_agent_id = agent_id
+                state.main_agent_seen = True
+                state.main_closed = False
+                agent_id = state.main_agent_id
+                parent_agent_id = None
+        if role == "compaction" and agent_id in (None, "", state.main_agent_id):
+            # A compaction of the parent has no parent of its own; attribute it even
+            # when the harness omits the agent id.
+            agent_id = state.main_agent_id
+            parent_agent_id = None
+        elif role != "main":
+            if role == "subagent" and not agent_id:
+                state.synthetic_agent_index += 1
+                agent_id = f"subagent:{state.synthetic_agent_index}"
+            if parent_agent_id is None:
+                parent_agent_id = state.main_agent_id
+
+        is_validate = state.headers.get("x-is-validate") == "true"
+        capture = state.subagent_training.capture_for(
+            role,
+            agent_id,
+            validate=is_validate,
+            main_agent_id=state.main_agent_id,
+        )
+        if is_validate:
+            # Validation never trains; token ids are enough to score the session.
+            capture = "tokens"
+        return role, agent_id, parent_agent_id, capture
 
     async def charge_session_turn(self, state: SessionState, request: Request) -> HttpResponse | None:
         """Charge this model call to its session, refusing it once the budget is spent.
@@ -262,8 +482,12 @@ class SessionRouter:
             headers={"content-type": "application/json", "x-smg-error-code": SESSION_TURN_BUDGET_ERROR_CODE},
         )
 
-    async def get_session(self, sid: str) -> Response:
-        result = await self._request_upstream("GET", f"{TITO_SESSIONS_PATH}/{sid}")
+    async def get_session(self, sid: str, request: Request) -> Response:
+        path = f"{TITO_SESSIONS_PATH}/{sid}"
+        snapshot_format = request.query_params.get("format")
+        if snapshot_format:
+            path = f"{path}?format={quote(snapshot_format, safe='')}"
+        result = await self._request_upstream("GET", path)
         state = self.states.get(sid)
         if state is not None:
             async with state.lock:
@@ -271,12 +495,49 @@ class SessionRouter:
                     result.headers["x-base-worker-id"] = state.base_worker_id
                 if state.target_dp_rank is not None:
                     result.headers["x-target-dp-rank"] = state.target_dp_rank
-                result = self.with_turn_accounting(result, state)
+                result = self.with_session_state(result, state)
         return self.build_response(result)
 
+    async def main_close(self, sid: str, request: Request) -> Response:
+        """Close the main episode and count live background subagents.
+
+        This is an observation boundary, not a drain: it never waits for a
+        subagent. The count is a lower bound from in-flight calls unless the
+        caller reports a harness lifecycle count in the body.
+        """
+        state = await self._ensure_state(sid)
+        reported: int | None = None
+        raw_body = await request.body()
+        if raw_body:
+            try:
+                body = json.loads(raw_body)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                body = None
+            if isinstance(body, dict) and body.get("background_subagents") is not None:
+                try:
+                    reported = max(0, int(body["background_subagents"]))
+                except (TypeError, ValueError):
+                    reported = None
+        async with state.lock:
+            state.main_closed = True
+            observed = sum(
+                1
+                for (role, agent_id), count in state.agent_inflight.items()
+                if count > 0 and state.is_background(role, agent_id)
+            )
+            state.background_live_count = max(
+                observed, reported if reported is not None else 0
+            )
+            state.refresh_main_drained()
+            count = state.background_live_count
+        psrl_logger.info(
+            "TITO session %r main closed with %d live background subagent(s).", sid, count
+        )
+        return JSONResponse(content={"background_live_count": count})
+
     @staticmethod
-    def with_turn_accounting(result: HttpResponse, state: SessionState) -> HttpResponse:
-        """Add this router's turn accounting to a session view it is proxying.
+    def with_session_state(result: HttpResponse, state: SessionState) -> HttpResponse:
+        """Add this router's turn accounting and agent policy to a session view.
 
         A body that will not parse is passed through untouched: the session view is the
         gateway's, and its shape is not this router's to guarantee.
@@ -293,6 +554,11 @@ class SessionRouter:
             "subagent_turns": state.subagent_turns,
             "exhausted": state.turn_budget_exhausted,
         }
+        # The policy is resolved once at session creation; extraction reads it from the
+        # snapshot rather than from the trainer's current config. `main_agent_id` is
+        # session state, not policy: it names the parent a compaction call belongs to.
+        body["subagent_training"] = state.subagent_training.to_dict()
+        body["main_agent_id"] = state.main_agent_id
         return HttpResponse(
             status=result.status,
             body=json.dumps(body, ensure_ascii=False).encode(),
@@ -309,7 +575,14 @@ class SessionRouter:
             state.marked_for_hang = False
             state.continue_event.set()
 
-        await state.drained.wait()
+        # Wait only for the main path. Background work cannot contribute a
+        # training row, and waiting for it would hold the session open.
+        while True:
+            async with state.lock:
+                if state.main_inflight == 0:
+                    break
+                main_drained = state.main_drained
+            await main_drained.wait()
 
         result = await self._request_upstream("DELETE", f"{TITO_SESSIONS_PATH}/{sid}")
 
@@ -420,8 +693,12 @@ class SessionRouter:
         stream = body.get("stream") is True
         body["stream"] = False
         state = await self._ensure_state(sid)
-        # Validation runs never capture, so they use a disabled capture regardless of config.
-        capture = SamplerCapture() if state.headers.get("x-is-validate") == "true" else self.sampler_capture
+        async with state.lock:
+            identity = self.resolve_agent_identity(state, request.headers)
+        request.state.psrl_agent = identity
+        capture_mode = identity[3]
+        # An untrained trajectory needs only token ids, so the engine does no sampler work.
+        capture = self.sampler_capture if capture_mode == "full" else SamplerCapture()
         try:
             # Always apply the capture contract: a disabled capture still sets the OpenAI logprob
             # fields TITO needs, while Anthropic Messages only carries sampler_top_logprobs.
@@ -487,12 +764,30 @@ class SessionRouter:
             # Consume the one-shot pin (if any) so only this turn is force-pinned.
             pin_once_instance = state.pin_once_instance
             state.pin_once_instance = None
+            agent_identity = getattr(request.state, "psrl_agent", None)
+            if agent_identity is None:
+                agent_identity = self.resolve_agent_identity(state, request.headers)
+            role, agent_id, parent_agent_id, capture = agent_identity
+            agent_key = (role, agent_id or "")
+            state.agent_inflight[agent_key] = state.agent_inflight.get(agent_key, 0) + 1
             state.inflight += 1
             state.drained.clear()
+            state.refresh_main_drained()
 
         headers = self.add_session_headers(request, session_headers)
         headers["accept"] = "application/json"
         headers["content-type"] = "application/json"
+        # The router owns the normalized agent headers. A client may send them, but
+        # only the native harness markers are trusted and only the router decides
+        # whether a call is trainable.
+        for header_name in PSRL_AGENT_HEADERS:
+            headers.pop(header_name, None)
+        headers[PSRL_AGENT_ROLE_HEADER] = role
+        if agent_id:
+            headers[PSRL_AGENT_ID_HEADER] = agent_id
+        if parent_agent_id:
+            headers[PSRL_PARENT_AGENT_ID_HEADER] = parent_agent_id
+        headers[PSRL_TITO_CAPTURE_HEADER] = capture
         if base_worker_id is not None:
             headers["x-base-worker-id"] = base_worker_id
         if target_dp_rank is not None:
@@ -534,8 +829,14 @@ class SessionRouter:
             # and, on success, advance the trajectory's turn counter.
             async with state.lock:
                 state.inflight = max(0, state.inflight - 1)
+                remaining = state.agent_inflight.get(agent_key, 0) - 1
+                if remaining > 0:
+                    state.agent_inflight[agent_key] = remaining
+                else:
+                    state.agent_inflight.pop(agent_key, None)
                 if state.inflight == 0:
                     state.drained.set()
+                state.refresh_main_drained()
                 if result is not None and result.status < 400:
                     base_worker_id = result.headers.get("x-base-worker-id")
                     target_dp_rank = result.headers.get("x-target-dp-rank")
@@ -607,6 +908,8 @@ class SessionRouter:
                         "total_tokens": state.total_tokens,
                         "marked_for_hang": state.marked_for_hang,
                         "closing": state.closing,
+                        "main_closed": state.main_closed,
+                        "background_live_count": state.background_live_count,
                     }
                 )
         return JSONResponse(content={"sessions": sessions})

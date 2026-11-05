@@ -26,10 +26,18 @@ LAYOUTS = [(1, 2, 1), (1, 4, 1), (1, 8, 2), (2, 8, 2), (4, 8, 2)]
 
 
 def _follower_pairs(plan):
+    """Yield (follower, designate, key), deduplicated -- a key's shards can now have
+    more than one distinct designate, but the registration question this file checks
+    ("is the follower a descriptor reader of this designate for this key") only cares
+    about the pair, not which specific shard drove it."""
+    seen = set()
     for follower, per_key in plan.peer_groups.items():
-        for key, group in per_key.items():
-            if follower != group[0]:
-                yield follower, group[0], key
+        for key, per_shard in per_key.items():
+            for group in per_shard.values():
+                designate = group[0]
+                if follower != designate and (follower, designate, key) not in seen:
+                    seen.add((follower, designate, key))
+                    yield follower, designate, key
 
 
 @pytest.mark.parametrize("nodes,per_node,tp", LAYOUTS)

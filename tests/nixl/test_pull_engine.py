@@ -17,14 +17,14 @@ import pytest
 import torch
 from omegaconf import OmegaConf
 from psrl.utils.common.worker_naming import gen_client_name, model_role_of, train_client_name
-from psrl.utils.nixl.block_fp8 import scale_shape
+from psrl.utils.nixl.block_fp8 import quantize_blockwise, scale_shape
 from psrl.utils.nixl.client import NIXLStorageClient
 from psrl.utils.nixl.comm_plan import CommunicationPlanner
 from psrl.utils.nixl.handshake_notif import NotifKind
 from psrl.utils.nixl.nixl_spec import NIXLClientType, NIXLSharding
 from psrl.utils.nixl.pull_engine import ChunkUnavailable, NIXLPullEngine
 from psrl.utils.nixl.server import NIXLMetaServer
-from psrl.utils.quantization import QuantizationPlan
+from psrl.utils.quantization import QuantizationPlan, VllmFp8BlockQuantizer
 
 from tests.nixl.coord_judge import check_by_layout, check_fp8_exact, fill_by_layout, fill_fp8_exact
 from tests.nixl.memcpy_agent import MemcpyAgent, NotifBus
@@ -336,6 +336,13 @@ def test_peer_reads_are_one_descriptor_per_key():
     reports = cluster.pull(epoch=1)
     for name, report in reports.items():
         if report.peer_keys:
+            tensor_infos = cluster.clients[name].local_client_info.tensor_infos
+
+            def is_designate(k):
+                shard = tensor_infos[k].sharding.shard_indices[0]
+                group = cluster.plan.get_peer_group(name, k, shard)
+                return not group or group[0] == name
+
             peer_only = (
                 report.descriptors
                 - cluster.engines[name]
@@ -344,7 +351,7 @@ def test_peer_reads_are_one_descriptor_per_key():
                         {
                             k: v
                             for k, v in cluster.plan.rollout_pull_from_ps_plan[name].items()
-                            if cluster.plan.get_peer_group(name, k)[0] == name
+                            if is_designate(k)
                         }
                     )
                 )
@@ -450,7 +457,14 @@ FP8_KEYS = ["layers.0.q_proj.weight", "layers.0.o_proj.weight", "layers.0.down_p
 
 
 def _fp8_cluster(
-    train_tp, gen_tp, instances, peer_diffusion, train_dtype=torch.bfloat16, scale_tile=BLOCK, train_fp8=False
+    train_tp,
+    gen_tp,
+    instances,
+    peer_diffusion,
+    train_dtype=torch.bfloat16,
+    scale_tile=BLOCK,
+    train_fp8=False,
+    reader_quantization=False,
 ):
     """Build a cluster whose rollouts are FP8, reusing `Cluster` with the gen state swapped before registration."""
     cluster = Cluster.__new__(Cluster)
@@ -470,7 +484,10 @@ def _fp8_cluster(
             declared = {k: _sharding(d, gen_tp, r) for k, (s, d) in MODEL.items()}
             for key in FP8_KEYS:
                 state[key] = torch.zeros(state[key].shape, dtype=torch.float8_e4m3fn)
-                state[key + "_scale_inv"] = torch.zeros(scale_shape(state[key].shape, scale_tile), dtype=torch.float32)
+                padded_tile = (1,) * (state[key].dim() - 2) + tuple(scale_tile)
+                state[key + "_scale_inv"] = torch.zeros(
+                    scale_shape(state[key].shape, padded_tile), dtype=torch.float32
+                )
                 declared[key + "_scale_inv"] = copy.deepcopy(declared[key])
                 declared[key + "_scale_inv"].scale_tile = scale_tile
             cluster.states[name], cluster.declared[name] = state, declared
@@ -517,7 +534,99 @@ def _fp8_cluster(
         )
         if kind is NIXLClientType.PUSH_SIDE:
             client.set_publish_cast(train_dtype, torch.bfloat16)
-            client.set_publish_quantization(FP8_PLAN)
+            client.set_publish_quantization(FP8_PLAN, reader_quantization=reader_quantization)
+        elif reader_quantization:
+            client.set_reader_quantization(FP8_PLAN)
+        client.register_local_tensors(cluster.states[name], unified[name])
+        cluster.clients[name] = client
+    if peer_diffusion:
+        _train_ranks_remote(cluster.clients)
+    infos = {name: c.local_client_info for name, c in cluster.clients.items()}
+    plan = CommunicationPlanner(peer_diffusion=peer_diffusion).make_comm_plan(infos)
+    for client in cluster.clients.values():
+        client._all_client_infos = dict(infos)
+        client._comm_plan = plan
+    cluster.plan = plan
+    cluster.gen = [n for n in cluster.clients if n.startswith("NIXLGenClient")]
+    cluster.engines = {
+        n: NIXLPullEngine(cluster.clients[n], staging_bytes=1 << 16, peer_timeout_s=5.0) for n in cluster.gen
+    }
+    return cluster
+
+
+def _fp8_cluster_mixed_layout(
+    train_tp,
+    layouts,
+    peer_diffusion,
+    train_dtype=torch.bfloat16,
+    scale_tile=BLOCK,
+    reader_quantization=True,
+):
+    """Like `_fp8_cluster`, but `layouts` gives one gen_tp per instance group instead of
+    a single uniform `gen_tp` -- the phase 2 scenario where different target layouts
+    for the same model share a node and must still find a designate per shard, even
+    though their whole shard sets never match."""
+    cluster = Cluster.__new__(Cluster)
+    cluster.bus = NotifBus()
+    cluster.declared, cluster.states = {}, {}
+    kinds = {}
+    for r in range(train_tp):
+        name = f"NIXLTrainClient_{r}"
+        kinds[name] = NIXLClientType.PUSH_SIDE
+        cluster.states[name] = _locals(MODEL, train_tp, train_dtype)
+        cluster.declared[name] = {k: _sharding(d, train_tp, r) for k, (s, d) in MODEL.items()}
+    for group, gen_tp in enumerate(layouts):
+        for r in range(gen_tp):
+            name = f"NIXLGenClient_L{group}_R{r}"
+            kinds[name] = NIXLClientType.PULL_SIDE
+            state = _locals(MODEL, gen_tp)
+            declared = {k: _sharding(d, gen_tp, r) for k, (s, d) in MODEL.items()}
+            for key in FP8_KEYS:
+                state[key] = torch.zeros(state[key].shape, dtype=torch.float8_e4m3fn)
+                padded_tile = (1,) * (state[key].dim() - 2) + tuple(scale_tile)
+                state[key + "_scale_inv"] = torch.zeros(
+                    scale_shape(state[key].shape, padded_tile), dtype=torch.float32
+                )
+                declared[key + "_scale_inv"] = copy.deepcopy(declared[key])
+                declared[key + "_scale_inv"].scale_tile = scale_tile
+            cluster.states[name], cluster.declared[name] = state, declared
+
+    def tile_of(t):
+        return (1,) * (t.dim() - 2) + BLOCK
+
+    for r in range(train_tp):
+        name = f"NIXLTrainClient_{r}"
+        fill_fp8_exact(cluster.states[name], cluster.declared[name], FP8_KEYS, tile_of, version=7)
+        rest = {k: v for k, v in cluster.states[name].items() if k not in FP8_KEYS}
+        fill_by_layout(rest, cluster.declared[name], version=7, wire_dtype=torch.bfloat16)
+
+    from psrl.utils.nixl.server import NIXLMetaServer
+
+    server = NIXLMetaServer.__new__(NIXLMetaServer)
+    server.client_sharding_dicts = {n: copy.deepcopy(d) for n, d in cluster.declared.items()}
+    server.client_unified_sharding_dicts, server.finest_shard_meshes = {}, {}
+    from psrl.utils.nixl.handshake_notif import NotifKind
+
+    server._agents_reported = {kind: set() for kind in NotifKind}
+    server._agents_reported[NotifKind.SHARDING] = set(cluster.declared)
+    server.make_unified_sharding()
+    unified = server.client_unified_sharding_dicts
+
+    cluster.clients = {}
+    for name, kind in kinds.items():
+        client = NIXLStorageClient(
+            client_name=name,
+            server_name="server",
+            use_gpu=False,
+            client_type=kind,
+            nixl_config=CONFIG,
+            binded_agent=MemcpyAgent(name, cluster.bus),
+        )
+        if kind is NIXLClientType.PUSH_SIDE:
+            client.set_publish_cast(train_dtype, torch.bfloat16)
+            client.set_publish_quantization(FP8_PLAN, reader_quantization=reader_quantization)
+        elif reader_quantization:
+            client.set_reader_quantization(FP8_PLAN)
         client.register_local_tensors(cluster.states[name], unified[name])
         cluster.clients[name] = client
     if peer_diffusion:
@@ -920,3 +1029,319 @@ def test_an_instance_that_joins_later_pulls_correct_bytes():
         judged, failure = check_by_layout(cluster.states[name], cluster.declared[name], list(MODEL), version=7)
         assert failure is None, f"{name}: {failure}"
         assert judged == len(MODEL)
+
+
+@pytest.mark.parametrize("train_tp,gen_tp", [(1, 2), (2, 2), (4, 2), (2, 4)])
+def test_reader_quantization_pulls_bf16_and_quantizes_in_place(train_tp, gen_tp):
+    """The trainer keeps BF16 and allocates no publish copy; the rollout quantizes."""
+    cluster = _fp8_cluster(
+        train_tp,
+        gen_tp,
+        instances=2,
+        peer_diffusion=True,
+        reader_quantization=True,
+    )
+    for rank in range(train_tp):
+        trainer = cluster.clients[f"NIXLTrainClient_{rank}"]
+        assert trainer.publish_copy_bytes == 0, trainer.publish_copy_bytes
+
+    cluster.pull(epoch=1)
+    _judge_fp8(cluster, version=7)
+
+    # A second version must replace every FP8 byte and scale, not just the weights.
+    for rank in range(train_tp):
+        name = f"NIXLTrainClient_{rank}"
+        fill_fp8_exact(cluster.states[name], cluster.declared[name], FP8_KEYS, lambda t: (1,) * (t.dim() - 2) + BLOCK, version=8)
+        rest = {k: v for k, v in cluster.states[name].items() if k not in FP8_KEYS}
+        fill_by_layout(rest, cluster.declared[name], version=8, wire_dtype=torch.bfloat16)
+        cluster.clients[name].publish_version(8)
+    cluster.pull(epoch=2)
+    _judge_fp8(cluster, version=8)
+
+
+class _RegisteredDestinationQuantizer(VllmFp8BlockQuantizer):
+    """Refuse the allocating path, so a pull must quantize into the registered views."""
+
+    def __init__(self, plan: QuantizationPlan):
+        super().__init__(plan)
+        self.calls: list[tuple[torch.Tensor, torch.Tensor]] = []
+
+    def quantize(self, source: torch.Tensor):
+        raise AssertionError("quantized into a temporary tensor instead of the registered views.")
+
+    def quantize_into(self, source, destination, scale):
+        self.calls.append((destination, scale))
+        super().quantize_into(source, destination, scale)
+
+
+def _require_registered_destinations(cluster) -> None:
+    """Swap every reader's quantizer for one that only accepts registered destinations."""
+    for name in cluster.gen:
+        cluster.clients[name]._quantizer = _RegisteredDestinationQuantizer(FP8_PLAN)
+
+
+@pytest.mark.parametrize("train_tp,gen_tp", [(2, 2), (4, 2)])
+def test_reader_quantization_quantizes_into_the_registered_fp8_views(train_tp, gen_tp):
+    """No FP8 temporary and no second copy when the scale grid is the publish tile."""
+    cluster = _fp8_cluster(train_tp, gen_tp, instances=2, peer_diffusion=True, reader_quantization=True)
+    _require_registered_destinations(cluster)
+
+    cluster.pull(epoch=1)
+    _judge_fp8(cluster, version=7)
+
+    for name in cluster.gen:
+        mapping = cluster.clients[name].get_original_tensor_mapping()
+        weights = {id(view) for (key, _), view in mapping.items() if not key.endswith("_scale_inv")}
+        scales = {id(view) for (key, _), view in mapping.items() if key.endswith("_scale_inv")}
+        calls = cluster.clients[name]._quantizer.calls
+        assert calls, name
+        assert all(id(destination) in weights for destination, _ in calls), name
+        assert all(id(scale) in scales for _, scale in calls), name
+
+
+def test_reader_quantization_writes_the_registered_weight_with_a_refined_scale_grid():
+    """A finer rollout grid still quantizes the weight into its registered view.
+
+    Gen TP 16 cuts the 32-row tile, so the coarse scale repeats past the registered
+    grid and has to be cropped to the shard's own tile count.
+    """
+    cluster = _fp8_cluster(
+        2, 16, instances=2, peer_diffusion=True, scale_tile=(16, 16), reader_quantization=True
+    )
+    _require_registered_destinations(cluster)
+
+    cluster.pull(epoch=1)
+    _judge_fp8(cluster, version=7)
+
+    for name in cluster.gen:
+        mapping = cluster.clients[name].get_original_tensor_mapping()
+        weights = {id(view) for (key, _), view in mapping.items() if not key.endswith("_scale_inv")}
+        calls = cluster.clients[name]._quantizer.calls
+        assert calls, name
+        assert all(id(destination) in weights for destination, _ in calls), name
+
+
+def test_reader_quantization_falls_back_when_the_registered_view_is_not_addressable(monkeypatch):
+    """A destination the fused kernel cannot flatten still lands through `copy_`."""
+    cluster = _fp8_cluster(2, 2, instances=2, peer_diffusion=True, reader_quantization=True)
+    monkeypatch.setattr(
+        VllmFp8BlockQuantizer,
+        "can_quantize_into",
+        lambda self, source, destination, scale: False,
+    )
+
+    cluster.pull(epoch=1)
+    _judge_fp8(cluster, version=7)
+
+
+def test_reader_quantization_peer_diffusion_shares_training_reads_across_separate_instances():
+    """Four separate TP1 rollout instances on one node share one designate per key.
+
+    Each instance is its own NIXL client wanting the identical, unsharded tensor --
+    the deployment shape measured on real hardware in the GPU validation run, where
+    this grouping did not trigger. The planner is verified correct here; a live run
+    is needed to confirm what differs in the actual deployment (see the "Measured
+    status" note in docs/design/reader_quantization_impl.md).
+    """
+    cluster = _fp8_cluster(4, 1, instances=4, peer_diffusion=True, reader_quantization=True)
+    reports = cluster.pull(epoch=1)
+    _judge_fp8(cluster, version=7)
+    assert sum(r.peer_keys for r in reports.values()) > 0
+    assert all(r.followers or r.peer_keys for r in reports.values())
+
+
+def test_reader_quantization_peer_diffusion_shares_training_reads():
+    """One designate per key group reads BF16 and quantizes; followers read FP8."""
+    cluster = _fp8_cluster(2, 2, instances=2, peer_diffusion=True, reader_quantization=True)
+    reports = cluster.pull(epoch=1)
+    _judge_fp8(cluster, version=7)
+    # One designate per (key, shard-set) group. With gen TP2: three FP8 weights
+    # have two shard sets each, and the norm has one => 7 upstream keys. Scales are derived.
+    assert sum(r.upstream_keys for r in reports.values()) == 7
+    assert sum(r.peer_keys for r in reports.values()) > 0
+
+
+def test_reader_quantization_shares_across_different_gen_layouts_on_one_node():
+    """Phase 2: a gen_tp=4 instance's one finest shard is reused by gen_tp=2 instances'
+    matching half, even though the layouts' whole shard sets never match.
+
+    train_tp=4 makes the finest mesh 4 shards per key. Three same-node layout groups
+    (TP4, TP2, TP2) each read their own shards independently without peer diffusion --
+    3x the model's worth of upstream bytes, one full copy per layout. With peer
+    diffusion, every one of the 4 distinct finest shards is read upstream exactly once
+    (by whichever rank, across any layout, is elected its designate) and shared with
+    every other rank -- in any layout -- that also needs it: 1x, not 3x.
+    """
+    cluster = _fp8_cluster_mixed_layout(
+        train_tp=4, layouts=[4, 2, 2], peer_diffusion=True, reader_quantization=True
+    )
+    reports = cluster.pull(epoch=1)
+    _judge_fp8(cluster, version=7)
+    assert sum(r.peer_keys for r in reports.values()) > 0
+    # At least one coarser-layout (L1/L2, gen_tp=2) instance got part of a key shared
+    # with a finer-layout (L0, gen_tp=4) or the other coarse layout's instance -- the
+    # whole point of phase 2, since L1/L2's whole shard sets never match L0's.
+    coarse_names = [n for n in cluster.gen if not n.startswith("NIXLGenClient_L0")]
+    assert any(reports[n].peer_keys > 0 for n in coarse_names)
+
+    def _single_layout_upstream_bytes(gen_tp):
+        single = _fp8_cluster(4, gen_tp, instances=1, peer_diffusion=False, reader_quantization=True)
+        return sum(r.upstream_bytes for r in single.pull(epoch=1).values())
+
+    independent_bytes = sum(_single_layout_upstream_bytes(gt) for gt in [4, 2, 2])
+    actual_bytes = sum(r.upstream_bytes for r in reports.values())
+    assert actual_bytes < independent_bytes
+
+
+@pytest.mark.parametrize("train_tp,gen_tp", [(1, 2), (2, 2), (4, 2), (2, 4)])
+def test_reader_quantization_tiles_a_grouped_moe_shaped_key(monkeypatch, train_tp, gen_tp):
+    """A 3-D grouped-expert tensor quantizes bit for bit, same as a dense 2-D one.
+
+    `VllmFp8BlockQuantizer.tile_of` pads leading dims with 1, so each expert's
+    trailing 2-D slice gets its own independent block tile -- quantizing a
+    `(experts, out, in)` tensor is the same per-slice math as `(out, in)`, just
+    repeated down an unsharded leading axis. This is the production reader-side
+    path (`pull_engine._quantize_scatter` -> `quantize_into` -> `tile_of`), not
+    the test fixture's own tiling helper, so it exercises the real code.
+    """
+    moe_key = "layers.0.experts.gate_up_proj.weight"
+    model = dict(MODEL)
+    model[moe_key] = ((4, HIDDEN, INTER), 2)
+    monkeypatch.setattr(f"{__name__}.MODEL", model)
+    monkeypatch.setattr(f"{__name__}.FP8_KEYS", FP8_KEYS + [moe_key])
+    cluster = _fp8_cluster(train_tp, gen_tp, instances=1, peer_diffusion=True, reader_quantization=True)
+    cluster.pull(epoch=1)
+    _judge_fp8(cluster, version=7)
+
+
+# --- A fused parameter whose checkpoint views cut a quantization tile ---------
+
+#: Two 24-row halves of one 48-row parameter. Against BLOCK's 32-row tile, neither half
+#: is a whole tile, so the rollout can only quantize them together.
+UNIT_MEMBER_ROWS = 24
+UNIT_MEMBERS = {
+    "layers.0.gdn.in_proj_b.weight": (UNIT_MEMBER_ROWS, HIDDEN),
+    "layers.0.gdn.in_proj_a.weight": (UNIT_MEMBER_ROWS, HIDDEN),
+}
+UNIT_ID = "layers.0.gdn.in_proj_ba.weight"
+UNIT_SCALE = UNIT_ID + "_scale_inv"
+
+
+def _unit_cluster(train_tp, gen_tp, instances=2, peer_diffusion=True):
+    """A rollout whose fused parameter is quantized as one unit.
+
+    The checkpoint stores `in_proj_b` and `in_proj_a` separately, so each wire view is
+    half of the 64-row parameter and neither is a whole 128-row tile. The trainer keeps
+    both BF16; the rollout assembles them and quantizes the parameter once.
+    """
+    cluster = Cluster.__new__(Cluster)
+    cluster.bus = NotifBus()
+    cluster.declared, cluster.states = {}, {}
+    cluster.units, cluster.expected = {}, {}
+    kinds = {}
+    torch.manual_seed(11)
+    global_b = torch.randn(UNIT_MEMBER_ROWS, HIDDEN).to(torch.bfloat16)
+    global_a = torch.randn(UNIT_MEMBER_ROWS, HIDDEN).to(torch.bfloat16)
+    trainer_rows = UNIT_MEMBER_ROWS // train_tp
+    for r in range(train_tp):
+        name = f"NIXLTrainClient_{r}"
+        kinds[name] = NIXLClientType.PUSH_SIDE
+        cluster.states[name] = {
+            "layers.0.gdn.in_proj_b.weight": global_b[r * trainer_rows : (r + 1) * trainer_rows].clone(),
+            "layers.0.gdn.in_proj_a.weight": global_a[r * trainer_rows : (r + 1) * trainer_rows].clone(),
+        }
+        cluster.declared[name] = {key: _sharding(0, train_tp, r) for key in UNIT_MEMBERS}
+    gen_rows = UNIT_MEMBER_ROWS // gen_tp
+    for i in range(instances):
+        for r in range(gen_tp):
+            name = f"NIXLGenClient_I{i}_R{r}"
+            kinds[name] = NIXLClientType.PULL_SIDE
+            fused = torch.zeros((2 * gen_rows, HIDDEN), dtype=torch.float8_e4m3fn)
+            state = {
+                "layers.0.gdn.in_proj_b.weight": fused[:gen_rows],
+                "layers.0.gdn.in_proj_a.weight": fused[gen_rows:],
+                UNIT_SCALE: torch.zeros(scale_shape(fused.shape, BLOCK), dtype=torch.float32),
+            }
+            declared = {key: _sharding(0, gen_tp, r) for key in UNIT_MEMBERS}
+            for sharding in declared.values():
+                sharding.quant_unit = UNIT_ID
+            declared[UNIT_SCALE] = NIXLSharding.default()
+            declared[UNIT_SCALE].quant_unit = UNIT_ID
+            declared[UNIT_SCALE].local_only = True
+            cluster.states[name], cluster.declared[name] = state, declared
+            cluster.units[(i, r)] = fused
+            lo, hi = r * gen_rows, (r + 1) * gen_rows
+            cluster.expected[(i, r)] = torch.cat([global_b[lo:hi], global_a[lo:hi]])
+
+    from psrl.utils.nixl.server import NIXLMetaServer
+
+    cluster.clients = {}
+    for name, kind in kinds.items():
+        client = NIXLStorageClient(
+            client_name=name,
+            server_name="server",
+            use_gpu=False,
+            client_type=kind,
+            nixl_config=CONFIG,
+            binded_agent=MemcpyAgent(name, cluster.bus),
+        )
+        if kind is NIXLClientType.PUSH_SIDE:
+            client.set_publish_quantization(FP8_PLAN, reader_quantization=True)
+        else:
+            client.set_reader_quantization(FP8_PLAN)
+        cluster.clients[name] = client
+    # The server plans over what each client announces, which leaves the unit's
+    # reader-computed scale out of the plan.
+    announced = {n: c.plan_sharding(cluster.declared[n]) for n, c in cluster.clients.items()}
+
+    server = NIXLMetaServer.__new__(NIXLMetaServer)
+    server.client_sharding_dicts = {n: copy.deepcopy(d) for n, d in announced.items()}
+    server.client_unified_sharding_dicts, server.finest_shard_meshes = {}, {}
+    server._agents_reported = {kind: set() for kind in NotifKind}
+    server._agents_reported[NotifKind.SHARDING] = set(announced)
+    server.make_unified_sharding()
+    unified = server.client_unified_sharding_dicts
+
+    for name, client in cluster.clients.items():
+        client.register_local_tensors(cluster.states[name], unified[name])
+    if peer_diffusion:
+        _train_ranks_remote(cluster.clients)
+    infos = {name: c.local_client_info for name, c in cluster.clients.items()}
+    plan = CommunicationPlanner(peer_diffusion=peer_diffusion).make_comm_plan(infos)
+    for client in cluster.clients.values():
+        client._all_client_infos = dict(infos)
+        client._comm_plan = plan
+    cluster.plan = plan
+    cluster.gen = [n for n in cluster.clients if n.startswith("NIXLGenClient")]
+    cluster.engines = {
+        n: NIXLPullEngine(cluster.clients[n], staging_bytes=1 << 16, peer_timeout_s=5.0) for n in cluster.gen
+    }
+    return cluster
+
+
+def _judge_units(cluster):
+    for (i, r), fused in cluster.units.items():
+        name = f"NIXLGenClient_I{i}_R{r}"
+        expected_q, expected_s = quantize_blockwise(cluster.expected[(i, r)], BLOCK)
+        assert torch.equal(fused.view(torch.uint8), expected_q.view(torch.uint8)), name
+        assert torch.equal(cluster.states[name][UNIT_SCALE], expected_s), name
+
+
+@pytest.mark.parametrize("train_tp,gen_tp", [(1, 1), (4, 1), (2, 2), (4, 2), (1, 2), (4, 4)])
+def test_reader_quantization_quantizes_a_fused_parameter_as_one_unit(train_tp, gen_tp):
+    """A view that cuts a tile is quantized with its siblings, over the engine's own tile.
+
+    The scale is derived from the whole parameter, so it equals what vLLM's online
+    quantizer produces for the same local tensor, at every train/rollout TP split.
+    """
+    cluster = _unit_cluster(train_tp, gen_tp)
+    cluster.pull(epoch=1)
+    _judge_units(cluster)
+
+
+def test_a_unit_member_is_read_upstream_by_every_replica():
+    """A follower cannot read a designate's unit bytes: the designate quantizes at pull end."""
+    cluster = _unit_cluster(4, 1, instances=2, peer_diffusion=True)
+    reports = cluster.pull(epoch=1)
+    _judge_units(cluster)
+    assert all(report.peer_keys == 0 for report in reports.values())

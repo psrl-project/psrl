@@ -46,6 +46,9 @@ class HarnessEpisodeSummary:
 
     stop_reason: str | None = None
     num_turns: int | None = None
+    # Subagents still live when the main sample closed, when the CLI reports
+    # enough lifecycle state to know. None means the CLI did not report it.
+    background_subagents: int | None = None
 
 
 def episode_summary(trajectory_format: str, log_bytes: bytes) -> HarnessEpisodeSummary | None:
@@ -75,6 +78,7 @@ def _parse_claude_code_episode(log_bytes: bytes) -> HarnessEpisodeSummary | None
     turns = 0
     last_reason: str | None = None
     found = False
+    background_subagents: int | None = None
 
     for event in _iter_json_events(log_bytes):
         if event.get("type") != "result":
@@ -82,6 +86,25 @@ def _parse_claude_code_episode(log_bytes: bytes) -> HarnessEpisodeSummary | None
         found = True
         reported = event.get("num_turns")
         run_turns = reported if isinstance(reported, int) and reported >= 0 else None
+        stats = event.get("subagent_stats")
+        if isinstance(stats, dict):
+            started = stats.get("started_in_background")
+            completed = stats.get("completed")
+            failed = stats.get("failed")
+            killed = stats.get("killed")
+            killed_total = (
+                sum(int(value) for value in killed.values() if isinstance(value, int))
+                if isinstance(killed, dict)
+                else 0
+            )
+            if isinstance(started, int):
+                background_subagents = max(
+                    0,
+                    started
+                    - (int(completed) if isinstance(completed, int) else 0)
+                    - (int(failed) if isinstance(failed, int) else 0)
+                    - killed_total,
+                )
         if _claude_code_hit_the_turn_cap(event):
             capped = True
             # A capped run reports the turn it refused to start, not the turns it
@@ -99,6 +122,7 @@ def _parse_claude_code_episode(log_bytes: bytes) -> HarnessEpisodeSummary | None
     return HarnessEpisodeSummary(
         stop_reason=STOP_REASON_MAX_TURNS if capped else last_reason,
         num_turns=turns if saw_turns else None,
+        background_subagents=background_subagents,
     )
 
 
@@ -108,7 +132,7 @@ def _claude_code_hit_the_turn_cap(event: dict) -> bool:
 
 
 def _parse_codex_episode(log_bytes: bytes) -> HarnessEpisodeSummary | None:
-    """Read a Codex run's own report of how it stopped.
+    """Read a Codex run's own report of how it stopped and which agents are live.
 
     Codex reports no turn count of its own: its ``turn`` is one submission, not one model
     call, so a single ``exec`` reports one turn however many times it called the model.
@@ -116,10 +140,35 @@ def _parse_codex_episode(log_bytes: bytes) -> HarnessEpisodeSummary | None:
     it arrives as an error whose body the CLI echoes verbatim. Any other reason is the
     CLI's own wording, which is not this module's vocabulary, so it is left unreported.
     """
+    stop_reason = None
+    agents: dict[str, str] = {}
+    saw_agents = False
     for event in _iter_json_events(log_bytes):
         if any(SESSION_TURN_BUDGET_ERROR_CODE in message for message in _codex_error_messages(event)):
-            return HarnessEpisodeSummary(stop_reason=STOP_REASON_MAX_TURNS)
-    return None
+            stop_reason = STOP_REASON_MAX_TURNS
+        item = event.get("item")
+        if not isinstance(item, dict) or item.get("type") != "collab_tool_call":
+            continue
+        states = item.get("agents_states")
+        if not isinstance(states, dict):
+            continue
+        for agent_id, state in states.items():
+            if not isinstance(state, dict):
+                continue
+            status = state.get("status")
+            if isinstance(status, str):
+                agents[str(agent_id)] = status
+                saw_agents = True
+    if stop_reason is None and not saw_agents:
+        return None
+    terminal = {"completed", "failed", "killed", "cancelled", "error", "aborted"}
+    background_subagents = (
+        sum(1 for status in agents.values() if status not in terminal) if saw_agents else None
+    )
+    return HarnessEpisodeSummary(
+        stop_reason=stop_reason,
+        background_subagents=background_subagents,
+    )
 
 
 def _codex_error_messages(event: dict) -> Iterator[str]:

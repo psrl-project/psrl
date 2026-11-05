@@ -58,6 +58,33 @@ class _Staged:
     local_view: torch.Tensor
     view_shape: tuple[int, ...]
     view_strides: tuple[int, ...]
+    #: Reader-side quantization: the staging bytes are `source_dtype`, and the
+    #: scatter step quantizes them into `local_view` (FP8) plus its `_scale_inv`.
+    source_dtype: torch.dtype | None = None
+    quantize: bool = False
+    shard: tuple[int, ...] | None = None
+
+
+@dataclass
+class _Unit:
+    """A rollout parameter whose wire views are quantized as one tensor.
+
+    A fused parameter can be smaller than one scale tile, so a checkpoint view cuts a
+    tile and has no scale block of its own. The reader stages every member's bytes in
+    destination order and quantizes the parameter once, which produces exactly the bytes
+    and scale the engine would derive from the parameter itself.
+    """
+
+    key: str
+    scale_key: str
+    scale_view: torch.Tensor
+    cols: int
+    #: `(key, shard) -> (first row, row count)` in the unit.
+    members: dict[tuple[str, tuple[int, ...]], tuple[int, int]]
+    rows: int
+    buffer: torch.Tensor | None = None
+    staged: int = 0
+    dirty: bool = False
 
 
 @dataclass
@@ -298,6 +325,10 @@ class NIXLPullEngine:
         self._completed_keys: set[str] = set()
         self._pull_keys: set[str] = set()
         self._key_outstanding: dict[str, int] = {}
+        #: Keys whose staged bytes still need a quantize/scatter before they are complete.
+        self._quantize_keys: set[str] = set()
+        self._quantize_pending: dict[str, int] = {}
+        self._accounted_phases: set[int] = set()
         self._next_control_poll = 0.0
         #: True while re-reading suspect keys from holders; peer reads must not re-raise.
         self._repairing = False
@@ -306,6 +337,9 @@ class NIXLPullEngine:
         self._control_poll_interval_s = 5e-4
         #: Bytes copied from a same-node source on another GPU (diagnostics, 3.7.4).
         self._ipc_peer_bytes = 0
+        #: Rollout parameters whose wire views are quantized together, built on first use.
+        self._unit_index: dict[str, _Unit] | None = None
+        self._unit_of_key: dict[str, str] = {}
 
     # ------------------------------------------------------------------ geometry
 
@@ -321,12 +355,34 @@ class NIXLPullEngine:
         remote_info = self.client.all_client_infos[source].tensor_infos[key]
         positions = {s: i for i, s in enumerate(remote_info.sharding.shard_indices)}
         cells = []
+        quantized = []
         for shard in shards:
             pos = positions[shard]
             meta = remote_info.shard_meta_infos[pos]
             local = self._local_view(key, shard)
             address = remote_info.read_addrs[pos] if remote_info.read_addrs else None
             assert address is not None, f"{source} exposes no readable bytes for {key!r} shard {shard}."
+            quantize = (
+                self.client._reader_quantization
+                and self.client._quantizer is not None
+                and meta.dtype != local.dtype
+                and local.dtype == self.client._quantizer.weight_dtype
+            )
+            if not quantize and self._unit_of(key) is not None:
+                raise RuntimeError(
+                    f"{key!r} feeds a quantization unit, so it must arrive in the source dtype, "
+                    f"but {source} publishes {meta.dtype}. A unit's scale spans every member, so "
+                    "assembling it from already quantized bytes would leave it stale."
+                )
+            if quantize:
+                assert tuple(meta.shape) == tuple(local.shape), (
+                    f"{key!r} shard {shard}: source {meta.dtype} {tuple(meta.shape)} at {source} "
+                    f"does not match the rollout target {local.dtype} {tuple(local.shape)}."
+                )
+                source_itemsize = torch.empty((), dtype=meta.dtype).element_size()
+                runs = view_runs(address, tuple(meta.shape), tuple(remote_info.read_strides[pos]), source_itemsize)
+                quantized.append((shard, meta, local, runs))
+                continue
             assert meta.dtype == local.dtype and tuple(meta.shape) == tuple(local.shape), (
                 f"{key!r} shard {shard} is {meta.dtype} {tuple(meta.shape)} at {source} "
                 f"but {local.dtype} {tuple(local.shape)} locally."
@@ -338,6 +394,32 @@ class NIXLPullEngine:
                 (local.untyped_storage().data_ptr(), remote_info.read_bases[pos]), len(self._region_labels)
             )
             cells.append((local, local_runs, remote_runs, tuple(remote_info.read_strides[pos]), meta.version, region))
+
+        if quantized:
+            staged = []
+            versions = set()
+            nbytes = 0
+            for shard, meta, local, runs in quantized:
+                item = _Staged(
+                    key,
+                    runs.total_bytes,
+                    runs.starts,
+                    np.arange(runs.count, dtype=np.int64) * runs.run_bytes,
+                    np.full(runs.count, runs.run_bytes, dtype=np.int64),
+                    local,
+                    tuple(meta.shape),
+                    tuple(_dense(meta.shape)),
+                    source_dtype=meta.dtype,
+                    quantize=True,
+                    shard=shard,
+                )
+                staged.append(item)
+                versions.add(meta.version)
+                nbytes += item.nbytes
+            empty = np.zeros(0, dtype=np.int64)
+            spec = _Spec(source, key, empty, empty, empty, empty, staged, versions, nbytes)
+            self._specs[(source, key)] = spec
+            return spec
 
         shared = self._ipc_cells(source, remote_info, shards, positions, cells)
         if shared is not None:
@@ -685,6 +767,10 @@ class NIXLPullEngine:
     def _note_completed(self, handle: _Handle) -> None:
         """Mark a handle's keys complete once every read that covers them finished."""
         for key in handle.keys:
+            if key in self._quantize_keys:
+                # The source bytes are in the staging pool, but the target is not written
+                # until `_quantize_scatter`. A preemption must not certify it before then.
+                continue
             remaining = self._key_outstanding.get(key, 0) - 1
             self._key_outstanding[key] = remaining
             if remaining <= 0:
@@ -777,11 +863,211 @@ class NIXLPullEngine:
     def _scatter(self, items: list[tuple[_Staged, int]], pool: torch.Tensor) -> None:
         with torch.cuda.stream(self._copy_stream) if self._copy_stream is not None else nullcontext():
             for item, offset in items:
+                if item.quantize:
+                    assert item.source_dtype is not None and item.shard is not None
+                    typed = pool.view(item.source_dtype)
+                    source = torch.as_strided(
+                        typed,
+                        item.view_shape,
+                        item.view_strides,
+                        offset // typed.element_size(),
+                    )
+                    unit = self._unit_of(item.key)
+                    if unit is None:
+                        self._quantize_scatter(item, source)
+                    else:
+                        self._stage_unit_member(unit, item, source)
+                    continue
                 typed = pool.view(item.local_view.dtype)
                 source = torch.as_strided(
                     typed, item.view_shape, item.view_strides, offset // item.local_view.element_size()
                 )
                 item.local_view.copy_(source, non_blocking=True)
+
+    def _unit_of(self, key: str) -> _Unit | None:
+        """The unit `key` feeds, or None for a key quantized on its own."""
+        return self._units().get(self._unit_of_key.get(key, ""))
+
+    def _units(self) -> dict[str, _Unit]:
+        """Rollout parameters whose views share one scale, built from the registered layout.
+
+        A member view is a contiguous row range of its parameter's FP8 storage, so the unit
+        a view feeds is its destination rows. The scale is registered whole by the rollout
+        and is never pulled.
+        """
+        if self._unit_index is not None:
+            return self._unit_index
+        units: dict[str, _Unit] = {}
+        quantizer = self.client._quantizer
+        if quantizer is None:
+            self._unit_index = units
+            return units
+        mapping = self.client.get_original_tensor_mapping()
+        infos = self.client.local_client_info.tensor_infos
+        scale_of: dict[str, str] = {}
+        cells: dict[str, list[tuple[str, tuple[int, ...], torch.Tensor]]] = defaultdict(list)
+        for key, info in infos.items():
+            unit_id = getattr(info.sharding, "quant_unit", None)
+            if unit_id is None:
+                continue
+            if quantizer.base_of_scale_key(key) is not None:
+                scale_of[unit_id] = key
+                continue
+            for shard in info.sharding.shard_indices:
+                view = mapping.get((key, tuple(shard)))
+                if view is not None and view.numel():
+                    cells[unit_id].append((key, tuple(shard), view))
+        for unit_id, members in cells.items():
+            scale_key = scale_of.get(unit_id)
+            assert scale_key is not None, f"{self.client.client_name}: unit {unit_id!r} has no local scale."
+            scale_shards = infos[scale_key].sharding.shard_indices
+            assert len(scale_shards) == 1, (
+                f"{self.client.client_name}: unit scale {scale_key!r} has {len(scale_shards)} local shards."
+            )
+            scale_view = mapping.get((scale_key, tuple(scale_shards[0])))
+            assert scale_view is not None, f"{self.client.client_name}: unit scale {scale_key!r} is not registered."
+            first = members[0][2]
+            assert first.dim() == 2 and first.stride(1) == 1 and first.stride(0) == first.shape[1], (
+                f"{self.client.client_name}: unit {unit_id!r} member {members[0][0]!r} is not a dense 2D row view."
+            )
+            row_bytes = first.stride(0) * first.element_size()
+            base = min(view.data_ptr() for _, _, view in members)
+            end = max(view.data_ptr() + view.shape[0] * row_bytes for _, _, view in members)
+            unit = _Unit(unit_id, scale_key, scale_view, first.shape[1], {}, (end - base) // row_bytes)
+            for key, shard, view in members:
+                assert view.shape[1] == unit.cols and (view.data_ptr() - base) % row_bytes == 0, (
+                    f"{self.client.client_name}: unit {unit_id!r} member {key!r} does not sit on the unit's row grid."
+                )
+                unit.members[(key, shard)] = ((view.data_ptr() - base) // row_bytes, view.shape[0])
+                self._unit_of_key[key] = unit_id
+            units[unit_id] = unit
+        self._unit_index = units
+        return units
+
+    @torch.no_grad()
+    def _stage_unit_member(self, unit: _Unit, item: _Staged, source: torch.Tensor) -> None:
+        """Copy a unit member's source bytes to its destination rows, to quantize them together."""
+        assert item.source_dtype is not None
+        if unit.buffer is None:
+            unit.buffer = torch.empty((unit.rows, unit.cols), dtype=item.source_dtype, device=item.local_view.device)
+        start, rows = unit.members[(item.key, item.shard)]
+        assert item.local_view.shape == (rows, unit.cols) and item.source_dtype == unit.buffer.dtype, (
+            f"{item.key!r} shard {item.shard}: view {tuple(item.local_view.shape)} {item.source_dtype} "
+            f"does not match unit {unit.key!r} row {start} ({rows}, {unit.cols})."
+        )
+        unit.buffer[start : start + rows].copy_(source)
+        unit.staged += 1
+        unit.dirty = True
+
+    @torch.no_grad()
+    def _flush_units(self) -> None:
+        """Quantize every unit whose members landed, and publish its scale."""
+        quantizer = self.client._quantizer
+        if quantizer is None:
+            return
+        mapping = self.client.get_original_tensor_mapping()
+        for unit in self._units().values():
+            if not unit.dirty:
+                continue
+            if unit.staged < len(unit.members):
+                psrl_logger.warning(
+                    f"{self.client.client_name}: unit {unit.key!r} received {unit.staged} of "
+                    f"{len(unit.members)} member shards this pull, leaving it at the previous version."
+                )
+                unit.buffer, unit.staged, unit.dirty = None, 0, False
+                continue
+            q, s = quantizer.quantize(unit.buffer)
+            assert tuple(unit.scale_view.shape) == tuple(s.shape), (
+                f"{unit.scale_key}: derived scale {tuple(s.shape)} does not match the registered "
+                f"{tuple(unit.scale_view.shape)}."
+            )
+            unit.scale_view.copy_(s)
+            for (key, shard), (start, rows) in unit.members.items():
+                mapping[(key, shard)].copy_(q[start : start + rows])
+                self._quantize_pending.pop(key, None)
+                self._quantize_keys.discard(key)
+                self._completed_keys.add(key)
+            unit.buffer, unit.staged, unit.dirty = None, 0, False
+
+    @torch.no_grad()
+    def _quantize_scatter(self, item: _Staged, source: torch.Tensor) -> None:
+        """Quantize a staged BF16/FP32 source shard into the rollout's FP8 view and scale.
+
+        The scale is derived from the same source tile as the weight. A finer rollout
+        scale grid receives the coarse 128x128 scale repeated over the cells it covers,
+        matching what the trainer-side publisher wrote.
+
+        The bytes are written straight into the registered view. Quantizing into a
+        temporary and copying it in would read and write every FP8 byte twice.
+        """
+        quantizer = self.client._quantizer
+        assert quantizer is not None
+        block = quantizer.plan.block
+        assert block is not None
+        target = item.local_view
+        scale_key = quantizer.scale_key_of(item.key)
+        scale_view = self.client.get_original_tensor_mapping().get((scale_key, item.shard))
+        scale_dest = scale_view
+        refine = None
+        if scale_view is not None:
+            scale_tile = getattr(
+                self.client.local_client_info.tensor_infos[scale_key].sharding,
+                "scale_tile",
+                None,
+            ) or block
+            repeat = tuple(int(b // t) for b, t in zip(block, scale_tile))
+            if repeat != (1, 1):
+                # The weight still lands in its registered view. Only the coarse scale
+                # needs a temporary, and it is 1/16384 of the weight.
+                scale_dest = torch.empty(
+                    quantizer.scale_shape(source),
+                    dtype=quantizer.scale_dtype,
+                    device=source.device,
+                )
+                refine = repeat
+            else:
+                assert tuple(scale_view.shape) == tuple(quantizer.scale_shape(source)), (
+                    f"{scale_key} shard {item.shard}: registered scale {tuple(scale_view.shape)} "
+                    f"does not match the tile grid {tuple(quantizer.scale_shape(source))}."
+                )
+        if scale_dest is None:
+            scale_dest = torch.empty(
+                quantizer.scale_shape(source),
+                dtype=quantizer.scale_dtype,
+                device=source.device,
+            )
+
+        def refined_scale(coarse: torch.Tensor) -> torch.Tensor:
+            """Repeat the coarse grid, then crop to the shard's actual tile count."""
+            assert refine is not None
+            refined = quantizer.refine_scale(coarse, refine)
+            if tuple(refined.shape) == tuple(scale_view.shape):
+                return refined
+            assert all(r >= v for r, v in zip(refined.shape, scale_view.shape)), (
+                f"{scale_key} shard {item.shard}: refined scale {tuple(refined.shape)} is smaller "
+                f"than the registered {tuple(scale_view.shape)}."
+            )
+            return refined[tuple(slice(0, n) for n in scale_view.shape)]
+
+        if quantizer.can_quantize_into(source, target, scale_dest):
+            quantizer.quantize_into(source, target, scale_dest)
+            if refine is not None:
+                scale_view.copy_(refined_scale(scale_dest))
+        else:
+            # A destination the fused kernel cannot address is still writable by `copy_`.
+            q, s = quantizer.quantize(source)
+            target.copy_(q)
+            if scale_view is not None:
+                if refine is not None:
+                    s = refined_scale(s)
+                scale_view.copy_(s)
+        pending = self._quantize_pending.get(item.key, 1) - 1
+        if pending <= 0:
+            self._quantize_pending.pop(item.key, None)
+            self._quantize_keys.discard(item.key)
+            self._completed_keys.add(item.key)
+        else:
+            self._quantize_pending[item.key] = pending
 
     def _run(self, phase: _Phase) -> None:
         handles, copy = self._start(phase)
@@ -813,6 +1099,13 @@ class NIXLPullEngine:
         """
         if self._copy_stream is None and self.client.device.type == "cuda":
             self._copy_stream = torch.cuda.Stream(device=self.client.device)
+        if id(phase) not in self._accounted_phases:
+            self._accounted_phases.add(id(phase))
+            for members in phase.round_items:
+                for item, _offset in members:
+                    if item.quantize:
+                        self._quantize_keys.add(item.key)
+                        self._quantize_pending[item.key] = self._quantize_pending.get(item.key, 0) + 1
         direct = self._post(phase.direct)
         copy = None
         if phase.ipc:
@@ -913,7 +1206,7 @@ class NIXLPullEngine:
                 moved += 1
         return out, moved, missing
 
-    def _prepare_pool(self, upstream: dict[str, dict[str, list]], peer: dict[str, list[str]]) -> None:
+    def _prepare_pool(self, upstream: dict[str, dict[str, list]], peer: dict[str, dict[str, list]]) -> None:
         """Allocate the staging pool for the largest item this pull can plan.
 
         Building every planned spec up front is cheap (they are cached by `(source, key)`)
@@ -921,7 +1214,6 @@ class NIXLPullEngine:
         through mid-pull take-over can still ask for more; that path keeps the in-flight
         handle protection in `_ensure_pool`.
         """
-        tensors = self.client.local_client_info.tensor_infos
         need = 0
 
         def consider(source: str, key: str, shards: list) -> None:
@@ -930,15 +1222,16 @@ class NIXLPullEngine:
             for item in spec.staged:
                 need = max(need, _aligned(item.nbytes))
 
-        for key, per_source in upstream.items():
-            for source, shards in per_source.items():
-                consider(source, key, shards)
-        for source, keys in peer.items():
-            for key in keys:
-                local = tensors.get(key)
-                if local is None:
-                    continue
-                consider(source, key, list(local.sharding.shard_indices))
+        # `peer` has the same `{key: {source: shards}}` shape as `upstream` now that
+        # designates are elected per shard rather than per whole key, so one loop
+        # considers both -- and, critically, both read the shard list from the mapping
+        # itself rather than re-deriving it, which is what keeps every call site that
+        # can reach the same `(source, key)` pair (`_spec`'s cache key) agreeing on
+        # exactly the same shards for that pair.
+        for mapping in (upstream, peer):
+            for key, per_source in mapping.items():
+                for source, shards in per_source.items():
+                    consider(source, key, shards)
         if need:
             self._ensure_pool(need)
 
@@ -949,6 +1242,8 @@ class NIXLPullEngine:
             return None
         shards = list(local.sharding.shard_indices)
         wanted = set(map(tuple, shards))
+        quantizer = self.client._quantizer
+        unit = self._unit_of(key) is not None
         for name in holders:
             if name == self.client.client_name or name in self.failed or name in self.unavailable:
                 continue
@@ -958,6 +1253,12 @@ class NIXLPullEngine:
             tensor = info.tensor_infos.get(key)
             if tensor is None:
                 continue
+            if unit and quantizer is not None and tensor.shard_meta_infos:
+                meta = tensor.shard_meta_infos[0]
+                if meta is not None and meta.dtype == quantizer.weight_dtype:
+                    # A unit must be re-quantized from the trainer's bytes: the holder's FP8
+                    # output is only meaningful together with the scale it was made with.
+                    continue
             if wanted <= set(map(tuple, tensor.sharding.shard_indices)) and self._source_readable(
                 name, key, shards
             ):
@@ -1031,6 +1332,9 @@ class NIXLPullEngine:
                 self._run(phase)
             finally:
                 self._repairing = False
+        if self.client.device.type == "cuda":
+            torch.cuda.synchronize(self.client.device)
+        self._flush_units()
         done = time.time()
         psrl_logger.info(
             f"{self.client.client_name}: pull repaired after preemption: "
@@ -1056,7 +1360,32 @@ class NIXLPullEngine:
             repaired=True,
         )
 
-    def _assign(self, participates) -> tuple[dict[str, dict[str, list]], dict[str, list[str]], set[str]]:
+    def _elect(
+        self,
+        me: str,
+        plan,
+        participates,
+        group_key: str,
+        shard: tuple[int, ...],
+        read_key: str,
+    ) -> tuple[str | None, list[str]]:
+        """Live, readable designate for one shard's peer group, and the live members.
+
+        `group_key` is the key the peer group is attached to (a derived scale key defers
+        to its weight key's group at the same shard). `read_key` is the key
+        `_source_readable` checks readability against -- the key whose bytes are
+        actually about to be read from the candidate, which differs from `group_key`
+        exactly for a scale key (the group lives under the weight key; the read is of
+        the scale key). Returns ``(None, [])`` when there are fewer than 2 live
+        members, so the caller must fall back to reading this shard upstream itself.
+        """
+        live = [w for w in plan.get_peer_group(me, group_key, shard) if w == me or participates(w)]
+        if len(live) < 2:
+            return None, []
+        readable = [w for w in live if w == me or self._source_readable(w, read_key, [shard])]
+        return (readable[0] if readable else None), live
+
+    def _assign(self, participates) -> tuple[dict[str, dict[str, list]], dict[str, dict[str, list]], set[str]]:
         """Split this client's keys into upstream reads and reads from a designate.
 
         A peer is only eligible as the designate when this client holds its **full**
@@ -1064,28 +1393,68 @@ class NIXLPullEngine:
         make them readers (E4), and a sync over a participant subset can elect a different
         designate from the same peer group. Electing one whose addresses this client never
         loaded produces a read with no target and must fall back upstream instead.
+
+        Designates are elected per individual finest-mesh shard (phase 2's canonical
+        chunk), not per whole key: two readers whose whole shard sets for a key never
+        match (different TP/EP layouts) can still share a designate for the individual
+        shards they happen to overlap on. `peer`'s shape mirrors `upstream`'s exactly
+        (`{key: {source: shards}}`) so one key's shards can come from a mix of upstream
+        and one or more different peer designates in the same assignment.
         """
         me = self.client.client_name
         plan = self.client.comm_plan
         assert plan is not None, f"{me} has no communication plan."
         tensors = self.client.local_client_info.tensor_infos
         upstream: dict[str, dict[str, list]] = {}
-        peer: dict[str, list[str]] = defaultdict(list)
+        peer: dict[str, dict[str, list]] = {}
         followers: set[str] = set()
+        reader_quantization = self.client._reader_quantization
+        quantizer = self.client._quantizer
         for key, per_source in plan.rollout_pull_from_ps_plan.get(me, {}).items():
             local = tensors.get(key)
-            live = [w for w in plan.get_peer_group(me, key) if w == me or participates(w)]
-            if len(live) >= 2 and local is not None:
-                shards = list(local.sharding.shard_indices)
-                readable = [w for w in live if w == me or self._source_readable(w, key, shards)]
-                if readable:
-                    designate = readable[0]
+            base = quantizer.base_of_scale_key(key) if (reader_quantization and quantizer is not None) else None
+            unit = getattr(getattr(local, "sharding", None), "quant_unit", None)
+            if local is None:
+                if base is None:
+                    upstream[key] = per_source
+                continue
+            shard_source = {shard: source for source, shards in per_source.items() for shard in shards}
+            if unit is not None:
+                # A unit's scale spans every member view, so a replica can only produce it
+                # after all its own bytes land. Members are read upstream by every replica
+                # rather than from a designate, whose output is incomplete until then.
+                if base is not None:
+                    continue
+                for shard in local.sharding.shard_indices:
+                    upstream.setdefault(key, {}).setdefault(shard_source[shard], []).append(shard)
+                continue
+            if base is not None:
+                # `_scale_inv` has no upstream source. It is computed by the reader
+                # that quantizes the weight. A scale shard shards exactly like its
+                # weight (the server deep-copies the weight's already-unified sharding
+                # onto the scale key), so it defers entirely to the weight's own
+                # designate election at that shard coordinate -- no independent
+                # `_source_readable` call or ordering of its own.
+                for shard in local.sharding.shard_indices:
+                    designate, _live = self._elect(me, plan, participates, base, shard, key)
+                    if designate is not None and designate != me:
+                        peer.setdefault(key, {}).setdefault(designate, []).append(shard)
+                    # No live peer: `me` produces this shard's scale locally while
+                    # quantizing its own weight shard. Nothing to add to upstream or peer.
+                continue
+            # An ordinary weight (or non-reader-quantization) key: the designate reads
+            # this shard upstream (and quantizes it, if applicable); a follower reads
+            # the designate's output instead.
+            psrl_logger.debug(f"{me}: peer shards for {key!r} are {plan.get_peer_shards(me, key)!r}.")
+            for shard in local.sharding.shard_indices:
+                designate, live = self._elect(me, plan, participates, key, shard, key)
+                if designate is not None:
                     if designate != me:
-                        peer[designate].append(key)
+                        peer.setdefault(key, {}).setdefault(designate, []).append(shard)
                         continue
                     followers.update(w for w in live if w != me)
-            upstream[key] = per_source
-        return upstream, dict(peer), followers
+                upstream.setdefault(key, {}).setdefault(shard_source[shard], []).append(shard)
+        return upstream, peer, followers
 
     def _source_readable(self, source: str, key: str, shards: list) -> bool:
         """Whether ``source`` exposes an address for every one of ``shards`` of ``key``.
@@ -1095,9 +1464,14 @@ class NIXLPullEngine:
         """
         info = self.client.all_client_infos.get(source)
         if info is None:
+            psrl_logger.debug(f"{self.client.client_name}: {source!r} has no entry in all_client_infos.")
             return False
         tensor = info.tensor_infos.get(key)
         if tensor is None or not tensor.read_addrs:
+            psrl_logger.debug(
+                f"{self.client.client_name}: {source!r} has no read_addrs for {key!r} "
+                f"(tensor is None: {tensor is None})."
+            )
             return False
         positions = {shard: index for index, shard in enumerate(tensor.sharding.shard_indices)}
         return all(
@@ -1113,15 +1487,32 @@ class NIXLPullEngine:
         Wave of every key, cut in model order into byte balanced runs.
 
         Group members hold identical keys, so a designate and its followers derive the same waves.
+        A reader-derived scale key shares its weight key's wave: the designate computes
+        the scale while it quantizes that weight, and followers may only read it after the
+        wave is signalled.
         """
         info = self.client.local_client_info.tensor_infos
+        quantizer = self.client._quantizer if self.client._reader_quantization else None
+
+        def base_key(key: str) -> str:
+            if quantizer is None:
+                return key
+            base = quantizer.base_of_scale_key(key)
+            return base if base is not None and base in info else key
+
+        grouped: dict[str, list[str]] = defaultdict(list)
+        for key in keys:
+            grouped[base_key(key)].append(key)
         sizes = [
-            (key, sum(info[key].get_shard_size_bytes(i) for i in range(info[key].num_local_shards))) for key in keys
+            (base, sum(info[base].get_shard_size_bytes(i) for i in range(info[base].num_local_shards)))
+            for base in grouped
         ]
         total = max(sum(n for _, n in sizes), 1)
         waves, acc = {}, 0
-        for key, nbytes in sorted(sizes):
-            waves[key] = min(self.waves - 1, acc * self.waves // total)
+        for base, nbytes in sorted(sizes):
+            wave = min(self.waves - 1, acc * self.waves // total)
+            for key in grouped[base]:
+                waves[key] = wave
             acc += nbytes
         return waves
 
@@ -1199,8 +1590,11 @@ class NIXLPullEngine:
         self._next_control_poll = 0.0
         self._repairing = False
         self._ipc_peer_bytes = 0
+        self._quantize_keys = set()
+        self._quantize_pending = {}
+        self._accounted_phases = set()
         upstream, peer, followers = self._assign(lambda c: participants is None or c in participants)
-        self._pull_keys = set(upstream) | {key for keys in peer.values() for key in keys}
+        self._pull_keys = set(upstream) | set(peer)
         # D1 version-aware source selection: keep only trainer sources that have published
         # target_version.  An empty holder set (startup, or non-direct-supply mode) is treated
         # as "no filter" so the caller never has to check whether filtering is applicable.
@@ -1224,13 +1618,10 @@ class NIXLPullEngine:
         if missing:
             raise ChunkUnavailable(self.client.client_name, missing, set(self.unavailable))
         publisher, waiter = self.client.chunk_completion_channel()
-        all_keys = list(upstream) + [key for keys in peer.values() for key in keys]
+        all_keys = list(set(upstream) | set(peer))
         wave_of = self._waves_of(all_keys)
         up_waves = [{k: v for k, v in upstream.items() if wave_of[k] == w} for w in range(self.waves)]
-        peer_waves = [
-            {d: [k for k in keys if wave_of[k] == w] for d, keys in peer.items() if any(wave_of[k] == w for k in keys)}
-            for w in range(self.waves)
-        ]
+        peer_waves = [{k: v for k, v in peer.items() if wave_of[k] == w} for w in range(self.waves)]
         # Size the staging pool before posting anything. The old lazy allocation could
         # grow the pool in a later wave, which invalidated the prepared-handle cache while
         # peer reads were in flight; pre-sizing makes that a take-over-only path.
@@ -1272,14 +1663,20 @@ class NIXLPullEngine:
 
         def peer_wave(w: int) -> tuple[list[_Handle], list]:
             """Wait for this wave's designates, start reading them, and read any late designate's keys upstream."""
-            wanted = peer_waves[w]
+            wanted = peer_waves[w]  # {key: {source: shards}}
             if not wanted:
                 return [], []
-            ready = self._await(waiter, epoch, _READY + w, set(wanted))
+            designates = {source for per_source in wanted.values() for source in per_source}
+            ready = self._await(waiter, epoch, _READY + w, designates)
+            # Read shards straight from `wanted`, not re-derived from this client's own
+            # full shard list for the key: a key's shards can now come from more than
+            # one designate, and `_spec` is cached by `(source, key)` alone, so every
+            # call site touching the same pair must agree on exactly the same shards.
             specs = [
-                self._spec(d, key, list(self.client.local_client_info.tensor_infos[key].sharding.shard_indices))
-                for d in sorted(ready)
-                for key in wanted[d]
+                self._spec(source, key, shards)
+                for key, per_source in sorted(wanted.items())
+                for source, shards in per_source.items()
+                if source in ready
             ]
             handles, copies = [], []
             if specs:
@@ -1290,14 +1687,17 @@ class NIXLPullEngine:
                 handles, copy = self._start(phase)
                 if copy is not None:
                     copies.append(copy)
-            late = set(wanted) - ready
+            late = designates - ready
             if late:
                 psrl_logger.warning(
                     f"{self.client.client_name}: designates {sorted(late)} were not ready after "
                     f"{self.peer_timeout_s}s in epoch {epoch}, reading their keys upstream."
                 )
                 plan = self.client.comm_plan.rollout_pull_from_ps_plan[self.client.client_name]
-                keys = {key: plan[key] for d in late for key in wanted[d]}
+                # Whole-key re-fetch when any of its designates is late (rather than
+                # precise per-shard-only rerouting): simple and safe, at the cost of
+                # possibly re-reading a shard whose own designate was in fact ready.
+                keys = {key: plan[key] for key, per_source in wanted.items() if late & set(per_source)}
                 stats["fallback"] += len(keys)
                 fallback = self._phase(self._upstream_specs(keys))
                 versions.update(fallback.versions)
@@ -1331,10 +1731,13 @@ class NIXLPullEngine:
         pending_peer += handles
         pending_copies += copies
         self._finish(pending_peer, pending_copies)
-        lost_designates = self.failed.intersection(peer)
+        lost_designates = self.failed.intersection(
+            {source for per_source in peer.values() for source in per_source}
+        )
         if lost_designates:
             plan = self.client.comm_plan.rollout_pull_from_ps_plan[self.client.client_name]
-            keys = {key: plan[key] for d in lost_designates for key in peer[d]}
+            # Whole-key re-fetch, same scoping as the late-designate path in `peer_wave`.
+            keys = {key: plan[key] for key, per_source in peer.items() if lost_designates & set(per_source)}
             psrl_logger.warning(
                 f"{self.client.client_name}: designates {sorted(lost_designates)} failed mid read, "
                 f"reading their {len(keys)} key(s) upstream."
@@ -1351,6 +1754,8 @@ class NIXLPullEngine:
             self._run(fallback)
         if self.client.device.type == "cuda":
             torch.cuda.synchronize(self.client.device)
+        # Units are quantized once every member landed, whichever wave each came in on.
+        self._flush_units()
         # _DONE was removed: it notified peers "I finished reading your buffer" but did not
         # unlock any operation on either side. Followers finish their own peer reads
         # (self._finish(pending_peer)) before waiting for _DONE, so the signal had no
@@ -1363,7 +1768,7 @@ class NIXLPullEngine:
             upstream_seconds=upstream_done - start,
             peer_seconds=end - upstream_done,
             upstream_keys=len(upstream),
-            peer_keys=sum(len(v) for v in peer.values()),
+            peer_keys=len(peer),
             fallback_keys=stats["fallback"],
             upstream_bytes=stats["upstream_bytes"],
             peer_bytes=stats["peer_bytes"],

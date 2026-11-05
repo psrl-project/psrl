@@ -50,4 +50,29 @@ turn_output:
   # Whether to include the response body (roughly doubles the file size).
   include_response: True
 
+# Subagent trajectory selection and capture. The SessionRouter stores this policy in
+# the TITO session; extraction reads it from the snapshot rather than from the current
+# trainer config, so a policy change never rewrites an in-flight episode.
+subagent_training:
+  # off: no trajectory trains (diagnostic only).
+  # main_only: only the parent agent trains; subagents keep token ids for replay.
+  # all: the parent and every subagent train.
+  # selected: the parent plus matching `train_agents` entries train.
+  mode: main_only
+  # Exact agent ids or glob patterns, used by `selected`.
+  train_agents: []
+  # owner: every node an agent owns is trained, including a node another trajectory
+  # also replays. context: only nodes unique to the agent train (diagnostic).
+  shared_prefix: owner
+  # session: one reward broadcasts to every trainable row of the session.
+  reward: session
+  loss_weight:
+    main: 1.0
+    subagent: 1.0
+  # Fail a trainable row whose capture is token-only instead of silently training a
+  # fraction of it. Validation always captures tokens and is exempt.
+  require_primary_capture: true
+  # Validation scoring may use a different selection. Validation never trains.
+  val_mode: main_only
+
 # TODO(lhy): Move multi-turn agent settings from `rollout.yaml` to `psrl.yaml`.

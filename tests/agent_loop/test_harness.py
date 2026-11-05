@@ -8,12 +8,12 @@ import json
 import logging
 import shutil
 import subprocess
-import tomllib
 from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import tomllib
 from examples.mini_swe.config import build_runtime_config
 from examples.mini_swe.utils.harness_task import (
     _HARNESS_DIAG_NAME,
@@ -28,6 +28,7 @@ from psrl.sandbox import (
     ResourceSpec,
     SandboxCapabilities,
     SandboxCollectorError,
+    SandboxCommandTimeout,
     SandboxExitReason,
     SandboxPathNotFoundError,
     SandboxRef,
@@ -88,6 +89,9 @@ class FakeSandbox(SandboxSession):
         self.status_value = status_value
         self.status_error = status_error
         self.commands: list[tuple[str, str | None, Mapping[str, str] | None]] = []
+        # The deadline each command carried, so a test can pin that the harness hands
+        # its episode clock to the sandbox instead of relying on its own timer.
+        self.timeouts: list[float | None] = []
         self.writes: dict[str, bytes] = {}
         self.cli_started = asyncio.Event()
         self.cli_cancelled = False
@@ -109,6 +113,7 @@ class FakeSandbox(SandboxSession):
         timeout_s: float | None = None,
     ) -> ExecResult:
         self.commands.append((command, cwd, env))
+        self.timeouts.append(timeout_s)
         # The prepare probe creates the state dir and checks the mounted CLI.
         if command.startswith("mkdir -p /root/.psrl-harness"):
             return ExecResult(0 if self.runtime_available else 1, "", "" if self.runtime_available else "no such file")
@@ -122,7 +127,18 @@ class FakeSandbox(SandboxSession):
         if "/opt/harness/bin/" in command and self.block_cli:
             self.cli_started.set()
             try:
-                await asyncio.Future()
+                if timeout_s is None:
+                    await asyncio.Future()
+                else:
+                    # The sandbox enforces a command's deadline itself. Modeling it here
+                    # is what makes a harness that relies on its own timer fail this
+                    # test instead of passing slowly.
+                    await asyncio.wait_for(asyncio.Future(), timeout=timeout_s)
+            except asyncio.TimeoutError as exc:  # a deadline stop, not a cancellation
+                self.cli_cancelled = True
+                raise SandboxCommandTimeout(
+                    "the CLI ran out of its command budget", sandbox_preserved=True
+                ) from exc
             except asyncio.CancelledError:
                 self.cli_cancelled = True
                 raise
@@ -267,6 +283,7 @@ async def test_claude_code_uses_session_root_and_bounded_process_output() -> Non
     assert settings["permissions"]["allow"] == ["Bash(*)", "Read(*)", "Edit(*)"]
     assert settings["permissions"]["deny"] == []
     assert "defaultMode" not in settings["permissions"]
+    assert settings["env"]["CLAUDE_CODE_GATEWAY_HINT_HEADERS"] == "1"
     cli_command, cwd, env = next(item for item in sandbox.commands if "--output-format" in item[0])
     assert "--output-format stream-json" in cli_command
     assert "--permission-mode acceptEdits" in cli_command
@@ -300,11 +317,13 @@ async def test_successful_harness_skips_diagnostic_tail_commands() -> None:
 
 @pytest.mark.asyncio
 async def test_the_harness_stops_at_the_deadline_and_keeps_partial_output() -> None:
-    """A `keep` loop hands the harness its episode deadline, so the harness stops the CLI.
+    """A `keep` loop hands the harness its episode deadline, so the CLI stops at it.
 
-    The run has to return rather than raise, with `timed_out` set and the output files
-    still pointing at what the CLI had written, because the loop that chose `keep`
-    collects the partial trajectory and grades it.
+    The deadline travels to the sandbox as the command's own budget, and the sandbox
+    stops the CLI and answers with a command timeout. The run has to return rather
+    than raise, with `timed_out` set and the output files still pointing at what the
+    CLI had written, because the loop that chose `keep` collects the partial
+    trajectory and grades it.
     """
     sandbox = FakeSandbox(block_cli=True)
     harness = create_harness(HarnessConfig(kind="codex", executable="codex"), sandbox)
@@ -317,6 +336,9 @@ async def test_the_harness_stops_at_the_deadline_and_keeps_partial_output() -> N
     assert result.timed_out is True
     assert result.exit_code == EXIT_TIME_BUDGET_EXCEEDED
     assert sandbox.cli_cancelled, "the deadline stops the CLI rather than leaving it running"
+    # The episode clock travels to the sandbox as the command's own deadline, so the
+    # sandbox stops the CLI and the collector finds a free shell behind it.
+    assert sandbox.timeouts[-1] == pytest.approx(0.05)
     # The deadline stops the CLI; it does not discard what the CLI produced.
     assert result.stdout_path == "/root/.psrl-harness/stdout.log"
     assert result.stdout_tail == "bounded tail"
@@ -526,6 +548,41 @@ async def test_collector_stops_at_the_total_patch_budget(
 
 
 @pytest.mark.asyncio
+async def test_a_collector_that_times_out_grades_what_it_wrote() -> None:
+    """A collector stopped at its budget leaves a gradeable patch behind.
+
+    The collector writes each file's diff as it goes, so a budget stop is not a failed
+    collection: discarding what it wrote would cost a finished harness run to the size
+    of the repository rather than to the solution.
+    """
+
+    class SlowCollector(FakeSandbox):
+        async def exec(self, command, *, cwd=None, env=None, timeout_s=None):
+            if _HARNESS_PATCH_NAME in command:
+                self.writes[_PATCH_PATH] = b"diff --git a/x b/x\n+done\n"
+                raise SandboxCommandTimeout("collector stopped at its budget", sandbox_preserved=True)
+            return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s)
+
+    patch = await collect_git_patch(SlowCollector(), "/testbed", staging_dir=_STAGING_DIR)
+
+    assert patch == "diff --git a/x b/x\n+done\n"
+
+
+@pytest.mark.asyncio
+async def test_a_collector_that_times_out_before_writing_anything_is_a_collector_fault() -> None:
+    class EmptyCollector(FakeSandbox):
+        async def exec(self, command, *, cwd=None, env=None, timeout_s=None):
+            if _HARNESS_PATCH_NAME in command:
+                raise SandboxCommandTimeout("collector stopped at its budget", sandbox_preserved=True)
+            return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s)
+
+    with pytest.raises(SandboxCollectorError) as excinfo:
+        await collect_git_patch(EmptyCollector(), "/testbed", staging_dir=_STAGING_DIR)
+
+    assert "before writing any patch" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
 async def test_a_loss_before_collection_logs_the_runtime_evidence(caplog) -> None:
     """A lost sandbox leaves the daemon's evidence in the collector log.
 
@@ -729,7 +786,9 @@ async def test_codex_writes_responses_provider_config_and_uses_session_as_key() 
     assert "enabled = false" in codex_config  # analytics / feedback disabled
     # Hosted web_search must be off: the gateway rejects its schema and the task
     # forbids fetching the solution from the web. Must be a top-level key.
-    assert tomllib.loads(codex_config)["web_search"] == "disabled"
+    parsed = tomllib.loads(codex_config)
+    assert parsed["web_search"] == "disabled"
+    assert parsed["features"]["multi_agent"] is True
     assert harness.build_env(_runtime())["OPENAI_API_KEY"] == "session-1"
     command = harness.build_command("fix", _runtime())
     assert command[0] == "/opt/harness/bin/codex"
@@ -756,6 +815,7 @@ async def test_codex_catalog_enables_apply_patch_and_carries_base_instructions()
     assert entry["apply_patch_tool_type"] == "freeform"
     assert entry["shell_type"] == "unified_exec"
     assert entry["default_reasoning_level"] == "high"
+    assert entry["multi_agent_version"] == "v1"
     assert entry["model_messages"]["instructions_template"] == _base_instructions()
     assert _base_instructions().strip() != ""
 
@@ -842,6 +902,35 @@ def test_example_config_selects_both_harnesses() -> None:
     )
     assert runtime.agent.system_template == ""
     assert runtime.sandbox_config.environment.cwd == "/testbed"
+
+
+def test_subagent_example_config_enables_delegation_without_training_it() -> None:
+    path = Path(__file__).parents[2] / "examples/mini_swe/config/swebench_harness_config_codex_subagent.yaml"
+    configs = OmegaConf.load(path)
+
+    assert [item.name for item in configs] == ["mini_swe_codex_subagent"]
+    harness = HarnessConfig.from_value(configs[0].harness)
+    assert harness.kind == "codex"
+    assert harness.subagents_enabled is True
+    assert harness.workspace_isolation == "logical"
+    assert "delegate" in harness.prompt_suffix.lower()
+    assert configs[0].sandbox_config.environment.cwd == "/testbed"
+
+
+def test_claude_code_subagent_example_config_enables_delegation_without_training_it() -> None:
+    path = Path(__file__).parents[2] / "examples/mini_swe/config/swebench_harness_config_cc_subagent.yaml"
+    configs = OmegaConf.load(path)
+
+    assert [item.name for item in configs] == ["mini_swe_claude_code_subagent"]
+    harness = HarnessConfig.from_value(configs[0].harness)
+    assert harness.kind == "claude_code"
+    assert harness.subagents_enabled is True
+    assert harness.workspace_isolation == "logical"
+    # The subagent tool is named Agent in current Claude Code and was Task before it;
+    # both must be admitted for the delegation path to be available.
+    assert {"Agent", "Task"} <= set(harness.allowed_permissions)
+    assert "delegate" in harness.prompt_suffix.lower()
+    assert configs[0].sandbox_config.environment.cwd == "/testbed"
 
 
 def test_task_context_only_enables_compatible_clean_snapshot() -> None:
@@ -978,3 +1067,124 @@ def test_the_abort_path_can_name_a_dict_request() -> None:
 
     assert _request_id_of({"uid": 7}) == "7"
     assert _request_id_of({}) == "N/A"
+
+
+@pytest.mark.asyncio
+async def test_codex_disabled_subagents_emit_no_multi_agent_surface() -> None:
+    sandbox = FakeSandbox()
+    harness = create_harness(
+        HarnessConfig(kind="codex", executable="codex", subagents_enabled=False),
+        sandbox,
+    )
+
+    await harness.prepare(_runtime())
+
+    catalog = json.loads(sandbox.writes["/root/.codex/model_catalog.json"])
+    assert catalog["models"][0]["multi_agent_version"] is None
+    config = tomllib.loads(sandbox.writes["/root/.codex/config.toml"].decode())
+    assert "features" not in config
+
+
+@pytest.mark.asyncio
+async def test_claude_code_disabled_subagents_keep_the_agent_deny_rule() -> None:
+    sandbox = FakeSandbox()
+    harness = create_harness(
+        HarnessConfig(kind="claude_code", executable="claude", subagents_enabled=False),
+        sandbox,
+    )
+
+    await harness.prepare(_runtime())
+
+    settings = json.loads(sandbox.writes["/root/.claude/settings.json"])
+    assert settings["permissions"]["deny"] == ["Agent"]
+
+
+def test_logical_workspace_isolation_creates_the_agent_root_and_states_the_rule() -> None:
+    sandbox = FakeSandbox()
+    harness = create_harness(
+        HarnessConfig(
+            kind="codex",
+            executable="codex",
+            workspace_isolation="logical",
+            agent_workspace_root="/workspace/agents",
+        ),
+        sandbox,
+    )
+
+    import asyncio
+
+    asyncio.run(harness.prepare(_runtime()))
+    probes = [command for command, _, _ in sandbox.commands if command.startswith("mkdir -p /root/.psrl-harness")]
+    assert probes and "/workspace/agents" in probes[0]
+    assert "/testbed" in harness.config.isolate_prompt("/testbed")
+    assert "/workspace/agents" in harness.config.isolate_prompt("/testbed")
+
+
+def test_task_prompt_appends_the_suffix_before_the_isolation_rule() -> None:
+    config = HarnessConfig(
+        kind="codex",
+        executable="codex",
+        prompt_suffix="\n\nDelegate one investigation to a subagent.",
+        workspace_isolation="logical",
+    )
+
+    prompt = config.task_prompt("fix the bug", "/testbed")
+
+    assert prompt.startswith("fix the bug\n\nDelegate one investigation to a subagent.")
+    assert prompt.index("Delegate one investigation") < prompt.index("Workspace isolation")
+    assert config.task_prompt("fix the bug", "/testbed").count("fix the bug") == 1
+
+
+def test_task_prompt_without_suffix_or_isolation_is_the_plain_prompt() -> None:
+    config = HarnessConfig(kind="codex", executable="codex")
+
+    assert config.task_prompt("fix the bug", "/testbed") == "fix the bug"
+
+
+def test_logical_workspace_isolation_is_invalid_with_a_relative_root() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="agent_workspace_root"):
+        HarnessConfig(
+            kind="codex",
+            executable="codex",
+            workspace_isolation="logical",
+            agent_workspace_root="agents",
+        )
+
+
+def test_claude_episode_reports_live_background_subagents() -> None:
+    from psrl.workers.agent_loop.harness.episode import CLAUDE_CODE_STREAM_JSON, episode_summary
+
+    event = {
+        "type": "result",
+        "num_turns": 2,
+        "terminal_reason": "success",
+        "subagent_stats": {
+            "started_in_background": 2,
+            "completed": 1,
+            "failed": 0,
+            "killed": {"parent": 0, "user": 0, "system": 0},
+        },
+    }
+    summary = episode_summary(CLAUDE_CODE_STREAM_JSON, json.dumps(event).encode())
+
+    assert summary is not None
+    assert summary.background_subagents == 1
+
+
+def test_codex_episode_reports_agents_still_live_at_main_close() -> None:
+    from psrl.workers.agent_loop.harness.episode import CODEX_JSONL, episode_summary
+
+    completed = {
+        "type": "item.completed",
+        "item": {
+            "type": "collab_tool_call",
+            "tool": "wait",
+            "agents_states": {"a": {"status": "completed"}, "b": {"status": "running"}},
+        },
+    }
+    summary = episode_summary(CODEX_JSONL, json.dumps(completed).encode())
+
+    assert summary is not None
+    assert summary.background_subagents == 1

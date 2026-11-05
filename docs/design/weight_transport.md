@@ -3339,9 +3339,10 @@ sharding 复核，两轮换版本），不跑完整 RL。覆盖与结论：
 （148 GB/s 聚合、8 读者）。EP→TP 重分片的发布副本是唯一随模型/并行组合增长的新项
 （235B 23.5 GiB/rank），由 `publish_copy_budget_mb` 封顶，需按显存预算配置。
 
-两个架构边界（均已写入 FINDINGS §14）：GDN 的 `linear_attn.in_proj_ba` 在 block FP8 下
-必须保持 bf16（64 行 tile 不能被 TP shard 切开），因此 **Qwen3.5 的 FP8-train + FP8-rollout
-组合当前不支持**；DeepSeek-V3/MLA 的 `W_UK_T`/`W_UV` 是 `kv_b_proj` 的运行时吸收结果，
+两个架构边界（均已写入 FINDINGS §14）：GDN 的 `linear_attn.in_proj_ba` 比一个 128 行
+tile 小，rollout 侧按参数整体量化（见 `fp8_weight_transport.md` §9.4），但 FP8-train 侧在
+TP 切分下给不出整 tile 的 scale，因此 **Qwen3.5 的 FP8-train + FP8-rollout 组合当前不支持**；
+DeepSeek-V3/MLA 的 `W_UK_T`/`W_UV` 是 `kv_b_proj` 的运行时吸收结果，
 不参与传输；每次 pull 落地后读者在 `weights_already_processed()` 下调用 vLLM 上游
 `process_weights_after_loading`（MLA 吸收、MoE kernel、量化 stamp 一并重建，
 实测 4.5–8.2 ms），不支持的量化方法回退到仅 MLA 的 refresh。
@@ -4290,7 +4291,7 @@ train step v 完成
 
 | # | 优化 | 收益 | 独立落地 |
 |---|---|---|---|
-| **0** | **NIXL 新 API 的 micro-benchmark + 升级到 1.5.0** | **已完成**（`tests/nixl/bench_nixl_prepped_xfer.py`）。确认收益成立（5~30×）但有两个前提，见 §3.6.3。Dockerfile 与 install 脚本均 pin **NIXL v1.5.0 + UCX v1.23.x**，否则 Nx5 strided 不可用 | 已做 |
+| **0** | **NIXL 新 API 的 micro-benchmark + 升级到 1.5.0** | **已完成**（`tests/nixl/bench_nixl_prepped_xfer.py`）。确认收益成立（5~30×）但有两个前提，见 §3.6.3。Dockerfile 与 install 脚本均 pin **NIXL v1.5.2 + UCX v1.23.x**，否则 Nx5 strided 不可用 | 已做 |
 | 1 | `prep_xfer_dlist` / `make_prepped_xfer` 替代 per-key `initialize_xfer` | **实测 5~30× 加速且随 descriptor 数放大**（16384 条下 0.014ms vs 0.424ms）。**索引必须用 int32 ndarray**，传 Python list 会慢 15× 并抵消全部收益（§3.6.3） | 是 |
 | 2 | colocate 走 CUDA IPC + stage 边界 offload（`discard(("kv_cache",))`） | 切换成本从「全量 PCIe 往返 + 重握手」降到「权重 D2H/H2D + KV cache 重分配」，**且 colocate 路径完全不碰 NIXL 注册**（§3.7.3），省掉大 MoE 下 14 万次 `register_memory` | 是 |
 | 3 | Nx5 strided 描述符 | 删掉非连续 shard 的中转缓冲（**GPU 上，不是 CPU**——见 §3.6 的更正）与槽位串行等待。**槽位串行等待是主要收益**，显存次之 | 是 |

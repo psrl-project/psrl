@@ -15,10 +15,11 @@ from omegaconf import DictConfig
 from verl import DataProto
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, register
-from psrl.trainer.ppo.resource_pool import PSRL_RayResourcePool
 from verl.trainer.config import AlgoConfig
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import AdvantageEstimator
+
+from psrl.trainer.ppo.resource_pool import PSRL_RayResourcePool
 
 psrl_logger = logging.getLogger(__file__)
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
@@ -483,27 +484,34 @@ def compute_advantage_for_multi_trajectories(
             config=config,
         )
 
-    # final session of each agent loop: uid => (index, row_index)
-    final_sessions: dict[str, tuple[int, int]] = {}
+    # final session of each agent loop: uid => (trajectory index, row index, primary)
+    final_sessions: dict[str, tuple[int, int, bool]] = {}
     row_session_keys = []
+    primaries = data.non_tensor_batch.get("session_primary")
     for i, key in enumerate(batch_keys):
         # A padding key ends in a UUID, not a trajectory index.
         # Its unique `parent_id` and zero mask keep the standalone sample at zero advantage.
         fields = [key] if key.startswith("pad_") else key.rsplit("_", 1)
+        is_primary = bool(primaries[i]) if primaries is not None else False
         if len(fields) == 2:
             uid, index = fields[0], int(fields[1])
             session_key = uid
-            if session_key not in final_sessions or final_sessions[session_key][0] < index:
-                final_sessions[session_key] = (index, i)
+            # Prefer the row the harness marked as the session artifact. Among rows with
+            # the same marker (legacy snapshots mark none), the latest trajectory wins.
+            if session_key not in final_sessions or (is_primary, index) > (
+                final_sessions[session_key][2],
+                final_sessions[session_key][0],
+            ):
+                final_sessions[session_key] = (index, i, is_primary)
         else:
             session_key = key
-            final_sessions[session_key] = (0, i)
+            final_sessions[session_key] = (0, i, is_primary)
         row_session_keys.append(session_key)
 
     # final session indices in batch data
     final_indices = []
     session_key_to_local_index = {}
-    for session_key, (_, row_index) in final_sessions.items():
+    for session_key, (_, row_index, _) in final_sessions.items():
         final_indices.append(row_index)
         session_key_to_local_index[session_key] = len(final_indices) - 1
     row_to_local_index = [session_key_to_local_index[session_key] for session_key in row_session_keys]

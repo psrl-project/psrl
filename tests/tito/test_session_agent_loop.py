@@ -7,6 +7,7 @@ import pytest
 from examples.mini_swe.runner import _build_model_config
 from psrl.utils.rollout.vision_utils import normalize_messages
 from psrl.utils.sampler_distribution import SamplerCapture
+from psrl.utils.subagent_training import SubagentTrainingPolicy
 from psrl.workers.agent_loop.loops import session_agent_loop as module
 from psrl.workers.agent_loop.loops.session_agent_loop import SessionAgentLoop
 
@@ -172,6 +173,30 @@ async def test_get_training_data_always_returns_a_trajectory_list():
 
 
 @pytest.mark.asyncio
+async def test_get_training_data_rejects_a_capture_without_distributions():
+    loop = _bare_loop()
+    loop._capture_sessions = {"sid"}
+    session_data = {
+        "max_trim_tokens": 0,
+        "trajectories": [
+            {
+                "trajectory_id": 7,
+                "accumulated_token_ids": [1, 2, 10],
+                "records": [{"prompt_token_count": 2, "output_logprobs": [[-0.1, 10]]}],
+            }
+        ],
+    }
+
+    async def get_session_data(session_id):
+        assert session_id == "sid"
+        return session_data
+
+    loop.get_session_data = get_session_data
+    with pytest.raises(ValueError, match="Sampler capture was requested"):
+        await loop.get_training_data("sid")
+
+
+@pytest.mark.asyncio
 async def test_get_training_data_collects_all_trajectories():
     loop = _bare_loop("auto")
     session_data = {
@@ -216,7 +241,20 @@ async def test_primary_training_data_returns_the_only_trajectory():
 
 
 @pytest.mark.asyncio
-async def test_primary_training_data_rejects_multiple_trajectories():
+async def test_primary_training_data_selects_the_marked_row():
+    loop = _bare_loop("auto")
+    expected = {"response_ids": [1], "session_primary": True}
+
+    async def get_training_data(session_id):
+        assert session_id == "sid"
+        return [{"response_ids": [0], "session_primary": False}, expected]
+
+    loop.get_training_data = get_training_data
+    assert await loop.get_primary_training_data("sid") is expected
+
+
+@pytest.mark.asyncio
+async def test_primary_training_data_rejects_untagged_multiple_rows():
     loop = _bare_loop("auto")
 
     async def get_training_data(session_id):
@@ -224,7 +262,7 @@ async def test_primary_training_data_rejects_multiple_trajectories():
         return [{"response_ids": [1]}, {"response_ids": [2]}]
 
     loop.get_training_data = get_training_data
-    with pytest.raises(RuntimeError, match="produced 2 trajectories"):
+    with pytest.raises(RuntimeError, match="did not mark a primary"):
         await loop.get_primary_training_data("sid")
 
 
@@ -237,7 +275,7 @@ async def test_get_training_data_rejects_legacy_flat_snapshot():
         return {"session_id": session_id, "accumulated_token_ids": [], "records": []}
 
     loop.get_session_data = get_session_data
-    with pytest.raises(RuntimeError, match="expected a trajectories list"):
+    with pytest.raises(ValueError, match="trajectories list"):
         await loop.get_training_data("sid")
 
 
@@ -352,3 +390,304 @@ def test_build_token_output_trims_routed_experts_to_the_kept_tokens() -> None:
     output = loop.build_token_output(training_data)
 
     assert len(output.routed_experts) == 30000 + (_BUDGET - 30000)
+
+
+def _subagent_session(*, mode: str = "main_only") -> dict:
+    return {
+        "session_id": "sid",
+        "max_trim_tokens": 0,
+        "main_agent_id": "main",
+        "subagent_training": {
+            "mode": mode,
+            "train_agents": [],
+            "shared_prefix": "owner",
+            "reward": "session",
+            "loss_weight": {"main": 1.0, "subagent": 2.0},
+            "require_primary_capture": True,
+            "val_mode": "main_only",
+        },
+        "trajectories": [
+            {
+                "trajectory_id": 0,
+                "thread_source": "main",
+                "agent_id": "main",
+                "parent_trajectory_id": None,
+                "capture": "full",
+                "accumulated_token_ids": [1, 2, 3],
+                "records": [
+                    {
+                        "prompt_token_count": 2,
+                        "output_token_ids": [3],
+                        "output_logprobs": [[-0.1, 3]],
+                        "owner_trajectory_id": 0,
+                        "capture": "full",
+                    }
+                ],
+            },
+            {
+                "trajectory_id": 1,
+                "thread_source": "subagent",
+                "agent_id": "sub-1",
+                "parent_trajectory_id": 0,
+                "capture": "full",
+                "accumulated_token_ids": [1, 2, 3, 4, 5],
+                "records": [
+                    {
+                        "prompt_token_count": 2,
+                        "output_token_ids": [3],
+                        "output_logprobs": [[-0.1, 3]],
+                        "owner_trajectory_id": 0,
+                        "capture": "full",
+                    },
+                    {
+                        "prompt_token_count": 4,
+                        "output_token_ids": [5],
+                        "output_logprobs": [[-0.2, 5]],
+                        "owner_trajectory_id": 1,
+                        "capture": "full",
+                    },
+                ],
+            },
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_training_data_main_only_returns_only_the_main_row():
+    loop = _bare_loop("auto")
+    session = _subagent_session()
+
+    async def get_session_data(session_id):
+        return session
+
+    loop.get_session_data = get_session_data
+    training_data = await loop.get_training_data("sid")
+
+    assert len(training_data) == 1
+    primary = training_data[0]
+    assert primary["trajectory_id"] == 0
+    assert primary["session_primary"] is True
+    assert primary["thread_source"] == "main"
+    assert primary["loss_weight"] == 1.0
+    assert primary["response_ids"] == [3]
+    assert primary["response_mask"] == [1]
+
+
+@pytest.mark.asyncio
+async def test_get_training_data_all_returns_subagent_row_with_session_primary_on_main():
+    loop = _bare_loop("auto")
+    session = _subagent_session(mode="all")
+
+    async def get_session_data(session_id):
+        return session
+
+    loop.get_session_data = get_session_data
+    training_data = await loop.get_training_data("sid")
+
+    assert [item["trajectory_id"] for item in training_data] == [0, 1]
+    assert [item["session_primary"] for item in training_data] == [True, False]
+    subagent = training_data[1]
+    assert subagent["agent_id"] == "sub-1"
+    assert subagent["parent_trajectory_id"] == 0
+    assert subagent["prompt_ids"] == [1, 2, 3, 4]
+    assert subagent["response_ids"] == [5]
+    assert subagent["response_mask"] == [1]
+    assert subagent["loss_weight"] == 2.0
+
+
+@pytest.mark.asyncio
+async def test_get_training_data_uses_the_snapshot_policy_not_the_loop_config():
+    loop = _bare_loop("auto")
+    session = _subagent_session(mode="all")
+
+    async def get_session_data(session_id):
+        return session
+
+    loop.get_session_data = get_session_data
+    training_data = await loop.get_training_data("sid")
+
+    assert len(training_data) == 2
+
+
+@pytest.mark.asyncio
+async def test_get_primary_training_data_returns_the_main_row():
+    loop = _bare_loop("auto")
+    expected = {"trajectory_id": 0, "session_primary": True}
+
+    async def get_training_data(session_id, *, validate=None):
+        assert validate is None
+        return [{"trajectory_id": 1, "session_primary": False}, expected]
+
+    loop.get_training_data = get_training_data
+    assert await loop.get_primary_training_data("sid") is expected
+
+
+@pytest.mark.asyncio
+async def test_create_session_sends_the_resolved_subagent_policy(monkeypatch):
+    captured = {}
+
+    async def fake_post(url, payload, max_retries=5, headers=None, **kwargs):
+        del url, max_retries, kwargs
+        captured["payload"] = payload
+        return {"session_id": "sid"}
+
+    monkeypatch.setattr(module, "post", fake_post)
+    loop = _bare_loop()
+    loop.subagent_training = SubagentTrainingPolicy.from_mapping(
+        {"mode": "selected", "val_mode": "selected", "train_agents": ["x"]}
+    )
+    await loop.create_session({"uid": 1})
+
+    assert captured["payload"]["subagent_training"]["mode"] == "selected"
+    assert captured["payload"]["subagent_training"]["val_mode"] == "selected"
+    assert captured["payload"]["subagent_training"]["train_agents"] == ["x"]
+
+
+@pytest.mark.asyncio
+async def test_create_session_applies_a_row_level_policy_override(monkeypatch):
+    captured = {}
+
+    async def fake_post(url, payload, max_retries=5, headers=None, **kwargs):
+        del url, max_retries, kwargs
+        captured["payload"] = payload
+        return {"session_id": "sid"}
+
+    monkeypatch.setattr(module, "post", fake_post)
+    loop = _bare_loop()
+    loop.subagent_training = SubagentTrainingPolicy.from_mapping({"mode": "main_only"})
+    await loop.create_session({"uid": 1, "extra_info": {"subagent_training": {"mode": "all"}}})
+
+    assert captured["payload"]["subagent_training"]["mode"] == "all"
+
+
+def test_shared_context_annotation_uses_the_tree():
+    loop = _bare_loop("auto")
+    trajectory = {
+        "trajectory_id": 1,
+        "accumulated_token_ids": [1, 2, 3, 4, 5],
+        "records": [
+            {"prompt_token_count": 2, "output_token_ids": [3], "output_logprobs": [[-0.1, 3]]},
+            {"prompt_token_count": 4, "output_token_ids": [5], "output_logprobs": [[-0.2, 5]]},
+        ],
+    }
+    session = {
+        "tree": {
+            "nodes": [
+                {"id": 10, "stored": True, "trajectory_ids": [0, 1]},
+                {"id": 11, "stored": True, "trajectory_ids": [1]},
+            ],
+            "leaves": [{"trajectory_id": 1, "path_node_ids": [10, 11]}],
+        }
+    }
+
+    loop._annotate_shared_records(trajectory, session)
+
+    assert [record["shared"] for record in trajectory["records"]] == [True, False]
+
+
+def test_context_mode_masks_a_shared_owned_turn():
+    loop = _bare_loop("auto")
+    trajectory = {
+        "trajectory_id": 0,
+        "accumulated_token_ids": [1, 2, 3],
+        "records": [
+            {
+                "prompt_token_count": 2,
+                "output_token_ids": [3],
+                "output_logprobs": [[-0.1, 3]],
+                "owner_trajectory_id": 0,
+            }
+        ],
+        "shared": True,
+    }
+    trajectory["records"][0]["shared"] = True
+    session = {"max_trim_tokens": 0}
+
+    built = loop.build_training_data_from_trajectory(
+        trajectory,
+        session,
+        trainable_trajectory_id=0,
+        shared_prefix="context",
+    )
+
+    assert built["response_mask"] == [0]
+
+
+@pytest.mark.asyncio
+async def test_mark_main_close_records_the_router_count(monkeypatch):
+    captured = {}
+
+    async def fake_post(url, payload, max_retries=5, headers=None, **kwargs):
+        del max_retries, headers, kwargs
+        captured["url"] = url
+        captured["payload"] = payload
+        return {"background_live_count": 2}
+
+    monkeypatch.setattr(module, "post", fake_post)
+    loop = _bare_loop()
+    loop._created_sessions = {"sid"}
+    loop._main_closed_sessions = set()
+
+    assert await loop.mark_main_close("sid") == 2
+    assert loop._background_subagent_counts == {"sid": 2}
+    assert captured["url"].endswith("/sessions/sid/main-close")
+
+
+@pytest.mark.asyncio
+async def test_mark_main_close_keeps_counts_per_session(monkeypatch):
+    counts = {"a": 2, "b": 0}
+
+    async def fake_post(url, payload, max_retries=5, headers=None, **kwargs):
+        del payload, max_retries, headers, kwargs
+        return {"background_live_count": counts[url.rsplit("/", 2)[-2]]}
+
+    monkeypatch.setattr(module, "post", fake_post)
+    loop = _bare_loop()
+    loop._created_sessions = {"a", "b"}
+    loop._main_closed_sessions = set()
+
+    assert await loop.mark_main_close("a") == 2
+    assert await loop.mark_main_close("b") == 0
+    assert await loop.mark_main_close("a") == 2
+
+
+@pytest.mark.asyncio
+async def test_mark_main_close_uses_the_harness_lifecycle_count(monkeypatch):
+    captured = {}
+
+    async def fake_post(url, payload, max_retries=5, headers=None, **kwargs):
+        del url, max_retries, headers, kwargs
+        captured["payload"] = payload
+        return {"background_live_count": 1}
+
+    monkeypatch.setattr(module, "post", fake_post)
+    loop = _bare_loop()
+    loop._created_sessions = {"sid"}
+    loop._main_closed_sessions = set()
+    loop._episode_summary = SimpleNamespace(background_subagents=1)
+
+    assert await loop.mark_main_close("sid") == 1
+    assert captured["payload"] == {"background_subagents": 1}
+
+
+@pytest.mark.asyncio
+async def test_get_training_data_attaches_the_background_count(monkeypatch):
+    async def fake_post(url, payload, max_retries=5, headers=None, **kwargs):
+        del url, payload, max_retries, headers, kwargs
+        return {"background_live_count": 2}
+
+    monkeypatch.setattr(module, "post", fake_post)
+    loop = _bare_loop("auto")
+    session = _subagent_session()
+    loop._created_sessions = {"sid"}
+    loop._main_closed_sessions = set()
+
+    async def get_session_data(session_id, *, format=None):
+        assert session_id == "sid"
+        return session
+
+    loop.get_session_data = get_session_data
+    training_data = await loop.get_training_data("sid")
+
+    assert training_data
+    assert all(item["background_subagent_count"] == 2 for item in training_data)

@@ -96,6 +96,7 @@ examples/mini_swe/
 ├── fsdp_qwen_7b_swe_smith.sh             # Launch script — SWE-smith-py (FSDP, 7B)
 ├── fsdp_qwen_7b_swe_gym.sh               # Launch script — SWE-Gym (FSDP, 7B)
 ├── megatron_qwen_4b_swe_cc.sh            # Launch script — Claude Code harness (Megatron, Qwen3.5-4B, SWE-Gym-293)
+├── megatron_qwen_4b_swe_codex_subagent.sh # Launch script — Codex subagent validation (main-only training)
 ├── megatron_qwen_4b_swe_smith.sh         # Launch script — SWE-smith (Megatron, 4B, native loop)
 ├── megatron_qwen_7b_swe_gym.sh           # Launch script — SWE-Gym (Megatron, 7B)
 ├── megatron_qwen_8b_swe_smith.sh         # Launch script — SWE-smith (Megatron, 8B)
@@ -551,7 +552,7 @@ actually leak (see §2).
 ### 1. Harness runtime trees (host-side, read-only mount)
 
 The harness executables are **self-contained native binaries** — Claude Code
-2.1.233 (linux-x64) and Codex 0.154.0 (linux-x64). There is no Node, no npm and
+2.1.295 (linux-x64) and Codex 0.164.0 (linux-x64). There is no Node, no npm and
 no in-sandbox installation. Each sandbox binds one runtime tree read-only; the
 mount path is the harness config's `runtime_mount` (default `/opt/harness`) and
 the executable resolves to `<runtime_mount>/bin/<executable>`.
@@ -651,7 +652,7 @@ docker run --rm "$tag" bash -lc \
 
 | Aspect | mini-SWE-agent | `claude_code` harness |
 |--------|----------------|------------------------|
-| CLI / agent location | Host-side Python library (`pip install mini-swe-agent`), imported by the runner | **Sandbox-resident CLI**: a self-contained native binary (Claude Code 2.1.233 / Codex 0.154.0), bind-mounted read-only from the host runtime tree — no Node, no npm |
+| CLI / agent location | Host-side Python library (`pip install mini-swe-agent`), imported by the runner | **Sandbox-resident CLI**: a self-contained native binary (Claude Code 2.1.295 / Codex 0.164.0), bind-mounted read-only from the host runtime tree — no Node, no npm |
 | Per-sandbox install | None (pure Python on the host) | **None** — a single `<runtime_mount>/bin/<executable> --version` probe; the executable is mounted read-only |
 | Network dependency | None at rollout time | None at rollout time: the runtime tree is built ahead of time (`build_harness_runtimes.sh`) |
 | System prompt / tools | Native mini-SWE-agent template | Keeps Claude Code's stock system prompt (`system_prompt_mode: none`) and full default tool catalog (`tools: null`); task + integrity rules ride in the user message, and safety is enforced post-hoc by the integrity scan |
@@ -714,6 +715,25 @@ During the first run, confirm:
 `tito_tool_normalization=codex` selects SMG's Codex tool-input canonicalizer (drops the
 redundant `cd /testbed && ` prefix on `exec_command`) so replayed histories keep matching
 the stored TITO prefix.
+
+**Subagent validation (Megatron, Codex).** `megatron_qwen_4b_swe_codex_subagent.sh`
+is the Codex recipe with the native subagent surface enabled. It uses
+`subagent_training.mode=main_only`, so subagent turns are stored as token-only
+replay context and the main agent remains the only training row. The harness
+config also enables logical workspace isolation and appends a short task
+instruction that requires one delegated investigation, so the path is exercised
+rather than left to chance. The script requires the companion `smg-subagent`
+binding: it carries the turn `sequence` and compact snapshot format.
+
+```bash
+bash examples/mini_swe/megatron_qwen_4b_swe_codex_subagent.sh
+```
+
+In the run, confirm that the Codex trajectory contains a subagent spawn and that
+the emitted rows are main-only; the subagent's calls should use `tokens` capture
+and never appear as a separate training row. `SWE_GYM_293_ROOT` overrides the
+shared parquet directory and `PSRL_HARNESS_RUNTIME_ROOT` overrides the shared
+runtime-tree root; both defaults point at the cluster's shared filesystem.
 
 **Generic (any model/dataset, FSDP).** Point the trainer at the harness config
 and a parquet whose `agent_name` selects the harness. Harness mode requires TITO
@@ -832,7 +852,10 @@ Harness settings live under `harness` in `swebench_harness_config.yaml`:
 | `allowed_permissions` | Headless pre-approval rules written to `settings.json` `permissions.allow`; does not restrict the catalog. |
 | `permission_mode` | CLI permission mode (`acceptEdits`; Claude rejects `bypassPermissions` as root). |
 | `system_prompt` / `system_prompt_mode` | `none` keeps the CLI's stock system prompt; `append` / `replace` inject or replace it. |
-| `subagents_enabled` | `false` denies the Claude `Agent` tool and background tasks. |
+| `subagents_enabled` | `false` denies the Claude `Agent` tool and background tasks; for Codex it removes `multi_agent_version` from the model catalog. |
+| `prompt_suffix` | Optional task-level instruction appended to every episode prompt; use it for experiment-specific guidance instead of changing the system prompt. |
+| `workspace_isolation` | `none` keeps the shared task root. `logical` states the main root and per-agent directory convention in the prompt, creates the agent root, and exports `PSRL_MAIN_WORKSPACE` / `PSRL_AGENT_WORKSPACE_ROOT`. It is advisory, not a filesystem boundary. |
+| `agent_workspace_root` | In-sandbox root for `workspace_isolation: logical` (default `/workspace/agents`); must be absolute. |
 | `compaction.compact_percent` | Share of the rollout `max_model_len` at which the CLI auto-compacts (same threshold drives the `x-smg-prompt-too-long-limit` header). |
 | `trajectory_format` | Integrity-scan dispatch key: `claude_code_stream_json`, `codex_jsonl`, `auto`, or `plain_text`. |
 | `runtime_mount` | In-sandbox path of the read-only runtime tree; executable resolves to `<runtime_mount>/bin/<executable>` (default `/opt/harness`). |

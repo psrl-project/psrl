@@ -34,7 +34,24 @@ fi
 _PSRL_CONDA_LIB=/apdcephfs_zwfy10/share_303541817/lhy/anaconda3/lib
 _PSRL_NIXL_PLUGINS=/apdcephfs_zwfy10/share_303541817/lhy/nixl_runtime/plugins
 
+# NIXL and the planner identify a node by `get_local_ip()`, which falls back to
+# `socket.gethostbyname(hostname)`. On these hosts the hostname resolves to several
+# addresses, including the 29.161.x RoCE bonds that are not mutually reachable between
+# every pair of nodes. The cluster mesh is the 29.162.x bond1 address. Pin it unless the
+# caller already chose one.
+if [ -z "${LOCAL_NODE_IP:-}" ]; then
+    _PSRL_BOND1_IP=$(ip -o -4 addr show bond1 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
+    if [ -n "${_PSRL_BOND1_IP}" ]; then
+        export LOCAL_NODE_IP="${_PSRL_BOND1_IP}"
+    fi
+    unset _PSRL_BOND1_IP
+fi
+
 export LD_LIBRARY_PATH="${_PSRL_CONDA_LIB}:${LD_LIBRARY_PATH:-}"
+# The nixl_cu12 wheel's bindings have a RUNPATH to an API-2 libnixl, while the
+# staged runtime tree and this cluster's libnixl are the API-1 pair. Preload the
+# cluster library so the bindings and plugins stay on the same API.
+export LD_PRELOAD="${_PSRL_CONDA_LIB}/libnixl.so${LD_PRELOAD:+:${LD_PRELOAD}}"
 export NIXL_PLUGIN_DIR="${_PSRL_NIXL_PLUGINS}"
 
 # Device list and RoCE reachability mode, taken from the cluster's own env

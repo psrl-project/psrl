@@ -904,10 +904,8 @@ class GenClientActor:
             ignored_layers = [
                 f"model.layers.{i}.mlp.gate" for i in range(model_config.get("num_layers", 128))
             ]
-            # Some projections cannot be block-quantised and tensor-parallel at once: a
-            # shard that cuts a quantisation tile has no valid scale view. Qwen3.5's
-            # GDN `in_proj_ba` has 64 output rows, quantised in 64-row tiles, so TP2
-            # would cut one; it stays bf16, as it must in production too.
+            # A config may still name projections that cannot be block-quantised at all,
+            # for example one whose kernel requires a larger tile than the layer has.
             for suffix in model_config.get("fp8_ignored_layer_suffixes", []):
                 ignored_layers += [
                     f"model.layers.{i}.{suffix}" for i in range(model_config.get("num_layers", 128))

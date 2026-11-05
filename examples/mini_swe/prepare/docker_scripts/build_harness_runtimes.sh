@@ -19,9 +19,9 @@
 #   bash build_harness_runtimes.sh claude_code (one harness)
 #
 # Pinned versions (single source of truth, bump here to upgrade):
-#   Claude Code 2.1.233 (linux-x64)
+#   Claude Code 2.1.295 (linux-x64)
 #
-#   Codex 0.160.1 (linux-x64)
+#   Codex 0.164.0 (linux-x64)
 # Both come from the npm registry as platform packages. NPM_REGISTRY defaults to
 #
 # registry.npmjs.org. Point it at a mirror (e.g. https://mirrors.tencent.com/npm)
@@ -34,15 +34,15 @@ NPM_REGISTRY="${NPM_REGISTRY:-https://registry.npmjs.org}"
 force=0
 if [ "${1:-}" = "--force" ]; then force=1; shift; fi
 
-CLAUDE_CODE_VERSION="${CLAUDE_CODE_VERSION:-2.1.233}"
+CLAUDE_CODE_VERSION="${CLAUDE_CODE_VERSION:-2.1.295}"
 CLAUDE_CODE_PLATFORM="${CLAUDE_CODE_PLATFORM:-linux-x64}"
-# sha256 of the linux-x64 native binary published in the 2.1.233 manifest.
-CLAUDE_CODE_SHA256="${CLAUDE_CODE_SHA256:-55d281096f57d411ebbdd94dbf5e9ff3accb7c05713e37348c2c11d4b83bf9d9}"
+# sha256 of the linux-x64 native binary published in the 2.1.295 manifest.
+CLAUDE_CODE_SHA256="${CLAUDE_CODE_SHA256:-4503bfe11a6c7fcc1e0b39b5e0d347c04248f750b03b0977b3ad6b531fe6f358}"
 
-CODEX_VERSION="${CODEX_VERSION:-0.160.1}"
+CODEX_VERSION="${CODEX_VERSION:-0.164.0}"
 CODEX_PLATFORM="${CODEX_PLATFORM:-linux-x64}"
-# sha256 of the native binary at vendor/<triple>/bin/codex in the 0.160.1 manifest.
-CODEX_SHA256="${CODEX_SHA256:-f34a4d2301892ae96c90097786bfe5dc269f187b6f69faf42a7b357b8c081e35}"
+# sha256 of the native binary at vendor/<triple>/bin/codex in the 0.164.0 manifest.
+CODEX_SHA256="${CODEX_SHA256:-b93f6811d3f653f0fb83be4050d857fb9abbb111dfa2ce160563327daff7f306}"
 
 work=""
 cleanup() { [ -n "$work" ] && rm -rf "$work"; }

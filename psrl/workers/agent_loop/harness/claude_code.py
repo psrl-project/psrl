@@ -24,6 +24,10 @@ class ClaudeCodeHarness(Harness):
         settings_env = {
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
             "CLAUDE_CODE_TOTAL_TOKENS_REMINDER": "off",
+            # A custom session-router base URL is not first-party, so the CLI gates
+            # request-class and agent-id headers behind this flag. Without it the
+            # router cannot see which model calls belong to a subagent.
+            "CLAUDE_CODE_GATEWAY_HINT_HEADERS": "1",
         }
         if self.config.disable_prompt_caching:
             settings_env["DISABLE_PROMPT_CACHING"] = "1"

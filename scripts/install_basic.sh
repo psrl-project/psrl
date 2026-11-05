@@ -37,21 +37,19 @@ python -m uv pip install --no-cache-dir "grpcio-tools>=1.81.1" "protobuf>=7.35.1
 
 echo "4. Install FlashAttention and FlashInfer"
 # Install FlashAttention 2 for packages that import `flash_attn`.
+#
+# FlashAttention 3 is deliberately not installed. TransformerEngine (pinned by
+# install_megatron.sh) selects FlashAttention 3 whenever the `flash_attn_3`
+# distribution is present, and its context-parallel forward calls the 3.0.0b
+# interface. The interface that ships with FlashAttention 2.8.1's Hopper tree
+# inserted a positional argument into that interface, so every context-parallel
+# training forward fails with a missing-argument error. TransformerEngine accepts
+# FlashAttention 2 through 2.8.1, which is the version installed here.
 FLASH_ATTN_CUDA_ARCHS=90 \
 FLASH_ATTENTION_FORCE_BUILD="TRUE" \
 FLASH_ATTENTION_FORCE_CXX11_ABI="FALSE" \
 FLASH_ATTENTION_SKIP_CUDA_BUILD="FALSE" \
 python -m uv pip install -U "flash-attn==2.8.1" --no-build-isolation --no-deps
-
-# Install FlashAttention 3 beta from the Hopper source tree.
-git clone --depth 1 --branch v2.8.1 https://github.com/Dao-AILab/flash-attention.git flash_attn_src
-pushd flash_attn_src/hopper
-python setup.py install
-python_path=`python -c "import site; print(site.getsitepackages()[0])"`
-mkdir -p $python_path/flash_attn_3
-wget -P $python_path/flash_attn_3 https://raw.githubusercontent.com/Dao-AILab/flash-attention/7b0bfcc3d1f69786f0c4277c582ad58acdfb297d/hopper/flash_attn_interface.py
-popd
-rm -rf flash_attn_src
 
 echo "5. Install apex"
 mkdir -p apex_src

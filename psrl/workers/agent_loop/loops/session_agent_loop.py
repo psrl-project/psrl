@@ -7,7 +7,10 @@ from dataclasses import dataclass, field
 from psrl.utils.common.http_utils import SESSION_TURN_BUDGET_HEADER, delete, get, post
 from psrl.utils.rollout.vision_utils import normalize_messages
 from psrl.utils.sampler_distribution import SamplerCapture, configure_capture
+from psrl.utils.subagent_training import SubagentTrainingPolicy
+from psrl.utils.tito.snapshot import SUPPORTED_FORMATS, normalize_session_snapshot
 from psrl.utils.tito.training_data import build_training_data
+from psrl.utils.tito.trajectory_selection import select_trainable_trajectories
 from psrl.workers.agent_loop.agent_data import AgentData
 from psrl.workers.agent_loop.context import AgentLoopContext
 from psrl.workers.agent_loop.loops.base_agent_loop import AgentLoopBase
@@ -38,8 +41,23 @@ class SessionAgentLoop(AgentLoopBase):
         self.session_router_url = context.session_router_url.rstrip("/")
         self.trajectory_id_strategy = get_trajectory_id_strategy(context.config)
         self.max_turns = context.config.gen_actor_rollout_ref.rollout.multi_turn.max_turns
+        self.subagent_training = SubagentTrainingPolicy.from_mapping(
+            self.config.psrl.agentic_rl.get("subagent_training", {})
+        )
+        self.tito_snapshot_format = str(
+            self.config.psrl.rollout_gateway.get("tito_snapshot_format", "compact")
+        ).lower()
+        if self.tito_snapshot_format not in SUPPORTED_FORMATS:
+            raise ValueError(
+                f"psrl.rollout_gateway.tito_snapshot_format must be one of {SUPPORTED_FORMATS}, "
+                f"got {self.tito_snapshot_format!r}."
+            )
         self.session_snapshot = None  # TITO session snapshot for offline analysis
         self._capture_sessions: set[str] = set()
+        self._validation_sessions: set[str] = set()
+        self._created_sessions: set[str] = set()
+        self._main_closed_sessions: set[str] = set()
+        self._background_subagent_counts: dict[str, int] = {}
 
     def get_generate_fields(self) -> list[str]:
         fields = super().get_generate_fields()
@@ -87,10 +105,17 @@ class SessionAgentLoop(AgentLoopBase):
             headers[SESSION_TURN_BUDGET_HEADER] = str(budget)
         response = await post(
             f"{self.session_router_url}/sessions",
-            payload={},
+            payload={"subagent_training": self.session_policy_for_request(request).to_dict()},
             headers=headers,
         )
         session_id = response["session_id"]
+        created = getattr(self, "_created_sessions", None)
+        if created is None:
+            created = set()
+            self._created_sessions = created
+        created.add(session_id)
+        if request.get("validate", False):
+            self._validation_sessions.add(session_id)
         if (
             not request.get("validate", False)
             and self.rollout_config.get("sampler_distribution", "disabled") != "disabled"
@@ -102,12 +127,49 @@ class SessionAgentLoop(AgentLoopBase):
     async def delete_session(self, session_id: str) -> None:
         """Delete one TITO session after its requests have drained."""
         self._capture_sessions.discard(session_id)
+        self._validation_sessions.discard(session_id)
+        getattr(self, "_created_sessions", set()).discard(session_id)
+        getattr(self, "_main_closed_sessions", set()).discard(session_id)
+        getattr(self, "_background_subagent_counts", {}).pop(session_id, None)
         response = await delete(f"{self.session_router_url}/sessions/{session_id}")
         psrl_logger.debug("Deleted TITO session %r with status %r.", session_id, response.status)
 
-    async def get_session_data(self, session_id: str) -> dict:
-        """Fetch one TITO session snapshot."""
-        return await get(f"{self.session_router_url}/sessions/{session_id}")
+    async def get_session_data(self, session_id: str, *, format: str | None = None) -> dict:
+        """Fetch one TITO session snapshot in the requested wire format."""
+        return await get(
+            f"{self.session_router_url}/sessions/{session_id}",
+            params={"format": format or self.tito_snapshot_format},
+        )
+
+    async def mark_main_close(self, session_id: str) -> int:
+        """Mark the main episode closed and return the live background count.
+
+        The router never waits for background work here; it only observes the
+        in-flight subagents at the boundary. A session created outside this loop
+        (a test or an external caller) has no router state to close.
+        """
+        if session_id not in getattr(self, "_created_sessions", set()):
+            return 0
+        counts = getattr(self, "_background_subagent_counts", None)
+        if counts is None:
+            counts = {}
+            self._background_subagent_counts = counts
+        if session_id in getattr(self, "_main_closed_sessions", set()):
+            return counts.get(session_id, 0)
+        summary = getattr(self, "_episode_summary", None)
+        reported = getattr(summary, "background_subagents", None)
+        payload = {} if reported is None else {"background_subagents": int(reported)}
+        response = await post(
+            f"{self.session_router_url}/sessions/{session_id}/main-close",
+            payload=payload,
+        )
+        count = int((response or {}).get("background_live_count", 0))
+        counts[session_id] = count
+        self._main_closed_sessions.add(session_id)
+        psrl_logger.info(
+            "TITO session %r main close: background_live_count=%d.", session_id, count
+        )
+        return count
 
     @asynccontextmanager
     async def session_scope(self, request: dict) -> AsyncIterator[str]:
@@ -175,12 +237,22 @@ class SessionAgentLoop(AgentLoopBase):
         async with self.session_scope(request) as session_id:
             result = await self.run_session(request, self.session_api_url(session_id))
             training_data = await self.get_training_data(session_id)
-            if not training_data or any(item["num_turns"] == 0 or not item["response_ids"] for item in training_data):
+            if not training_data or any(
+                item.get("trainable_turns", item["num_turns"]) == 0 or not item["response_ids"]
+                for item in training_data
+            ):
                 return None, TerminateReason.ROLLOUT_ERROR
 
             outputs = [self.build_token_output(item, extra_fields=result.extra_fields) for item in training_data]
-            output: TokenOutput | list[TokenOutput] = outputs[0] if len(outputs) == 1 else outputs
             self.attach_tito_tree_metadata(training_data, outputs)
+            # The base reward path grades the last row. Order the primary last so the
+            # session reward is computed from the main artifact, not a subagent row.
+            ordered = sorted(
+                zip(training_data, outputs),
+                key=lambda pair: bool(pair[0].get("session_primary")),
+            )
+            outputs = [output for _, output in ordered]
+            output: TokenOutput | list[TokenOutput] = outputs[0] if len(outputs) == 1 else outputs
             scored_output = await self.compute_reward_score(output, **request)
             if scored_output is None:
                 return None, TerminateReason.ABORTED
@@ -248,18 +320,60 @@ class SessionAgentLoop(AgentLoopBase):
                 headers=headers,
             )
 
-    async def get_training_data(self, session_id: str) -> list[dict]:
-        """Fetch and convert every trajectory in a TITO session snapshot."""
-        session_data = await self.get_session_data(session_id)
+    def _configured_policy(self) -> SubagentTrainingPolicy:
+        """Return this loop's configured policy."""
+        return getattr(self, "subagent_training", None) or SubagentTrainingPolicy()
+
+    def session_policy_for_request(self, request: dict) -> SubagentTrainingPolicy:
+        """Resolve the policy for one dataset row, including a row-level override."""
+        policy = self._configured_policy()
+        extra_info = request.get("extra_info") or {}
+        override = extra_info.get("subagent_training") if isinstance(extra_info, dict) else None
+        return policy.overrides(override)
+
+    def _session_policy(self, session_data: dict) -> SubagentTrainingPolicy:
+        """Return the policy persisted in the snapshot, falling back to this loop's config."""
+        mapping = session_data.get("subagent_training")
+        if not mapping:
+            return self._configured_policy()
+        return SubagentTrainingPolicy.from_mapping(mapping)
+
+    async def get_training_data(self, session_id: str, *, validate: bool | None = None) -> list[dict]:
+        """Fetch and convert the trainable trajectories in a TITO session snapshot."""
+        background_count = await self.mark_main_close(session_id)
+        session_data = normalize_session_snapshot(await self.get_session_data(session_id))
         self.session_snapshot = session_data
         trajectories = session_data.get("trajectories")
         if not isinstance(trajectories, list):
             raise RuntimeError(
                 f"TITO session {session_id!r} returned an invalid snapshot: expected a trajectories list."
             )
-        training_data = [
-            self.build_training_data_from_trajectory(trajectory, session_data) for trajectory in trajectories
-        ]
+        policy = self._session_policy(session_data)
+        if validate is None:
+            validate = session_id in getattr(self, "_validation_sessions", set())
+        selections = select_trainable_trajectories(session_data, policy, validate=validate)
+        training_data: list[dict] = []
+        for selection in selections:
+            item = self.build_training_data_from_trajectory(
+                selection.trajectory,
+                session_data,
+                trainable_trajectory_id=selection.trainable_trajectory_id,
+                shared_prefix=policy.shared_prefix,
+            )
+            item.update(
+                {
+                    "thread_source": selection.thread_source,
+                    "agent_id": selection.agent_id,
+                    "parent_trajectory_id": selection.parent_trajectory_id,
+                    "trainable": True,
+                    "capture": selection.capture,
+                    "session_primary": selection.is_primary,
+                    "loss_weight": selection.loss_weight,
+                    "trainable_turns": item.get("trainable_turns", item["num_turns"]),
+                    "background_subagent_count": background_count,
+                }
+            )
+            training_data.append(item)
         if session_id in self._capture_sessions and any(
             item["response_ids"] and item.get("sampler_distribution") is None for item in training_data
         ):
@@ -267,22 +381,67 @@ class SessionAgentLoop(AgentLoopBase):
         return training_data
 
     async def get_primary_training_data(self, session_id: str) -> dict:
-        """Collect the single linear trajectory expected by native session loops."""
+        """Collect the session primary, which native loops use for scoring."""
         training_data = await self.get_training_data(session_id)
-        if len(training_data) != 1:
-            raise RuntimeError(
-                f"TITO session {session_id!r} produced {len(training_data)} trajectories; "
-                "expected one linear trajectory."
+        primary = next((item for item in training_data if item.get("session_primary")), None)
+        if primary is None:
+            if len(training_data) == 1:
+                return training_data[0]
+            raise RuntimeError(f"TITO session {session_id!r} did not mark a primary trajectory.")
+        return primary
+
+    @staticmethod
+    def _annotate_shared_records(trajectory: dict, session_data: dict) -> None:
+        """Mark records whose TITO node another trajectory also replays.
+
+        The tree is the only authority for sharing. A leaf path lists every node from
+        root to leaf; a node that appears in more than one trajectory's path is shared.
+        Phantom nodes have no stored record, so they are skipped rather than consuming
+        a record from the path.
+        """
+        tree = session_data.get("tree")
+        if not isinstance(tree, dict):
+            return
+        nodes = {node.get("id"): node for node in tree.get("nodes", []) or []}
+        leaf = next(
+            (
+                leaf
+                for leaf in tree.get("leaves", []) or []
+                if leaf.get("trajectory_id") == trajectory.get("trajectory_id")
+            ),
+            None,
+        )
+        if leaf is None:
+            return
+        stored_nodes = [
+            nodes[node_id]
+            for node_id in leaf.get("path_node_ids", []) or []
+            if node_id in nodes and nodes[node_id].get("stored")
+        ]
+        records = trajectory.get("records", []) or []
+        if len(stored_nodes) != len(records):
+            psrl_logger.debug(
+                "TITO leaf %s has %d stored path nodes but %d records; shared annotation skipped.",
+                trajectory.get("trajectory_id"),
+                len(stored_nodes),
+                len(records),
             )
-        return training_data[0]
+            return
+        for record, node in zip(records, stored_nodes):
+            record["shared"] = len(node.get("trajectory_ids", []) or []) > 1
 
     def build_training_data_from_trajectory(
         self,
         trajectory: dict,
         session_data: dict,
+        *,
+        trainable_trajectory_id: int | None = None,
+        shared_prefix: str = "owner",
     ) -> dict:
         """Convert one trajectory from an already-fetched session snapshot."""
         records = trajectory.get("records", [])
+        if shared_prefix == "context":
+            self._annotate_shared_records(trajectory, session_data)
         if self.config.psrl.rollout_gateway.tito_debug:
             self._validate_records(records)
         training_data = build_training_data(
@@ -290,6 +449,8 @@ class SessionAgentLoop(AgentLoopBase):
             records,
             max_trim_tokens=session_data.get("max_trim_tokens", 0),
             strict_validation=self.rollout_config.get("sampler_strict_validation", False),
+            trainable_trajectory_id=trainable_trajectory_id,
+            shared_prefix=shared_prefix,
         )
         distribution = training_data.get("sampler_distribution")
         if distribution is not None:
@@ -326,6 +487,19 @@ class SessionAgentLoop(AgentLoopBase):
 
         trajectory_fields = dict(extra_fields or {})
         trajectory_fields["trajectory_id"] = training_data["trajectory_id"]
+        for field_name in (
+            "thread_source",
+            "agent_id",
+            "parent_trajectory_id",
+            "trainable",
+            "capture",
+            "session_primary",
+            "loss_weight",
+            "trainable_turns",
+            "background_subagent_count",
+        ):
+            if field_name in training_data:
+                trajectory_fields[field_name] = training_data[field_name]
         distribution = training_data.get("sampler_distribution")
         if distribution is not None:
             distribution = distribution.prefix(len(response_ids))

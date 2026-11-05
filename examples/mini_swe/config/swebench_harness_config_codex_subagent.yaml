@@ -1,0 +1,42 @@
+- name: mini_swe_codex_subagent
+  _target_: psrl.workers.agent_loop.loops.mini_swe_harness_agent_loop.MiniSWEHarnessAgentLoop
+  sandbox_config:
+    # p3b, not the in-process docker backend: the service prices a sandbox from
+    # what it measures and admits the burst through one ledger.
+    backend: p3b
+    sandbox_cpu_count: 2
+    collect_resource_metrics: ${oc.decode:${oc.env:PSRL_SANDBOX_COLLECT_RESOURCE_METRICS,false}}
+    snapshot_verifier: true
+    environment:
+      image: "swebench-sentinel-override-per-instance"
+      cwd: "/testbed"
+      container_timeout: "2h"
+    rollout_environment:
+      memory: "30g"
+      resource_class: rollout
+    grader_environment:
+      memory: "30g"
+      resource_class: grader
+  harness:
+    kind: codex
+    executable: codex
+    trajectory_format: codex_jsonl
+    reasoning_effort: medium
+    # The Codex model catalog exposes its native subagent tools only when this
+    # is true. Subagent rows are still captured as tokens and never trained by
+    # the main_only policy in the launch script.
+    subagents_enabled: true
+    # Parallel subagents share one sandbox; keep their writes out of the main
+    # artifact directory.
+    workspace_isolation: logical
+    # Make the validation episode exercise the delegation path deterministically.
+    prompt_suffix: |
+
+      Subagent validation: before you edit any file, delegate one independent
+      repository investigation to a subagent with the subagent spawn tool. The
+      subagent is a read-only investigator: have it inspect the code and report
+      findings, and tell it not to modify the main task root. Apply the fix
+      yourself after using its report.
+    compaction:
+      enabled: true
+      compact_percent: 75

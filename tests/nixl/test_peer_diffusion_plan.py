@@ -66,15 +66,18 @@ def _cluster(nodes: int, per_node: int, tp: int):
 
 
 def _designates(plan, clients, participants=None) -> dict[str, int]:
-    """Upstream key count per client when everyone in `participants` pulls."""
+    """Upstream (key, shard) count per client when everyone in `participants` pulls."""
     counts: dict[str, int] = {}
     for name, info in clients.items():
         if info.type is not NIXLClientType.PULL_SIDE:
             continue
         for key in KEYS:
-            group = [w for w in plan.get_peer_group(name, key) if participants is None or w in participants]
-            if not group or group[0] == name:
-                counts[name] = counts.get(name, 0) + 1
+            for shard in info.tensor_infos[key].sharding.shard_indices:
+                group = [
+                    w for w in plan.get_peer_group(name, key, shard) if participants is None or w in participants
+                ]
+                if not group or group[0] == name:
+                    counts[name] = counts.get(name, 0) + 1
     return counts
 
 
@@ -83,10 +86,11 @@ class TestGroups:
         clients = _cluster(nodes=2, per_node=8, tp=2)
         plan = CommunicationPlanner().make_comm_plan(clients)
         for name, per_key in plan.peer_groups.items():
-            for key, wanters in per_key.items():
-                assert name in wanters and len(wanters) == len(set(wanters)) >= 2
-                assert len({clients[w].node_ip for w in wanters}) == 1
-                assert len({tuple(clients[w].tensor_infos[key].sharding.shard_indices) for w in wanters}) == 1
+            for key, per_shard in per_key.items():
+                for shard, wanters in per_shard.items():
+                    assert name in wanters and len(wanters) == len(set(wanters)) >= 2
+                    assert len({clients[w].node_ip for w in wanters}) == 1
+                    assert all(shard in clients[w].tensor_infos[key].sharding.shard_indices for w in wanters)
 
     def test_upstream_reads_are_one_per_node_per_rank(self):
         clients = _cluster(nodes=2, per_node=8, tp=2)
@@ -131,3 +135,24 @@ class TestGroups:
         for name in [n for n in clients if n.startswith("train")]:
             clients[name].type = NIXLClientType.PS_FOR_PULL
         assert CommunicationPlanner().make_comm_plan(clients).peer_groups
+
+    def test_different_target_layouts_share_an_individual_shard(self):
+        """Phase 2: a finer-TP reader's one shard and a coarser-TP reader's matching half
+        can share a designate at the shard level, even though their whole shard sets
+        (one shard vs two) never match -- the gap exact-shard-set grouping left open."""
+        trainer = _client("train0", NIXLClientType.PUSH_SIDE, "10.0.0.0", 4, [0, 1, 2, 3])
+        fine = _client("gen_fine", NIXLClientType.PULL_SIDE, "10.1.0.0", 4, [0])
+        coarse = _client("gen_coarse", NIXLClientType.PULL_SIDE, "10.1.0.0", 4, [0, 1])
+        clients = {"train0": trainer, "gen_fine": fine, "gen_coarse": coarse}
+        plan = CommunicationPlanner().make_comm_plan(clients)
+        for key in KEYS:
+            # Their whole shard sets never matched -- this grouping only exists because
+            # _make_peer_groups now looks at individual shards, not whole shard sets.
+            assert tuple(fine.tensor_infos[key].sharding.shard_indices) != tuple(
+                coarse.tensor_infos[key].sharding.shard_indices
+            )
+            group = plan.get_peer_group("gen_fine", key, (0,))
+            assert set(group) == {"gen_fine", "gen_coarse"}
+            assert group == plan.get_peer_group("gen_coarse", key, (0,))
+            # gen_coarse's other shard, (1,), is wanted by nobody else -- no peer group for it.
+            assert plan.get_peer_group("gen_coarse", key, (1,)) == ()

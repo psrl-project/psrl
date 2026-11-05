@@ -99,10 +99,11 @@ def descriptor_readers_by_source(plan: "NIXLCommPlan") -> dict[str, dict[str, se
     """
     inverted = {source: {key: set(readers) for key, readers in keys.items()} for source, keys in readers_by_source(plan).items()}
     for client, per_key in (getattr(plan, "peer_groups", None) or {}).items():
-        for key, group in per_key.items():
-            designate = group[0]
-            if client != designate:
-                inverted.setdefault(designate, {}).setdefault(key, set()).add(client)
+        for key, per_shard in per_key.items():
+            for shard, group in per_shard.items():
+                designate = group[0]
+                if client != designate:
+                    inverted.setdefault(designate, {}).setdefault(key, set()).add(client)
     return inverted
 
 
@@ -155,10 +156,12 @@ def needs_rdma_registration(
 def sources_by_reader(plan: "NIXLCommPlan", reader: str) -> dict[str, dict[str, list[tuple[int, ...]]]]:
     """Invert the pull directions for one reader: ``key -> source -> shards``.
 
-    A peer-diffusion follower reads its designate instead of the upstream source, so the
-    designate replaces the plan's source set for that key, with the follower's own shard
-    list -- that is exactly what the pull engine asks the designate for. The edge decides
-    the follower's transport: a local designate can serve by IPC/peer copy even when the
+    A peer-diffusion follower reads its designate instead of the upstream source for
+    the specific shards that have one, so the designate replaces the plan's source for
+    just those shards -- other shards of the same key keep whichever upstream source
+    the plan named, since a key's shards can now have different (or no) designates.
+    That is exactly what the pull engine asks each source for. The edge decides the
+    follower's transport: a local designate can serve by IPC/peer copy even when the
     upstream trainer is remote.
     """
     out: dict[str, dict[str, list[tuple[int, ...]]]] = {}
@@ -168,14 +171,23 @@ def sources_by_reader(plan: "NIXLCommPlan", reader: str) -> dict[str, dict[str, 
             for source, shards in per_source.items():
                 if shards and source != reader:
                     out.setdefault(key, {}).setdefault(source, []).extend(shards)
-    for key, group in (getattr(plan, "peer_groups", None) or {}).get(reader, {}).items():
-        # A follower reads its designate, not the upstream source the plan names. Override
-        # rather than add: the point is that the follower's registration can follow the
-        # actual transport. A designate that shows up late does fall back upstream, and the
-        # pull engine registers on demand for that case (slow path, still correct).
-        if group and group[0] != reader:
-            shards = sorted({tuple(s) for source_shards in out.get(key, {}).values() for s in source_shards})
-            out[key] = {group[0]: shards}
+    for key, per_shard in (getattr(plan, "peer_groups", None) or {}).get(reader, {}).items():
+        for shard, group in per_shard.items():
+            if not group or group[0] == reader:
+                continue
+            designate = group[0]
+            shard = tuple(shard)
+            # Move this one shard from wherever the upstream plan put it to the
+            # designate it actually reads from -- a per-shard override, not the old
+            # blanket key replace, since different shards of the same key can now
+            # have different designates (or no designate, if nobody else wants them).
+            for source, source_shards in list(out.get(key, {}).items()):
+                if shard in source_shards:
+                    source_shards.remove(shard)
+                    if not source_shards:
+                        del out[key][source]
+                    break
+            out.setdefault(key, {}).setdefault(designate, []).append(shard)
     return out
 
 

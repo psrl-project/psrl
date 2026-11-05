@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import pytest
 import torch
-
 from psrl.trainer.ppo.session_loss import agg_session_loss, compute_session_loss_weights
 
 pytestmark = pytest.mark.cpu_test
@@ -113,3 +112,22 @@ class TestTheCallSiteNoLongerPassesTheKwargToVerl:
         preceding = source[max(0, at - 400) : at]
 
         assert "agg_session_loss(" in preceding
+
+
+class TestPerRowLossWeights:
+    def test_role_weights_scale_each_rows_session_mean(self):
+        loss_mat = torch.tensor([[2.0, 2.0], [6.0, 6.0]])
+        loss_mask = torch.ones_like(loss_mat)
+        weights = compute_session_loss_weights(loss_mask, ["main", "sub"], row_weights=[1.0, 0.5])
+
+        aggregated = agg_session_loss(loss_mat, loss_mask, "session-mean-token-mean", weights)
+
+        # two sessions, so each session's share is 1/2 of its token mean:
+        # 1.0 * (2.0 / 2) + 0.5 * (6.0 / 2)
+        assert aggregated.item() == pytest.approx(2.5)
+
+    def test_a_weight_count_mismatch_is_rejected(self):
+        loss_mask = torch.ones(2, 2)
+
+        with pytest.raises(ValueError, match="one loss weight per row"):
+            compute_session_loss_weights(loss_mask, ["a", "a"], row_weights=[1.0])

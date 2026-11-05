@@ -161,6 +161,9 @@ psrl:
 SMG enables TITO for the rollout gateway automatically. `tito_debug` and
 `tito_gc_threshold` are accepted by the adapter when added as rollout-gateway
 overrides. Debug validation adds CPU overhead and is intended for development.
+`tito_snapshot_format=compact` (the default) stores shared tree nodes once and
+lets PSRL reconstruct each trajectory; set it to `expanded` only for a gateway
+that predates the compact snapshot.
 
 ```{seealso}
 - {doc}`architecture`: complete PSRL data and control flow

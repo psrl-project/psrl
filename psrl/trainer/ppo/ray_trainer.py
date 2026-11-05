@@ -3481,6 +3481,8 @@ class PSRL_RayPPOTrainer(RayPPOTrainer):
         fields = [
             "uid",
             "parent_id",
+            "session_primary",
+            "loss_weight",
             "response_mask",
             "rm_scores",
             "rollout_log_probs",
@@ -3503,6 +3505,8 @@ class PSRL_RayPPOTrainer(RayPPOTrainer):
         # dtype conversion issues (they are stored as NonTensorData/NonTensorStack in TQ).
         uids = tu.get(data, "uid")
         parent_ids = tu.get(data, "parent_id")
+        session_primaries = tu.get(data, "session_primary")
+        loss_weights = tu.get(data, "loss_weight")
         # Remove non-tensor fields so to_padded_tensor() only processes tensor fields.
         tensor_fields = ["response_mask", "rm_scores", "rollout_log_probs", "old_log_probs", "ref_log_prob", "values"]
         data_tensor_only = data.select(*[f for f in tensor_fields if f in data.keys()])
@@ -3510,6 +3514,8 @@ class PSRL_RayPPOTrainer(RayPPOTrainer):
         data.batch["token_level_scores"] = data.batch["rm_scores"]
         data.non_tensor_batch["uid"] = np.array(uids, dtype=object)
         data.non_tensor_batch["parent_id"] = np.array(parent_ids, dtype=object)
+        data.non_tensor_batch["session_primary"] = np.asarray(session_primaries, dtype=bool)
+        data.non_tensor_batch["loss_weight"] = np.asarray(loss_weights, dtype=np.float32)
 
         # 1. apply kl penalty to rewards
         if self.config.algorithm.use_kl_in_reward:
@@ -3564,7 +3570,9 @@ class PSRL_RayPPOTrainer(RayPPOTrainer):
         for field in fields:
             output[field] = response_to_nested(data.batch[field], response_mask)
         if self.config.train_actor_rollout_ref.actor.loss_agg_mode == "session-mean-token-mean":
-            output["session_loss_weights"] = compute_session_loss_weights(data.batch["response_mask"], uids)
+            output["session_loss_weights"] = compute_session_loss_weights(
+                data.batch["response_mask"], uids, row_weights=loss_weights
+            )
         output = TensorDict(output, batch_size=len(batch))
         tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=output)
 
@@ -3669,8 +3677,10 @@ class PSRL_RayPPOTrainer(RayPPOTrainer):
         ]
         if use_session_mean:
             fields.append("uid")
+            fields.append("loss_weight")
         data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
         uids = tu.pop(data, "uid") if use_session_mean else None
+        loss_weights = tu.pop(data, "loss_weight") if use_session_mean else None
 
         # Training pads log probabilities to `responses` but slices them by `response_mask`.
         assert_response_aligned_lengths(
@@ -3695,7 +3705,9 @@ class PSRL_RayPPOTrainer(RayPPOTrainer):
         session_loss_weights = None
         if use_session_mean:
             # Diagnostic masks and chunk boundaries can differ from the later training window.
-            session_loss_weights = compute_session_loss_weights(data.batch["response_mask"], uids)
+            session_loss_weights = compute_session_loss_weights(
+                data.batch["response_mask"], uids, row_weights=loss_weights
+            )
         entropy_agg = agg_session_loss(
             loss_mat=data.batch["entropy"],
             loss_mask=data.batch["response_mask"],

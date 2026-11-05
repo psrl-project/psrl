@@ -162,6 +162,28 @@ def _resolve_publish_format(config: DictConfig) -> None:
     quantization = resolve_quantization_plan(nixl.get("weight_quantization"))
     nixl.publish_quantization = quantization.to_config()
 
+    reader_quantization = bool(nixl.get("reader_quantization", False))
+    if reader_quantization:
+        if quantization.scheme != "fp8":
+            raise ValueError(
+                "psrl.nixl.reader_quantization=true requires "
+                "psrl.nixl.weight_quantization.scheme=fp8."
+            )
+        if str(config.train_actor_rollout_ref.actor.strategy) != "megatron":
+            raise ValueError(
+                "psrl.nixl.reader_quantization=true is implemented for Megatron only; "
+                f"got actor.strategy={config.train_actor_rollout_ref.actor.strategy!r}."
+            )
+        from psrl.utils.ps_mode import has_ps_data_plane
+
+        if has_ps_data_plane(config.psrl.ps_mode):
+            raise ValueError(
+                "psrl.nixl.reader_quantization=true requires direct supply "
+                "(ps_mode=nixl_direct); got ps_mode="
+                f"{config.psrl.ps_mode!r}."
+            )
+    nixl.reader_quantization = reader_quantization
+
 
 def _validate_nixl_offload_flags(config: DictConfig) -> None:
     """Reject both FSDP2 parameter-offload switches (design doc 3.9.3c).
@@ -277,7 +299,17 @@ def _resolve_write_gate(config: DictConfig) -> None:
     direct = not has_ps_data_plane(config.psrl.ps_mode)
     matched = _normalise(nixl.publish_train_dtype) == _normalise(nixl.publish_rollout_dtype)
     quantization = QuantizationPlan.from_config(nixl.get("publish_quantization"))
-    nixl.await_write_gate = bool(direct and matched and not quantization.is_quantized)
+    reader_quantization = bool(nixl.get("reader_quantization", False))
+    # Reader-side quantization also reads the trainer's live BF16 bytes, so it needs
+    # the same epoch gate as a matched-precision read. The old publisher-side path
+    # reads a separate publish copy and does not.
+    nixl.await_write_gate = bool(
+        direct
+        and (
+            (matched and not quantization.is_quantized)
+            or (reader_quantization and quantization.is_quantized)
+        )
+    )
     if nixl.await_write_gate and isinstance(nixl.get("await_readers_before_publish"), bool):
         # The gate supersedes the publish-time drain for this path. Leaving both on would
         # make publish invalidate versions that the gate already proved single-version and
@@ -358,6 +390,32 @@ def mirror_bypass_config_to_actor(config: DictConfig) -> None:
         # A deep copy, so later mutations of the algorithm node cannot alias into the actor node.
         actor_policy_loss["rollout_correction"] = OmegaConf.create(OmegaConf.to_container(rollout_correction))
         actor_policy_loss["loss_mode"] = "bypass_mode"
+
+
+def validate_subagent_training_config(config: DictConfig, batch_agg_mode: str):
+    """
+    Validate the subagent training policy against the batch aggregation mode.
+
+    A mode that can put more than one trajectory row in one session is only meaningful
+    when those rows stay one sample, which is what request aggregation provides.
+
+    Args:
+        config (DictConfig): The resolved training config.
+        batch_agg_mode (str): The resolved `psrl.agentic_rl.batch_agg_mode`.
+
+    Returns:
+        SubagentTrainingPolicy: The resolved session policy.
+    """
+    from psrl.utils.subagent_training import SubagentTrainingPolicy
+
+    policy = SubagentTrainingPolicy.from_mapping(config.psrl.agentic_rl.get("subagent_training", {}))
+    if {policy.mode, policy.val_mode} & {"all", "selected"}:
+        assert batch_agg_mode == REQUEST_AGG_MODE, (
+            "psrl.agentic_rl.subagent_training mode/val_mode 'all' or 'selected' can put "
+            "multiple rows in one session; those rows are one sample, so "
+            "psrl.agentic_rl.batch_agg_mode must be 'request'."
+        )
+    return policy
 
 
 def validate_config(
@@ -587,6 +645,7 @@ def validate_config(
     assert batch_agg_mode in SUPPORTED_BATCH_AGG_MODES, (
         f"psrl.agentic_rl.batch_agg_mode must be one of {sorted(SUPPORTED_BATCH_AGG_MODES)}, got {batch_agg_mode!r}."
     )
+    validate_subagent_training_config(config, batch_agg_mode)
     if batch_agg_mode == REQUEST_AGG_MODE and not config.psrl.rollout_coordination.redundant_rollout.enable:
         rollout_n = config.gen_actor_rollout_ref.rollout.n
         requests_per_buffer = config.psrl.staleness_buffer_entries * rollout_n

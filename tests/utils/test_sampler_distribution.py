@@ -127,9 +127,19 @@ def test_tito_trim_and_multiturn_environment_alignment():
 
 
 def test_missing_capture_is_not_silently_disabled():
-    records = [{"prompt_token_count": 1, "output_logprobs": [[0, 2]], "sampler_capture_width": 128}]
+    # One turn carries a distribution, so the trajectory is a capture. A trainable
+    # turn that produced logprobs without its own distribution must fail rather
+    # than train against a silently disabled capture.
+    records = [
+        {
+            "prompt_token_count": 1,
+            "output_logprobs": [[0.0, 2]],
+            "sampler_distribution": wire([2], [1.0], True),
+        },
+        {"prompt_token_count": 2, "output_logprobs": [[-0.1, 10]]},
+    ]
     with pytest.raises(ValueError, match="Missing sampler distribution"):
-        build_training_data([1, 2], records)
+        build_training_data([1, 2, 10], records)
 
 
 def test_capture_does_not_duplicate_head_in_agent_response():

@@ -697,8 +697,7 @@ class NIXLMetaServer:
         # D1: a group member reads its designate and notifies its followers, so it needs every peer of its groups.
         if self.comm_plan is not None:
             for client_name in my_clients:
-                for wanters in self.comm_plan.peer_groups.get(client_name, {}).values():
-                    relevant.update(wanters)
+                relevant.update(self.comm_plan.peer_group_members(client_name))
 
         # Broadcast initialization uses direct PS writes, so include every PS
         # descriptor in the existing info exchange.

@@ -8,17 +8,33 @@ import torch
 def compute_session_loss_weights(
     response_mask: torch.Tensor,
     session_ids: Sequence[Hashable],
+    row_weights: Sequence[float] | torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
     Return one FP32 weight per row for the full training window.
 
-    Each valid token in session `s` receives weight `1 / (S * T_s)`, where
-    `T_s` counts unmasked tokens across all rows of that session and `S` counts
-    nonempty sessions. Compute after rejection masking and before worker splitting.
+    Each valid token in session `s` receives weight `w_r / (S * T_s)`, where
+    `T_s` counts unmasked tokens across all rows of that session, `S` counts
+    nonempty sessions, and `w_r` is the row's configured loss weight (1.0 by
+    default). Compute after rejection masking and before worker splitting.
     Never renormalize these weights inside an optimizer or micro batch.
+
+    Args:
+        response_mask (torch.Tensor): Two-dimensional response mask.
+        session_ids (Sequence[Hashable]): One session id per row.
+        row_weights (Sequence[float] | torch.Tensor | None): Optional per-row loss
+            weights, one per row.
     """
     if response_mask.ndim != 2 or len(session_ids) != response_mask.shape[0]:
         raise ValueError("Expected a two-dimensional response mask and one session ID per row.")
+    if row_weights is None:
+        weights = [1.0] * response_mask.shape[0]
+    else:
+        weights = [float(weight) for weight in torch.as_tensor(row_weights).reshape(-1).tolist()]
+        if len(weights) != response_mask.shape[0]:
+            raise ValueError(
+                f"Expected one loss weight per row ({response_mask.shape[0]}), got {len(weights)}."
+            )
     counts = response_mask.sum(dim=-1).tolist()
     totals: dict[Hashable, float] = {}
     for session_id, count in zip(session_ids, counts, strict=True):
@@ -27,8 +43,8 @@ def compute_session_loss_weights(
     num_sessions = len(totals)
     return torch.tensor(
         [
-            1.0 / (num_sessions * totals[sid]) if count > 0 else 0.0
-            for sid, count in zip(session_ids, counts, strict=True)
+            weight / (num_sessions * totals[sid]) if count > 0 else 0.0
+            for sid, count, weight in zip(session_ids, counts, weights, strict=True)
         ],
         dtype=torch.float32,
         device=response_mask.device,

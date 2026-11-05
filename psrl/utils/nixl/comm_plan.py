@@ -6,11 +6,16 @@ analyzing network topology and tensor distribution to generate optimal
 PUSH_SIDE to PS and PULL_SIDE from PS communication plans.
 """
 
+import logging
+import os
 import pickle
 from dataclasses import dataclass, field
 
 from psrl.utils.nixl.global_vars import GLOBAL_TOPOLOGY
 from psrl.utils.nixl.nixl_spec import NIXLClientInfo, NIXLClientType
+
+psrl_logger = logging.getLogger(__file__)
+psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "INFO"))
 
 
 @dataclass
@@ -29,10 +34,16 @@ class NIXLCommPlan:
     # {pull_client: {key: {ps_client: [shard_indices]}}
     train_pull_from_ps_plan: dict[str, dict[str, dict[str, list[tuple[int, ...]]]]]
 
-    # Same node diffusion groups (D1). {pull_client: {key: wanters}} where the wanters hold
-    # byte identical shards of `key` and are ordered by designate preference. For a set of
-    # participants the first participating wanter reads upstream and the rest read it.
-    peer_groups: dict[str, dict[str, tuple[str, ...]]] = field(default_factory=dict)
+    # Same node diffusion groups (D1, refined for phase 2's cross-layout sharing).
+    # {pull_client: {key: {shard: wanters}}} where the wanters of one shard hold byte
+    # identical bytes of that shard (not necessarily the same whole shard set for the
+    # key) and are ordered by designate preference. For a set of participants the
+    # first participating wanter reads upstream and the rest read it. Grouping at
+    # individual-shard granularity, rather than a client's whole shard set for the
+    # key, is what lets two different target layouts (e.g. TP4 and TP2 rollouts on
+    # the same node) share a designate for the shards they happen to overlap on, even
+    # though their whole shard sets never match.
+    peer_groups: dict[str, dict[str, dict[tuple[int, ...], tuple[str, ...]]]] = field(default_factory=dict)
 
     def serialize(self):
         """Serialize communication plan"""
@@ -51,9 +62,31 @@ class NIXLCommPlan:
         """Get read plan for specific PULL_SIDE client and key"""
         return self.rollout_pull_from_ps_plan.get(pull_client, {}).get(key, {})
 
-    def get_peer_group(self, pull_client: str, key: str) -> tuple[str, ...]:
-        """Wanters of `key` on `pull_client`'s node in designate order, empty if it has no peers."""
-        return self.peer_groups.get(pull_client, {}).get(key, ())
+    def get_peer_group(self, pull_client: str, key: str, shard: tuple[int, ...]) -> tuple[str, ...]:
+        """Wanters of this one shard of `key` on `pull_client`'s node, designate first.
+
+        Empty if `shard` has no peer group (the shard's source is already local, or
+        only one instance wants it).
+        """
+        return self.peer_groups.get(pull_client, {}).get(key, {}).get(shard, ())
+
+    def get_peer_shards(self, pull_client: str, key: str) -> dict[tuple[int, ...], tuple[str, ...]]:
+        """Every shard of `key` that has a peer group for `pull_client`, designate first."""
+        return self.peer_groups.get(pull_client, {}).get(key, {})
+
+    def peer_group_members(self, pull_client: str) -> set[str]:
+        """Every client that shares any peer group with `pull_client`, across every key/shard.
+
+        For callers that only need "who might this client read from or notify" (handshake
+        fan-out, participant-set resolution) and should not have to understand the
+        per-shard structure at all.
+        """
+        return {
+            w
+            for per_key in self.peer_groups.get(pull_client, {}).values()
+            for wanters in per_key.values()
+            for w in wanters
+        }
 
     def get_train_pull_plan(self, pull_client: str, key: str) -> dict[str, list[tuple[int, ...]]]:
         """Get read plan for specific PUSH_SIDE client and key"""
@@ -215,18 +248,24 @@ class CommunicationPlanner:
         self,
         clients: dict[str, NIXLClientInfo],
         pull_plan: dict[str, dict[str, dict[str, list[tuple[int, ...]]]]],
-    ) -> dict[str, dict[str, tuple[str, ...]]]:
+    ) -> dict[str, dict[str, dict[tuple[int, ...], tuple[str, ...]]]]:
         """
-        Group same node pull clients that need byte identical shards of a key (D1).
+        Group same node pull clients that need byte identical bytes of one shard (D1, phase 2).
 
-        Peers read each other's whole local tensors, so a group is keyed by the exact shard
-        set.  The first member of every group is the designate: it reads the key upstream
-        and the rest read it from the designate over NVLink.
+        Peers read each other's local tensors, so a group is keyed by one individual finest-mesh
+        shard, not by a reader's whole shard set for the key. Every client already expresses its
+        needed shards in the same unified finest mesh (the server's `_unify_role` runs every
+        client's sharding through `find_finest_shard_mesh` / `refactor_based_on_finer_shard_mesh`
+        before planning), so grouping at this granularity is what lets two different target
+        layouts on the same node (say vLLM TP4 and TP2 for the same key) share a designate for the
+        shards they overlap on, even though their whole shard sets never match. The first member
+        of every group is the designate: it reads the shard upstream and the rest read it from the
+        designate over NVLink.
 
         Designate ordering uses a three-level sort key:
 
         1. **Trainer link quality** (primary, descending): the instance with the best
-           network path to its upstream trainer source becomes the designate.
+           network path to this shard's upstream trainer source becomes the designate.
            LOCAL > NVLINK > IB > PCIE > IB_PCIE > ETH.  This puts the fastest link on
            the critical path (trainer → designate) and preserves scarce IB bandwidth for
            cross-node hops that have no NVLink alternative.
@@ -242,63 +281,85 @@ class CommunicationPlanner:
         if not self.peer_diffusion:
             return {}
         node_of = {name: info.node_ip for name, info in clients.items()}
-        wanted: dict[tuple[str, str, tuple[tuple[int, ...], ...]], list[str]] = {}
-        key_bytes: dict[tuple[str, str], int] = {}
+        wanted: dict[tuple[str, str, tuple[int, ...]], list[str]] = {}
+        key_bytes: dict[tuple[str, str, tuple[int, ...]], int] = {}
+        shard_source: dict[tuple[str, str, tuple[int, ...]], str] = {}
         for pull_client, key_plans in pull_plan.items():
             info = clients.get(pull_client)
             if info is None:
                 continue
             for key, per_source in key_plans.items():
-                shards = tuple(sorted(shard for shard_list in per_source.values() for shard in shard_list))
-                # Diffusion exists to collapse an expensive upstream read. When every
-                # source of this key is already on the reader's node, the read is a
-                # device copy and the extra designate hop only adds a reader's memory
-                # to the path -- and a reader-side buffer is often not IPC-exportable,
-                # which would force the followers to register after all (3.7.4).
-                if not any(
-                    node_of.get(source) != node_of[pull_client]
-                    for source, source_shards in per_source.items()
-                    if source_shards
-                ):
-                    continue
-                wanted.setdefault((node_of[pull_client], key, shards), []).append(pull_client)
                 tensor_info = info.tensor_infos[key]
                 positions = {s: i for i, s in enumerate(tensor_info.sharding.shard_indices)}
-                key_bytes[(pull_client, key)] = sum(tensor_info.get_shard_size_bytes(positions[s]) for s in shards)
+                for source, shards in per_source.items():
+                    if node_of.get(source) == node_of[pull_client]:
+                        # Diffusion exists to collapse an expensive upstream read. When this
+                        # shard's source is already on the reader's node, the read is a
+                        # device copy and the extra designate hop only adds a reader's memory
+                        # to the path -- and a reader-side buffer is often not IPC-exportable,
+                        # which would force the followers to register after all (3.7.4).
+                        continue
+                    for shard in shards:
+                        wanted.setdefault((node_of[pull_client], key, shard), []).append(pull_client)
+                        key_bytes[(pull_client, key, shard)] = tensor_info.get_shard_size_bytes(positions[shard])
+                        shard_source[(pull_client, key, shard)] = source
+
+        psrl_logger.debug(
+            f"Peer-diffusion candidate groups: {len(wanted)} total, "
+            f"{sum(1 for w in wanted.values() if len(w) >= 2)} with >= 2 wanters, "
+            f"sizes {sorted({len(w) for w in wanted.values()})}."
+        )
+
+        # Re-coalesce shards of the same key that share the exact same wanter set into
+        # one election unit before load-balancing. Two shards of one key wanted by the
+        # identical set of readers (the common case: every shard of a key, same readers
+        # throughout -- exactly what phase 1's whole-key grouping always was) must be
+        # decided atomically, or the greedy "least accumulated load" tie-break can split
+        # them across two different designates purely from processing order, fragmenting
+        # one peer read into two for zero cross-layout benefit. A shard whose wanter set
+        # genuinely differs (the phase 2 case -- different target layouts overlapping on
+        # part of a key) still lands in its own, separate unit. Different *keys* are
+        # deliberately kept as separate units even when their wanter sets happen to
+        # match, same as phase 1, so designates still spread across keys for load
+        # balancing instead of one instance taking every key a group shares.
+        units: dict[tuple[str, str, tuple[str, ...]], list[tuple[int, ...]]] = {}
+        for (node, key, shard), wanters in wanted.items():
+            if len(wanters) < 2:
+                continue
+            units.setdefault((node, key, tuple(sorted(wanters))), []).append(shard)
 
         upstream_load: dict[str, int] = {}
-        groups: dict[str, dict[str, tuple[str, ...]]] = {}
+        groups: dict[str, dict[str, dict[tuple[int, ...], tuple[str, ...]]]] = {}
 
-        # Pre-compute per-(client, key) trainer link priority once, outside the sort.
-        # get_link_priority is already O(1) (cached after first call), but calling it
-        # inside a sort key closure re-invokes it O(G log G) times per group per key.
-        # With 512 rollout instances and 200 keys that adds up. Computing once per
-        # (client, key) pair keeps the overall complexity O(N × K).
-        _trainer_priority_cache: dict[tuple[str, str], int] = {}
+        # Pre-compute per-(client, key, shard) trainer link priority once, outside the
+        # sort. get_link_priority is already O(1) (cached after first call), but calling
+        # it inside a sort key closure re-invokes it O(G log G) times per group. With 512
+        # rollout instances and 200 keys that adds up. Computing once per (client, key,
+        # shard) tuple keeps the overall complexity O(N x K x S).
+        _trainer_priority_cache: dict[tuple[str, str, tuple[int, ...]], int] = {}
 
-        def _trainer_link_priority(client: str, key: str) -> int:
-            cache_key = (client, key)
+        def _trainer_link_priority(client: str, key: str, shard: tuple[int, ...]) -> int:
+            cache_key = (client, key, shard)
             if cache_key in _trainer_priority_cache:
                 return _trainer_priority_cache[cache_key]
-            sources = pull_plan.get(client, {}).get(key, {})
-            priority = (
-                max(GLOBAL_TOPOLOGY.get_link_priority(client, trainer) for trainer in sources)
-                if sources
-                else 0
-            )
+            source = shard_source.get(cache_key)
+            priority = GLOBAL_TOPOLOGY.get_link_priority(client, source) if source is not None else 0
             _trainer_priority_cache[cache_key] = priority
             return priority
 
-        # Largest keys first so the greedy balance has small keys left to even out the tail.
-        for (_node, key, _shards), wanters in sorted(
-            wanted.items(), key=lambda item: (-key_bytes[(item[1][0], item[0][1])], item[0][1], item[0][0])
-        ):
-            if len(wanters) < 2:
-                continue
+        def _unit_priority(client: str, key: str, shards: list[tuple[int, ...]]) -> int:
+            # Best link across every shard this unit covers -- the same "max over
+            # sources" phase 1 used per key, generalized to a unit that can be a subset
+            # of a key's shards (the phase 2 case).
+            return max(_trainer_link_priority(client, key, shard) for shard in shards)
 
-            # Pre-fetch priorities for this key's wanters so the sort key is a pure dict
+        # Largest units first so the greedy balance has small units left to even out the tail.
+        for (_node, key, wanters), shards in sorted(
+            units.items(), key=lambda item: -sum(key_bytes[(item[0][2][0], item[0][1], shard)] for shard in item[1])
+        ):
+            # Pre-fetch priorities for this unit's wanters so the sort key is a pure dict
             # lookup — no function call overhead inside Python's sort comparisons.
-            priorities = {c: _trainer_link_priority(c, key) for c in wanters}
+            priorities = {c: _unit_priority(c, key, shards) for c in wanters}
 
             # Sort by: best trainer link first (NVLink beats IB), then least accumulated
             # upstream load (spread NIC ingress within the same tier), then name for
@@ -308,9 +369,11 @@ class CommunicationPlanner:
                 wanters,
                 key=lambda client: (-priorities[client], upstream_load.get(client, 0), client),
             ))
-            upstream_load[ordered[0]] = upstream_load.get(ordered[0], 0) + key_bytes[(ordered[0], key)]
+            total_bytes = sum(key_bytes[(ordered[0], key, shard)] for shard in shards)
+            upstream_load[ordered[0]] = upstream_load.get(ordered[0], 0) + total_bytes
             for client in ordered:
-                groups.setdefault(client, {})[key] = ordered
+                for shard in shards:
+                    groups.setdefault(client, {}).setdefault(key, {})[shard] = ordered
         return groups
 
     def _make_push_to_ps_plan(
@@ -437,6 +500,8 @@ class CommunicationPlanner:
                 target_info = clients[target_client]
 
                 for key, target_tensor_info in target_info.tensor_infos.items():
+                    if getattr(target_tensor_info.sharding, "local_only", False):
+                        continue
                     # Use the precomputed key->sources mapping and a set for O(1) discard,
                     # avoiding O(G × C_s) per-key scan and O(C_s) list.remove().
                     if key not in key_to_srcs:

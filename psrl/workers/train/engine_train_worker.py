@@ -317,7 +317,10 @@ class PSRL_EngineTrainWorker(ActorRolloutRefWorker, PSRL_BaseTrainWorker):
             )
         quantization = QuantizationPlan.from_config(nixl_config.get("publish_quantization"))
         if quantization.is_quantized:
-            self.nixl_storage_client.set_publish_quantization(quantization)
+            self.nixl_storage_client.set_publish_quantization(
+                quantization,
+                reader_quantization=bool(nixl_config.get("reader_quantization", False)),
+            )
         self.nixl_storage_client.register_local_tensors(
             self.unified_state_dict, unified_sharding_dict, meta_only=meta_only
         )

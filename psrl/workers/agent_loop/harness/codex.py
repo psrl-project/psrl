@@ -89,6 +89,11 @@ class CodexHarness(Harness):
                     f"model_auto_compact_token_limit = {runtime.compaction_token_limit}",
                 )
             )
+        if self.config.subagents_enabled:
+            # The catalog's `multi_agent_version` is what a custom provider uses to
+            # expose the tools; this feature flag is Codex's older fallback for the
+            # same surface and is harmless when the catalog already names a version.
+            config_lines.extend(("", "[features]", "multi_agent = true"))
         config_lines.extend(
             (
                 "",
@@ -120,12 +125,13 @@ class CodexHarness(Harness):
             self._model_catalog(model, effort, catalog_window),
         )
 
-    @staticmethod
-    def _model_catalog(model: str, effort: str, context_window: int | None) -> bytes:
+    def _model_catalog(self, model: str, effort: str, context_window: int | None) -> bytes:
         """Build the static model catalog Codex loads via `model_catalog_json`.
 
         Every field is written explicitly because Codex's catalog deserializer
-        requires the non-optional `ModelInfo` fields to be present.
+        requires the non-optional `ModelInfo` fields to be present. The catalog is
+        authoritative for the subagent tool surface: `multi_agent_version` is the
+        only switch that enables Codex's native subagent tools on a custom provider.
         """
         entry: dict = {
             "slug": model,
@@ -175,7 +181,10 @@ class CodexHarness(Harness):
             "auto_review_model_override": None,
             "model_specialty": None,
             "tool_mode": None,
-            "multi_agent_version": None,
+            # Codex 0.164 supports the namespaced v1 subagent tools. Select v1 because
+            # its spawn surface is the stable one for a custom provider; v2's flat tool
+            # names are emitted once the CLI pins that surface by default.
+            "multi_agent_version": "v1" if self.config.subagents_enabled else None,
             "multi_agent_reasoning_effort": None,
         }
         return json.dumps({"models": [entry]}, ensure_ascii=False).encode()

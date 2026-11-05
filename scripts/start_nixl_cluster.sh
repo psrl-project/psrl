@@ -32,18 +32,68 @@ HEAD_IP="$1"; shift
 WORKERS=("$@")
 
 echo "=== stopping any previous cluster ==="
+# `ray stop` only reaps processes it can find through its own session bookkeeping.
+# A head start that died partway through (the session-name race in
+# `Node._write_cluster_info_to_kv`, seen when a previous attempt's gcs_server/raylet
+# were not fully torn down before the next one claimed the port) leaves orphans that
+# bookkeeping never learns about, so `ray stop` silently does nothing to them and the
+# next `ray start --head` reaches the same race again. Killing the known process
+# names directly is what actually frees the port.
+KILL_CMD='pkill -9 -f "ray/core/src/ray/gcs/gcs_server"; pkill -9 -f "ray/core/src/ray/raylet/raylet"; pkill -9 -f "ray/dashboard"; pkill -9 -f "runtime_env/agent"; true'
 for ip in "$HEAD_IP" "${WORKERS[@]}"; do
+    # `ray stop --force` itself can hang (observed waiting past 90s against a node
+    # whose previous session died mid-start), so it gets its own short budget rather
+    # than sharing the outer timeout -- otherwise a hung `ray stop` eats the whole
+    # budget and the pkill fallback after it never runs. The pkill commands are
+    # inlined rather than shipped as a `declare -f` function body: that round-trips
+    # through this script's own quoting, the ssh argv, and the remote shell, and the
+    # nesting is exactly the kind of thing that breaks silently rather than loudly.
     timeout 90 ssh -o BatchMode=yes -o StrictHostKeyChecking=no -n "$ip" \
-        "${RAY_BIN} stop --force >/dev/null 2>&1; true" 2>/dev/null \
-        || "${RAY_BIN}" stop --force >/dev/null 2>&1
+        "timeout 15 ${RAY_BIN} stop --force >/dev/null 2>&1; ${KILL_CMD}" \
+        </dev/null >/dev/null 2>&1 || true
 done
-"${RAY_BIN}" stop --force > /dev/null 2>&1
+timeout 15 "${RAY_BIN}" stop --force > /dev/null 2>&1 || true
+eval "${KILL_CMD}" > /dev/null 2>&1
 sleep 5
 
-echo "=== starting head on ${HEAD_IP} ==="
+if timeout 10 ssh -o BatchMode=yes -o StrictHostKeyChecking=no -n "$HEAD_IP" \
+        "ss -ltn 2>/dev/null | grep -q ':${PORT} '" 2>/dev/null; then
+    echo "ERROR: port ${PORT} on ${HEAD_IP} is still bound after cleanup" >&2
+    exit 1
+fi
+
+echo "=== checking network profile ==="
 # shellcheck disable=SC1090
 source "${ENV_SH}"
 unset http_proxy https_proxy
+
+# UCX device selection is per cluster, not per node: a static list that spans several
+# RoCE rails is only usable where the rails are mutually routable. Forwarding the
+# caller's override makes `PSRL_UCX_NET_DEVICES=bond1 scripts/start_nixl_cluster.sh ...`
+# apply to every node, including the workers that do not inherit this shell.
+UCX_ENV=""
+if [ -n "${PSRL_UCX_NET_DEVICES:-}" ]; then
+    UCX_ENV="export PSRL_UCX_NET_DEVICES=${PSRL_UCX_NET_DEVICES};"
+fi
+
+# A split device list is worse than a slow one. NIXL resolves a peer's UCX endpoints
+# during the notification handshake; an address present on only one side is tried and
+# times out before the control message is delivered (`NIXL_ERR_NOT_FOUND` at the
+# PSManager, thirty seconds per endpoint). The same profile must be sourced everywhere.
+HEAD_UCX="${UCX_NET_DEVICES:-}"
+for ip in "${WORKERS[@]}"; do
+    worker_ucx=$(timeout 60 ssh -o BatchMode=yes -o StrictHostKeyChecking=no "$ip" \
+        "${UCX_ENV} source ${ENV_SH} >/dev/null 2>&1; printf '%s' \"\${UCX_NET_DEVICES:-}\"" 2>/dev/null)
+    if [ "${worker_ucx}" != "${HEAD_UCX}" ]; then
+        echo "ERROR: UCX_NET_DEVICES differs between nodes" >&2
+        echo "  head ${HEAD_IP}: ${HEAD_UCX}" >&2
+        echo "  node ${ip}: ${worker_ucx}" >&2
+        echo "Source the same cluster profile on every node, or set PSRL_UCX_NET_DEVICES for all." >&2
+        exit 1
+    fi
+done
+
+echo "=== starting head on ${HEAD_IP} ==="
 if ! timeout 240 "${RAY_BIN}" start --head \
         --node-ip-address="${HEAD_IP}" --port="${PORT}" --num-gpus="${GPUS}" \
         2>&1 | grep -q "Ray runtime started"; then
@@ -54,7 +104,7 @@ fi
 for ip in "${WORKERS[@]}"; do
     echo "=== joining ${ip} ==="
     joined=$(timeout 260 ssh -o BatchMode=yes -o StrictHostKeyChecking=no "$ip" \
-        "source ${ENV_SH} >/dev/null 2>&1; unset http_proxy https_proxy; \
+        "${UCX_ENV} source ${ENV_SH} >/dev/null 2>&1; unset http_proxy https_proxy; \
          ${VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR:+export VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR=${VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR};} \
          timeout 200 ${RAY_BIN} start --address='${HEAD_IP}:${PORT}' --num-gpus=${GPUS} 2>&1 \
          | grep -c 'Ray runtime started'" 2>/dev/null | tail -1)

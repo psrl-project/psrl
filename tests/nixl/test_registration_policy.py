@@ -451,7 +451,7 @@ class TestReaderSideRegistration:
             push_to_ps_plan={},
             rollout_pull_from_ps_plan={"gen0_1": {"w0": {"train0": [(0,), (1,)]}}},
             train_pull_from_ps_plan={},
-            peer_groups={"gen0_1": {"w0": ("gen0_0", "gen0_1")}},
+            peer_groups={"gen0_1": {"w0": {(0,): ("gen0_0", "gen0_1"), (1,): ("gen0_0", "gen0_1")}}},
         )
 
         assert sources_by_reader(plan, "gen0_1") == {"w0": {"gen0_0": [(0,), (1,)]}}
@@ -504,7 +504,7 @@ class TestReaderSkipWiring:
             push_to_ps_plan={},
             rollout_pull_from_ps_plan={"gen0_1": {"w0": {"train0": [(0,), (1,)]}}},
             train_pull_from_ps_plan={},
-            peer_groups={"gen0_1": {"w0": ("gen0_0", "gen0_1")}},
+            peer_groups={"gen0_1": {"w0": {(0,): ("gen0_0", "gen0_1"), (1,): ("gen0_0", "gen0_1")}}},
         )
 
         assert sources_by_reader(plan, "gen0_1") == {"w0": {"gen0_0": [(0,), (1,)]}}

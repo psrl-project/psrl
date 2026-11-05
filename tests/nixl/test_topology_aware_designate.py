@@ -66,9 +66,15 @@ def _set_link(c1: str, c2: str, link_type: LinkType) -> None:
     GLOBAL_TOPOLOGY._links[key] = link
 
 
-def _designate_for(plan, client: str, key: str) -> str:
-    """Return the designate (first member) of the peer group for (client, key)."""
-    group = plan.get_peer_group(client, key)
+def _designate_for(plan, clients, client: str, key: str) -> str:
+    """Return the designate (first member) of the peer group for (client, key).
+
+    Every gen client in this file owns exactly one shard per key, so looking it up
+    from the client's own tensor info and threading it through the (now shard-aware)
+    `get_peer_group` is a mechanical fix, not a behavior change.
+    """
+    shard = clients[client].tensor_infos[key].sharding.shard_indices[0]
+    group = plan.get_peer_group(client, key, shard)
     return group[0] if group else client
 
 
@@ -103,7 +109,7 @@ class TestTopologyPreference:
         plan2 = CommunicationPlanner().make_comm_plan(clients)
 
         for key in KEYS:
-            designate = _designate_for(plan2, "gen0", key)
+            designate = _designate_for(plan2, clients, "gen0", key)
             assert designate in {"gen2", "gen3"}, (
                 f"Expected NVLink instance (gen2 or gen3) as designate, got {designate!r}"
             )
@@ -126,11 +132,11 @@ class TestTopologyPreference:
         plan = CommunicationPlanner().make_comm_plan(clients)
         for key in KEYS:
             # Node A has same-IP as trainer → LOCAL link → highest priority
-            designate_a = _designate_for(plan, "genA0", key)
+            designate_a = _designate_for(plan, clients, "genA0", key)
             assert designate_a in {"genA0", "genA1"}, (
                 f"Node A designate should be on node A, got {designate_a!r}"
             )
-            designate_b = _designate_for(plan, "genB0", key)
+            designate_b = _designate_for(plan, clients, "genB0", key)
             assert designate_b in {"genB0", "genB1"}, (
                 f"Node B designate should be on node B, got {designate_b!r}"
             )
@@ -193,8 +199,8 @@ class TestLoadBalancingWithinTier:
         plan = CommunicationPlanner().make_comm_plan(clients)
         # key0 is large → its designate accumulates more load.
         # key1's designate should be a different instance.
-        d0 = _designate_for(plan, "gen0", "key0")
-        d1 = _designate_for(plan, "gen0", "key1")
+        d0 = _designate_for(plan, clients, "gen0", "key0")
+        d1 = _designate_for(plan, clients, "gen0", "key1")
         assert d0 != d1, (
             f"Expected load-balanced designates for key0/key1, both got {d0!r}"
         )
@@ -227,7 +233,7 @@ class TestIBOverETH:
 
         plan = CommunicationPlanner().make_comm_plan(clients)
         for key in KEYS:
-            d = _designate_for(plan, "genA0", key)
+            d = _designate_for(plan, clients, "genA0", key)
             assert d in {"genA0", "genA1"}, (
                 f"IB instance should be designate, got {d!r} (ETH instances are genB0/genB1)"
             )
@@ -250,7 +256,7 @@ class TestDeterminism:
         for _ in range(5):
             plan = CommunicationPlanner().make_comm_plan(clients)
             for key in KEYS:
-                results.add(_designate_for(plan, "gen_a", key))
+                results.add(_designate_for(plan, clients, "gen_a", key))
         assert len(results) == 1, f"Non-deterministic designate selection: {results}"
         # With equal priority and zero load, name sort (ascending) picks gen_a before gen_z
         assert results == {"gen_a"}, f"Expected 'gen_a' (lexicographically first), got {results}"
@@ -273,8 +279,8 @@ class TestFallback:
         plan = CommunicationPlanner().make_comm_plan(clients)
         # Both should be in the same peer group, one is designate
         for key in KEYS:
-            g0 = plan.get_peer_group("gen0", key)
-            g1 = plan.get_peer_group("gen1", key)
+            g0 = plan.get_peer_group("gen0", key, (0,))
+            g1 = plan.get_peer_group("gen1", key, (0,))
             assert set(g0) == set(g1) == {"gen0", "gen1"}, (
                 f"Unexpected peer groups: gen0={g0}, gen1={g1}"
             )
@@ -380,6 +386,94 @@ class TestScale:
         # verified the timing bound above.
         assert pull_plan, "Expected non-empty pull plan from _make_pull_from_ps_plan"
 
+    def test_large_mixed_layout_cluster_plans_quickly(self):
+        """Same scale, but half of every node's instances own 2 finest shards instead
+        of 1 (as if running at half the TP degree) — exercises the O(N x K x S) bound
+        with S > 1, which the uniform-TP test above cannot (every client there owns
+        exactly 1 shard per key, so S == 1 throughout)."""
+        NUM_TRAINERS = 64
+        NUM_NODES = 64
+        PER_NODE = 16
+        TP = 8
+        NUM_KEYS = 200
+
+        keys = [f"layer{i}.weight" for i in range(NUM_KEYS)]
+
+        def _ti(total: int, owned: list[int]) -> NIXLTensorInfo:
+            sharding = NIXLSharding(
+                shard_mesh=OrderedDict([(0, total)]),
+                shard_indices=[(i,) for i in sorted(owned)],
+            )
+            meta = NIXLShardMetaInfo(
+                dtype=torch.bfloat16,
+                device=torch.device("cuda:0"),
+                shape=torch.Size((128, 128)),
+                stride=(128, 1),
+                is_contiguous=True,
+            )
+            return NIXLTensorInfo(
+                desc_bytes_list=[None] * len(owned),
+                temp_desc_bytes_list=[None] * len(owned),
+                sharding=sharding,
+                shard_meta_infos=[meta] * len(owned),
+            )
+
+        clients: dict[str, NIXLClientInfo] = {}
+
+        for t in range(NUM_TRAINERS):
+            clients[f"train{t}"] = NIXLClientInfo(
+                name=f"train{t}",
+                node_ip=f"10.0.0.{t}",
+                node_gpu_id=t % 8,
+                type=NIXLClientType.PUSH_SIDE,
+                tensor_infos={k: _ti(TP, list(range(TP))) for k in keys},
+                meta=b"",
+            )
+
+        for node in range(NUM_NODES):
+            for slot in range(PER_NODE):
+                idx = node * PER_NODE + slot
+                if slot % 2 == 0:
+                    owned = [slot % TP]  # fine: 1 shard, as in the uniform test
+                else:
+                    pair_base = (slot % TP) - (slot % TP) % 2
+                    owned = [pair_base, pair_base + 1]  # coarse: 2 finest shards
+                clients[f"gen{idx}"] = NIXLClientInfo(
+                    name=f"gen{idx}",
+                    node_ip=f"10.1.0.{node}",
+                    node_gpu_id=slot % 8,
+                    type=NIXLClientType.PULL_SIDE,
+                    tensor_infos={k: _ti(TP, owned) for k in keys},
+                    meta=b"",
+                )
+
+        from psrl.utils.nixl.global_vars import GLOBAL_TOPOLOGY
+
+        for cn, ci in clients.items():
+            GLOBAL_TOPOLOGY.register_client(cn, ci.node_ip, ci.node_gpu_id)
+
+        push_groups: dict = {}
+        pull_groups: dict = {}
+        for cn, ci in clients.items():
+            gid = ci.client_group_id
+            if ci.type == NIXLClientType.PUSH_SIDE:
+                push_groups.setdefault(gid, []).append(cn)
+            elif ci.type == NIXLClientType.PULL_SIDE:
+                pull_groups.setdefault(gid, []).append(cn)
+
+        planner = CommunicationPlanner()
+        pull_plan: dict = {c: {} for g in pull_groups.values() for c in g}
+        planner._make_pull_from_ps_plan(clients, pull_groups, push_groups, pull_plan)
+
+        t_peer_start = time.perf_counter()
+        planner._make_peer_groups(clients, pull_plan)
+        peer_s = time.perf_counter() - t_peer_start
+
+        assert peer_s < 3.0, (
+            f"_make_peer_groups took {peer_s:.2f}s on a 1024-instance x 200-key mixed-layout "
+            f"cluster (limit: 3.0s) — per-shard bucketing may have broken the O(N x K x S) bound"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Test 7: existing invariants are preserved
@@ -393,13 +487,11 @@ class TestInvariantsPreserved:
         clients = _cluster(nodes=2, per_node=8, tp=2)
         plan = CommunicationPlanner().make_comm_plan(clients)
         for name, per_key in plan.peer_groups.items():
-            for key, wanters in per_key.items():
-                assert name in wanters and len(wanters) == len(set(wanters)) >= 2
-                assert len({clients[w].node_ip for w in wanters}) == 1
-                assert len({
-                    tuple(clients[w].tensor_infos[key].sharding.shard_indices)
-                    for w in wanters
-                }) == 1
+            for key, per_shard in per_key.items():
+                for shard, wanters in per_shard.items():
+                    assert name in wanters and len(wanters) == len(set(wanters)) >= 2
+                    assert len({clients[w].node_ip for w in wanters}) == 1
+                    assert all(shard in clients[w].tensor_infos[key].sharding.shard_indices for w in wanters)
 
     def test_upstream_reads_are_one_per_node_per_rank(self):
         from tests.nixl.test_peer_diffusion_plan import _cluster, _designates, KEYS as _KEYS
