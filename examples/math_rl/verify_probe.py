@@ -12,8 +12,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import os
 import sys
+import time
 
 import aiohttp
 from examples.math_rl.verifier import (
@@ -79,14 +81,19 @@ async def _check_health(
 
 
 async def _grade(config: VerifierConfig, label: str, problem: str, solution: str) -> float:
+    started = time.perf_counter()
+    print(f"{label}: request started at +{time.strftime('%H:%M:%S')}", flush=True)
     try:
         verdict = await evaluate(config, problem, solution)
     except VerifierError as error:
-        raise SystemExit(f"The {label} case produced no verdict: {error!r}") from error
+        elapsed = time.perf_counter() - started
+        raise SystemExit(f"The {label} case produced no verdict after {elapsed:.0f}s: {error!r}") from error
     print(
         f"{label}: verdict {verdict.verdict}, score {verdict.score(config):.2f}, "
         f"run_id {verdict.run_id or 'unknown'}, duration {verdict.duration_s}, "
-        f"usage {json.dumps(dict(verdict.usage), sort_keys=True)}"
+        f"wall {time.perf_counter() - started:.0f}s, "
+        f"usage {json.dumps(dict(verdict.usage), sort_keys=True)}",
+        flush=True,
     )
     if not verdict.run_id:
         print(f"warning: the {label} case returned no run id", file=sys.stderr)
@@ -104,7 +111,12 @@ async def main() -> int:
     parser.add_argument("--proxy", default=None, help="Defaults to the shell HTTP proxy.")
     parser.add_argument("--skip-health", action="store_true")
     parser.add_argument("--skip-cases", action="store_true")
+    parser.add_argument("--case", default="both", choices=("both", "correct", "broken"))
     args = parser.parse_args()
+    logging.basicConfig(
+        level=os.environ.get("MATH_RL_PROBE_LOG_LEVEL", "INFO"),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
 
     config = VerifierConfig(
         endpoint=args.endpoint or os.environ.get("MATH_RL_VERIFIER_URL", ""),
@@ -131,10 +143,17 @@ async def main() -> int:
                     session, config.endpoint, config.verifier_harness_version, config.model, config.proxy
                 )
         if not args.skip_cases:
-            good = await _grade(config, "correct", "Prove that n + 0 = n for every integer n.", _CORRECT)
-            bad = await _grade(config, "broken", "Prove that n + 0 = n for every integer n.", _BROKEN)
-            if bad > good:
-                raise SystemExit(f"The broken case scored {bad:.2f}, above the correct case at {good:.2f}.")
+            statement = "Prove that n + 0 = n for every integer n."
+            scores = {}
+            if args.case in ("both", "correct"):
+                scores["correct"] = await _grade(config, "correct", statement, _CORRECT)
+            if args.case in ("both", "broken"):
+                scores["broken"] = await _grade(config, "broken", statement, _BROKEN)
+            if len(scores) == 2 and scores["broken"] > scores["correct"]:
+                raise SystemExit(
+                    f"The broken case scored {scores['broken']:.2f}, "
+                    f"above the correct case at {scores['correct']:.2f}."
+                )
     finally:
         await reset_verifier_clients()
     print("preflight passed")

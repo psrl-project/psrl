@@ -372,3 +372,22 @@ def test_the_config_carries_the_outbound_proxy():
         proxy="http://proxy:3128",
     )
     assert config.proxy == "http://proxy:3128"
+
+
+async def test_a_stage_timeout_is_not_retried():
+    calls = {"count": 0}
+
+    async def handler(request):
+        calls["count"] += 1
+        return web.json_response(
+            {"detail": "codex exec timed out", "error_code": "verification_timeout"},
+            status=504,
+        )
+
+    async with serve(handler) as endpoint:
+        with pytest.raises(VerifierError) as caught:
+            await evaluate(_config(endpoint), "P", "S")
+
+    assert calls["count"] == 1
+    assert caught.value.kind == "timeout"
+    assert caught.value.retryable is False

@@ -445,7 +445,25 @@ class VerifierClient:
         )
 
 
+def _error_code(body: str) -> str:
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(parsed, dict):
+        return ""
+    return str(parsed.get("error_code") or "")
+
+
 def _raise_for_status(status: int, body: str) -> None:
+    # A stage timeout is not transient: the same stage limit will time out
+    # again, and a retry runs three model stages a second time.
+    if _error_code(body) == "verification_timeout":
+        raise VerifierError(
+            f"The verifier timed out during a stage: {body[:300]!r}.",
+            kind="timeout",
+            retryable=False,
+        )
     if status >= 500:
         raise VerifierError(
             f"The verifier returned HTTP {status}: {body[:300]!r}.",
