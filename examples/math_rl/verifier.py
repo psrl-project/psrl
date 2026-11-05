@@ -101,12 +101,14 @@ class VerifierConfig:
 
     @property
     def stream_read_timeout_s(self) -> float:
-        """The longest silence between events is one stage.
+        """The longest silence between events spans one whole stage.
 
-        The stream emits only on stage transitions, so a gap longer than one
-        stage limit plus margin means the stage is wedged rather than slow.
+        The stream emits only on stage transitions, and a stage runs several
+        Codex jobs that start after the previous transition, so one silent
+        span can approach the per-job limit plus its own setup. Two stage
+        limits plus a margin distinguish a wedged stage from a slow one.
         """
-        return self.stage_timeout_s + 120.0
+        return 2 * self.stage_timeout_s + 120.0
 
     def model_config(self) -> dict[str, Any]:
         """Render the model block the service accepts.
