@@ -336,6 +336,9 @@ RUN mkdir -p /root/.cargo && \
     printf '[source.crates-io]\nreplace-with = "ustc"\n[source.ustc]\nregistry = "sparse+https://mirrors.ustc.edu.cn/crates.io-index/"\n[http]\nmultiplexing = false\ntimeout = 60\n' \
         > /root/.cargo/config.toml
 
+# A previous layer can leave the cudnn frontend's files in place without its
+# dist metadata, and uv then refuses to overwrite them, so the step drops the
+# package directory and lets the editable install restore it.
 # vLLM is installed from a patched editable checkout. The source patch is kept
 # deliberately narrow: it declares the PSRL scheduler-stats fields and clamps the
 # v1 runner's cached block IDs. All other PSRL behavior lives in the vllm_patches
@@ -348,6 +351,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     cd ${PSRL_THIRD_PARTY}/vllm && \
     python use_existing_torch.py && \
     uv pip install -r requirements/build/cuda.txt && \
+    rm -rf /root/venv/lib/python3.12/site-packages/cudnn && \
     uv pip install --no-build-isolation -e .
 
 # DeepGEMM provides the block-scaled FP8 and grouped GEMM kernels vLLM selects
