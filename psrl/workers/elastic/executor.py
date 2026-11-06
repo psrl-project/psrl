@@ -829,7 +829,7 @@ class ElasticExecutor:
         """
         if not getattr(self.scaling_policy, "enable_request_level_candidate_evaluation", False):
             return None
-        from psrl.workers.config.reward_model import resolve_active_managers
+        from psrl.workers.config.reward_model import resolve_active_loops
         from psrl.workers.elastic.request_snapshot import build_role_snapshot
 
         if any(sum(role == candidate for role, _ in self.roles) > 1 for candidate, _ in self.roles):
@@ -859,7 +859,7 @@ class ElasticExecutor:
                 )
             else:
                 rm_cfg = next(
-                    cfg for cfg in resolve_active_managers(self.config.reward) if cfg.get("reward_model_name") == model
+                    cfg for cfg in resolve_active_loops(self.config.reward) if cfg.get("reward_model_name") == model
                 )
                 routing_cfg = rm_cfg.routing_strategy
                 rollout_cfg = rm_cfg.rollout

@@ -46,7 +46,7 @@ export PSRL_DEPLOY_SMOKE=${1:-0}
 shift || true
 
 export PSRL_DEPLOY_EXTRA="\
-++reward.managers.gen_qwen3_8b.rollout.engine_kwargs.vllm.gdn_prefill_backend=triton \
+++reward.reward_loops.llm_as_a_judge.rollout.engine_kwargs.vllm.gdn_prefill_backend=triton \
 "
 
 launch_elastic "$@"

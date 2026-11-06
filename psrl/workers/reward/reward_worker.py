@@ -30,24 +30,24 @@ psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
 
 @dataclass
 class RewardSpec:
-    reward_manager_type: str
+    reward_loop_type: str
     reward_fn_name: str
     reward_model_name: str | None
 
     def __hash__(self):
-        return hash((self.reward_manager_type, self.reward_fn_name, self.reward_model_name))
+        return hash((self.reward_loop_type, self.reward_fn_name, self.reward_model_name))
 
     def __eq__(self, other):
         if not isinstance(other, RewardSpec):
             return NotImplemented
         return (
-            self.reward_manager_type == other.reward_manager_type
+            self.reward_loop_type == other.reward_loop_type
             and self.reward_fn_name == other.reward_fn_name
             and self.reward_model_name == other.reward_model_name
         )
 
     def key(self) -> str:
-        return f"{self.reward_manager_type}/{self.reward_fn_name}/{self.reward_model_name}"
+        return f"{self.reward_loop_type}/{self.reward_fn_name}/{self.reward_model_name}"
 
 
 @ray.remote
@@ -59,7 +59,7 @@ class RewardLoopWorker:
         config,
         tokenizer,
         processor,
-        reward_model_configs: list[DictConfig],
+        reward_loop_configs: list[DictConfig],
         reward_model_runtime_infos: dict[str, Any] | None = None,
         worker_id: int = 0,
         worker_num: int = 1,
@@ -69,8 +69,8 @@ class RewardLoopWorker:
         self.config = config
         self.tokenizer = tokenizer
         self.processor = processor
-        self.reward_model_configs = reward_model_configs
-        self.reward_model_to_manager = reward_model_runtime_infos or {}
+        self.reward_loop_configs = reward_loop_configs
+        self.reward_model_runtime_infos = reward_model_runtime_infos or {}
         self.worker_id = worker_id
         self.worker_num = worker_num
         self.is_validate = is_validate
@@ -98,7 +98,7 @@ class RewardLoopWorker:
         self.completed = 0
         self.failed = 0
 
-        self.reward_spec_to_manager: dict[RewardSpec, RewardLoopBase] = {}
+        self.reward_spec_to_loop: dict[RewardSpec, RewardLoopBase] = {}
         self._init_reward_fn()
 
         pool_name = "ValidationRewardLoopWorker" if is_validate else "RewardLoopWorker"
@@ -244,43 +244,43 @@ class RewardLoopWorker:
         input_tokenizer_local_path = copy_to_local(self.config.train_actor_rollout_ref.model.path)
         self.input_tokenizer = hf_tokenizer(input_tokenizer_local_path, trust_remote_code=True)
 
-        for reward_model_config in self.reward_model_configs:
-            reward_manager_cfg = reward_model_config.reward_manager
-            reward_manager_type = reward_model_config.reward_loop_type
-            reward_fn_configs = reward_model_config.reward_fn
-            reward_model_name = reward_model_config.get("reward_model_name", None)
-            reward_kwargs = reward_model_config.get("reward_kwargs", {})
+        for reward_loop_config in self.reward_loop_configs:
+            reward_loop_cfg = reward_loop_config.reward_loop
+            reward_loop_type = reward_loop_config.reward_loop_type
+            reward_fn_configs = reward_loop_config.reward_fn
+            reward_model_name = reward_loop_config.get("reward_model_name", None)
+            reward_kwargs = reward_loop_config.get("reward_kwargs", {})
 
             for reward_fn_config in reward_fn_configs:
                 reward_fn_name = reward_fn_config.get("name", "null")
                 reward_spec = RewardSpec(
-                    reward_manager_type=reward_manager_type,
+                    reward_loop_type=reward_loop_type,
                     reward_fn_name=reward_fn_name,
                     reward_model_name=reward_model_name,
                 )
-                if reward_spec in self.reward_spec_to_manager:
-                    raise ValueError(f"Duplicate reward manager spec {reward_spec.key()!r}.")
+                if reward_spec in self.reward_spec_to_loop:
+                    raise ValueError(f"Duplicate reward loop spec {reward_spec.key()!r}.")
 
-                if reward_manager_type in ("gen", "opd") and (
-                    reward_model_name is None or reward_model_name not in self.reward_model_to_manager
+                if reward_loop_type in ("gen", "opd") and (
+                    reward_model_name is None or reward_model_name not in self.reward_model_runtime_infos
                 ):
                     raise ValueError(f"Reward model runtime info for {reward_model_name} not found")
 
-                reward_model_manager = self.reward_model_to_manager.get(reward_model_name, None)
-                reward_manager = load_reward_loop(
+                runtime_info = self.reward_model_runtime_infos.get(reward_model_name, None)
+                reward_loop = load_reward_loop(
                     self.config,
                     self.input_tokenizer,
-                    reward_loop_cfg=reward_manager_cfg,
+                    reward_loop_cfg=reward_loop_cfg,
                     reward_fn_config=reward_fn_config,
-                    reward_model_manager=reward_model_manager,
+                    reward_model_manager=runtime_info,
                     **reward_kwargs,
                 )
-                self.reward_spec_to_manager[reward_spec] = reward_manager
+                self.reward_spec_to_loop[reward_spec] = reward_loop
 
-    def _resolve_reward_manager(
+    def _resolve_reward_loops(
         self, reward_model_dicts: list[dict]
     ) -> tuple[list[str], list[RewardLoopBase], list[float]]:
-        reward_spec_keys, reward_managers, coefs = [], [], []
+        reward_spec_keys, reward_loops, coefs = [], [], []
         for reward_model_dict in normalize_reward_model_dicts(reward_model_dicts):
             reward_fn_name = resolve_reward_function_name(reward_model_dict.get("reward_fn", "default"))
 
@@ -297,19 +297,19 @@ class RewardLoopWorker:
                 raw_model_name = None
 
             reward_spec = RewardSpec(
-                reward_manager_type=reward_model_dict.get("reward_loop_type", "naive"),
+                reward_loop_type=reward_model_dict.get("reward_loop_type", "naive"),
                 reward_fn_name=reward_fn_name,
                 reward_model_name=raw_model_name,
             )
-            manager = self.reward_spec_to_manager.get(reward_spec, None)
+            reward_loop = self.reward_spec_to_loop.get(reward_spec, None)
 
-            if manager is None:
-                raise ValueError(f"No reward manager registered for spec {reward_spec.key()!r}.")
+            if reward_loop is None:
+                raise ValueError(f"No reward loop registered for spec {reward_spec.key()!r}.")
 
             reward_spec_keys.append(reward_spec.key())
-            reward_managers.append(manager)
+            reward_loops.append(reward_loop)
             coefs.append(reward_model_dict.get("reward_coef", 1.0))
-        return reward_spec_keys, reward_managers, coefs
+        return reward_spec_keys, reward_loops, coefs
 
     def pre_process(self, inputs: TensorDict) -> TensorDict:
         return ensure_reward_attention_mask(inputs)
@@ -319,15 +319,15 @@ class RewardLoopWorker:
         if len(reward_data) != 1:
             raise ValueError("Reward scoring requires exactly one request.")
         specs = normalize_reward_model_dicts(tu.get(reward_data, "reward_model_dicts")[0])
-        keys, managers, coefs = self._resolve_reward_manager(specs)
+        keys, reward_loops, coefs = self._resolve_reward_loops(specs)
         teachers = [i for i, spec in enumerate(specs) if spec.get("reward_loop_type") == "opd"]
         enabled = getattr(getattr(self.config, "distillation", None), "enabled", False)
         required = enabled and not self.is_validate
         if len(teachers) > 1 or (required and len(teachers) != 1):
             raise ValueError("Each OPD training request must select exactly one teacher reward model.")
-        scalar_indices = [i for i in range(len(managers)) if i not in teachers]
+        scalar_indices = [i for i in range(len(reward_loops)) if i not in teachers]
         results = await asyncio.gather(
-            *(self._run_scoring_manager(managers[i], specs[i], reward_data) for i in scalar_indices)
+            *(self._run_scoring_loop(reward_loops[i], specs[i], reward_data) for i in scalar_indices)
         )
         reward = {
             "reward_score": float(sum(r["reward_score"] * coefs[i] for i, r in zip(scalar_indices, results))),
@@ -357,7 +357,7 @@ class RewardLoopWorker:
                         tu.assign_non_tensor_stack(row, "multi_modal_data", [trajectory["multi_modal_data"]])
                     trajectory_data.append(self.pre_process(row))
             outputs = await asyncio.gather(
-                *(self._run_scoring_manager(managers[index], specs[index], row) for row in trajectory_data)
+                *(self._run_scoring_loop(reward_loops[index], specs[index], row) for row in trajectory_data)
             )
             reward["teacher_outputs"] = {
                 key: {
@@ -370,8 +370,8 @@ class RewardLoopWorker:
             }
         return reward
 
-    async def _run_scoring_manager(self, manager, specification: dict, data: TensorDict):
+    async def _run_scoring_loop(self, reward_loop: RewardLoopBase, specification: dict, data: TensorDict):
         """Serialize shared model storage while allowing independent CPU scoring."""
         orchestrator = self.inference_orchestrator if specification.get("reward_loop_type") in ("gen", "opd") else None
         async with inference_lease(orchestrator, "reward", specification.get("reward_model_name", "")):
-            return await manager.run_single(data)
+            return await reward_loop.run_single(data)

@@ -33,8 +33,8 @@ def test_trainer_creates_one_actor_and_passes_scoped_clients(monkeypatch):
         {
             "psrl": {"ps_manager_ip": "127.0.0.1"},
             "reward": {
-                "active_managers": ["judge"],
-                "managers": {
+                "active_loops": ["judge"],
+                "reward_loops": {
                     "judge": {
                         "reward_loop_type": "gen",
                         "reward_model_name": "judge",
@@ -67,7 +67,9 @@ def test_trainer_creates_one_actor_and_passes_scoped_clients(monkeypatch):
 
     trainer.init_reward_model_servers({"reward_model_judge_0": Mock()})
     reward_client = manager.call_args.kwargs["coordinator"]
-    owner.register_reward_model.remote.assert_called_once_with(trainer.config.reward.managers.judge, "http://reward")
+    owner.register_reward_model.remote.assert_called_once_with(
+        trainer.config.reward.reward_loops.judge, "http://reward"
+    )
     assert reward_client == CoordinatorClient(owner, ("reward", "judge")), (
         "The reward manager must use its own scope on the shared actor."
     )

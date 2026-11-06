@@ -32,18 +32,15 @@ by Jacob Helwig. For more details, please check
 
 ## Configure a Teacher Reward Model
 
-The following overlay uses the existing `gen_qwen3_8b` preset as a configuration
-label. Set `PSRL_WORKSPACE` to the directory containing your local `models/` and
+Use the `opd` preset and set the teacher model name and checkpoint path.
+Set `PSRL_WORKSPACE` to the directory containing your local `models/` and
 `data/` directories. Merge the overlay into the `ppo_trainer` configuration.
 
 ```yaml
 reward:
-  active_managers: [naive, gen_qwen3_8b]
-  managers:
-    gen_qwen3_8b:
-      reward_loop_type: opd
-      reward_manager:
-        name: opd
+  active_loops: [naive, opd]
+  reward_loops:
+    opd:
       reward_model_name: teacher
       enable_resource_pool: true
       nnodes: 1
@@ -91,8 +88,8 @@ trajectories.
 
 ### Multiple Teachers
 
-Register additional teachers under `reward.managers`, include their names in
-`reward.active_managers`, and give each a distinct `reward_model_name`. Each
+Register additional teachers under `reward.reward_loops`, include their names in
+`reward.active_loops`, and give each a distinct `reward_model_name`. Each
 dataset or dataset row selects one of those models through `reward_model_dicts`.
 For example, one dataset can select `teacher_math` with `teacher_weight: 0.5`,
 and another `teacher_code` with `teacher_weight: 1.5`.

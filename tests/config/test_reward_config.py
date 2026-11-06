@@ -9,7 +9,7 @@ def test_reward_model_config_defaults():
 
     cfg = RewardModelConfig()
     assert cfg.enable is False
-    assert cfg.reward_manager == "naive"
+    assert cfg.reward_loop == "naive"
     assert cfg.n_gpus_per_node == 0
     assert cfg.max_new_tokens == 4096
 
@@ -41,13 +41,13 @@ def test_reward_model_configs_are_exported_from_workers_config():
     assert SingleRewardModelConfig is not None
 
 
-def test_multi_reward_model_config_has_managers():
-    """Verify that MultiRewardModelConfig uses managers dict + active_managers list."""
+def test_multi_reward_model_config_has_reward_loops():
+    """Verify that MultiRewardModelConfig uses reward_loops dict + active_loops list."""
     from psrl.workers.config.reward_model import MultiRewardModelConfig
 
     cfg = MultiRewardModelConfig()
-    assert cfg.managers == {}
-    assert cfg.active_managers == []
+    assert cfg.reward_loops == {}
+    assert cfg.active_loops == []
     assert cfg.launch_reward_fn_async is False
 
 
@@ -61,60 +61,60 @@ def test_validation_reward_pool_has_independent_defaults():
     assert overridden.validation_reward_loop_worker.num_workers == 2, "Training overrides must not change validation."
 
 
-def test_resolve_active_managers():
-    """Test resolve_active_managers function resolves names to configs."""
+def test_resolve_active_loops():
+    """Test resolve_active_loops function resolves names to configs."""
     from dataclasses import dataclass
 
-    from psrl.workers.config.reward_model import resolve_active_managers
+    from psrl.workers.config.reward_model import resolve_active_loops
 
     @dataclass
-    class FakeManagerConfig:
+    class FakeLoopConfig:
         reward_loop_type: str = "naive"
 
     @dataclass
     class FakeRewardConfig:
-        active_managers: list = None
-        managers: dict = None
+        active_loops: list = None
+        reward_loops: dict = None
 
         def __post_init__(self):
-            if self.active_managers is None:
-                self.active_managers = []
-            if self.managers is None:
-                self.managers = {}
+            if self.active_loops is None:
+                self.active_loops = []
+            if self.reward_loops is None:
+                self.reward_loops = {}
 
-    dapo_cfg = FakeManagerConfig(reward_loop_type="dapo")
-    naive_cfg = FakeManagerConfig(reward_loop_type="naive")
+    dapo_cfg = FakeLoopConfig(reward_loop_type="dapo")
+    naive_cfg = FakeLoopConfig(reward_loop_type="naive")
 
     config = FakeRewardConfig(
-        active_managers=["dapo", "naive"],
-        managers={"dapo": dapo_cfg, "naive": naive_cfg},
+        active_loops=["dapo", "naive"],
+        reward_loops={"dapo": dapo_cfg, "naive": naive_cfg},
     )
-    resolved = resolve_active_managers(config)
+    resolved = resolve_active_loops(config)
     assert len(resolved) == 2
     assert resolved[0].reward_loop_type == "dapo"
     assert resolved[1].reward_loop_type == "naive"
 
 
-def test_resolve_active_managers_error():
-    """Test resolve_active_managers raises ValueError for unknown name."""
+def test_resolve_active_loops_error():
+    """Test resolve_active_loops raises ValueError for unknown name."""
     from dataclasses import dataclass
 
-    from psrl.workers.config.reward_model import resolve_active_managers
+    from psrl.workers.config.reward_model import resolve_active_loops
 
     @dataclass
     class FakeRewardConfig:
-        active_managers: list = None
-        managers: dict = None
+        active_loops: list = None
+        reward_loops: dict = None
 
         def __post_init__(self):
-            if self.active_managers is None:
-                self.active_managers = []
-            if self.managers is None:
-                self.managers = {}
+            if self.active_loops is None:
+                self.active_loops = []
+            if self.reward_loops is None:
+                self.reward_loops = {}
 
     config = FakeRewardConfig(
-        active_managers=["nonexistent"],
-        managers={},
+        active_loops=["nonexistent"],
+        reward_loops={},
     )
     with pytest.raises(ValueError, match="nonexistent"):
-        resolve_active_managers(config)
+        resolve_active_loops(config)

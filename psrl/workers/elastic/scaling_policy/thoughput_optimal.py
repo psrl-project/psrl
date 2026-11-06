@@ -322,9 +322,9 @@ class ThroughputOptimalScalingPolicy(ScalingPolicy):
             )
 
         reward_config = _read_config_value(self.config, "reward", {})
-        manager_configs = _read_config_value(reward_config, "managers", {})
-        active_names = _read_config_value(reward_config, "active_managers", [])
-        reward_models = [manager_configs[name] for name in active_names if name in manager_configs]
+        loop_configs = _read_config_value(reward_config, "reward_loops", {})
+        active_names = _read_config_value(reward_config, "active_loops", [])
+        reward_models = [loop_configs[name] for name in active_names if name in loop_configs]
         rm_methods: list[str] = []
         for reward_config in reward_models or ():
             method = _read_nested_config_value(

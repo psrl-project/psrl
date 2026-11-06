@@ -1,0 +1,8 @@
+defaults:
+  - llm_as_a_judge
+  - _self_
+
+reward_model_name: Qwen3-8B
+
+model:
+  path: ${oc.env:PSRL_WORKSPACE,/tmp}/models/Qwen3-8B

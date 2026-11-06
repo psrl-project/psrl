@@ -107,7 +107,7 @@ class ProbeActor:
     async def run(self, config_path, output_dir, mode, max_tokens, cycles):
         config = OmegaConf.load(config_path)
         OmegaConf.resolve(config)
-        rm_config = config.reward.managers.gen_qwen3_8b
+        rm_config = config.reward.reward_loops.llm_as_a_judge
         model_path = rm_config.model.path
         prompts = _prompts(model_path)
         sampling = SamplingParams(temperature=0.0, top_p=1.0, top_k=-1, max_tokens=max_tokens, seed=0)

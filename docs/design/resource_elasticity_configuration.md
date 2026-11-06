@@ -230,7 +230,7 @@ The matching inference TP/PP bucket is selected from the model settings.
 Configure routing cost models independently:
 
 - Rollout: `psrl.rollout_coordination.routing_strategy.cost_model_path`.
-- Reward: `reward.managers.<manager>.routing_strategy.cost_model_path`.
+- Reward: `reward.reward_loops.<manager>.routing_strategy.cost_model_path`.
 
 The supplied JSON files contain `TP1_PP1`, `TP4_PP1`, or other fitted buckets. The
 request-snapshot adapter requires the exact bucket and the routing fields

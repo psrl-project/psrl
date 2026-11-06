@@ -410,7 +410,7 @@ the same algorithm / reward / tool wiring as Path A but differ in:
 | Checkpoint | Requires a distributed Megatron checkpoint; `convert_hf_to_mcore.py` is invoked at the top of the script |
 | Parallelism | `TRAIN_TP`, `TRAIN_PP`, `TRAIN_CP` (plus `TRAIN_EP` / `TRAIN_ETP` for MoE) replace `TRAIN_FSDP` / `TRAIN_SP` |
 | Offload | `offload=True` is supported (param / optimizer / grad offload) |
-| Reward manager | Uses `reward.active_managers='[dapo]'` with the named DAPO overlong-buffer config, in addition to `custom_reward_function` |
+| Reward loop | Uses `reward.active_loops='[dapo]'` with the named DAPO overlong-buffer config, in addition to `custom_reward_function` |
 | Sequence lengths | `max_turns=16`, `max_response_length=30720`; longer responses but fewer turns than Path A |
 | Generation | `GEN_TP` raised to `4` (32B) to fit the weights |
 | Sampling | `val_top_p=0.7` instead of `1.0` |

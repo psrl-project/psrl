@@ -222,8 +222,8 @@ def test_reward_worker_pools_use_separate_roles_and_configuration(monkeypatch):
             validation_reward_loop_worker=SimpleNamespace(
                 num_workers=3, max_concurrency_per_worker=11, placement="all_cpu_nodes"
             ),
-            active_managers=[],
-            managers={},
+            active_loops=[],
+            reward_loops={},
         ),
     )
     trainer.ip_to_node_id = {"reward-service": "reward-node", "ps-service": "ps-node"}

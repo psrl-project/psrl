@@ -43,8 +43,9 @@ The parser reads the **last boxed expression**. Exactly `True` gives `1.0`.
 is determined by the judge's output, not by a ground-truth comparison inside this
 function. A cutoff before the final verdict can therefore produce a zero score.
 
-The supplied `gen_qwen3_8b` preset uses `reward_fn.name=default`,
-`rollout.runner=generate`, and `rollout.task=generate`. The loop sends tokenized
+The `llm_as_a_judge` preset selects the `default` reward function,
+`rollout.runner=generate`, and `rollout.task=generate`. Set its model name and
+checkpoint path explicitly. The loop sends tokenized
 judge prompts to `/v1/completions` and passes the generated text as `rm_output`
 to the scoring function. The prompt and parser are in
 `psrl/workers/reward/gen_reward_function/default_gen_rm.py`.
@@ -66,34 +67,34 @@ It produces no generated critique. The prompt and scorer are in
 Both examples use `reward_loop_type=gen`. Choose the checkpoint, registered
 scorer, runner, and task as a matching set:
 
-| Manager preset | Reward function | Runner / task | Scorer input |
+| Loop preset | Reward function | Runner / task | Scorer input |
 |----------------|-----------------|---------------|--------------|
+| `llm_as_a_judge` | `default` | `generate` / `generate` | `rm_output` text |
 | `gen_qwen3_8b` | `default` | `generate` / `generate` | `rm_output` text |
 | `gen_skywork` | `skywork` | `pooling` / `classify` | `rm_output_value` scalar |
 
 ## Configure a GenRM
 
 Model serving and sample-level reward selection are configured separately.
-`reward.active_managers` enables named runtime configurations. Each dataset's
+`reward.active_loops` enables named runtime configurations. Each dataset's
 `reward_model_dicts` selects the reward loops to execute for its samples.
 
-The following overlay uses the built-in Qwen3-8B judge preset. Merge it with a
-complete training configuration and retain the resource placement appropriate
-for your launcher:
+The following overlay configures the `llm_as_a_judge` preset. Merge it with a
+complete training configuration and set the model path, model name, and resource
+placement for your launcher:
 
 ```yaml
 reward:
-  active_managers: [naive, gen_qwen3_8b]
+  active_loops: [naive, llm_as_a_judge]
   reward_normalization: none
-  managers:
-    gen_qwen3_8b:
-      reward_loop_type: gen
-      reward_model_name: Qwen3-8B
+  reward_loops:
+    llm_as_a_judge:
+      reward_model_name: judge
       reward_fn:
         - path: null
           name: default
       model:
-        path: ${oc.env:PSRL_WORKSPACE}/models/Qwen3-8B
+        path: ${oc.env:PSRL_WORKSPACE}/models/judge
       rollout:
         runner: generate
         task: generate
@@ -112,23 +113,23 @@ data:
         - reward_fn_key: data_source
           reward_loop_type: gen
           reward_fn: default
-          reward_model_name: Qwen3-8B
+          reward_model_name: judge
           reward_coef: 1.0
 ```
 
-This training dataset selects **judge-only reward**. The active `naive` manager
+This training dataset selects **judge-only reward**. The active `naive` loop
 remains available for validation specifications that request verifiable reward.
 Configure `data.val_datas` independently if validation should also use the judge.
 
 Keep the tuple `(reward_loop_type, reward_fn, reward_model_name)` consistent with
-the enabled manager. In the dataset, `reward_fn` is the registered function name.
-In the manager, `reward_fn` is a list of function configurations. Merely enabling
-a manager does not attach it to every dataset. The manager key is a configuration
+the enabled loop. In the dataset, `reward_fn` is the registered function name.
+In the loop, `reward_fn` is a list of function configurations. Merely enabling
+a loop does not attach it to every dataset. The loop key is a configuration
 label. Set `reward_model_name` and `model.path` to your actual checkpoint when
 adapting a preset.
 
 For the supplied Skywork preset, activate `gen_skywork` in place of
-`gen_qwen3_8b`. In the dataset reward specification, select `reward_fn: skywork`
+`llm_as_a_judge`. In the dataset reward specification, select `reward_fn: skywork`
 and `reward_model_name: Skywork-Reward-V2-Qwen3-8B`. Keep `naive` active if the
 validation dataset still requests verifiable reward.
 
@@ -164,7 +165,7 @@ responses are decoded before the judge prompt is constructed and retokenized.
 Account for the judging instructions as well as the policy response when sizing
 the judge's context window.
 
-| Setting under `reward.managers.<name>` | Effect |
+| Setting under `reward.reward_loops.<name>` | Effect |
 |---------------------------------------|--------|
 | `model.path` | Judge checkpoint and default tokenizer location |
 | `model.tokenizer_path` | Optional separate tokenizer location |

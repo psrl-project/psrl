@@ -14,7 +14,7 @@ pytestmark = pytest.mark.cpu_test
 def config():
     teacher = {
         "reward_loop_type": "opd",
-        "reward_manager": {"name": "opd"},
+        "reward_loop": {"name": "opd"},
         "reward_model_name": "math",
         "reward_fn": [{"name": "default"}],
         "rollout": {"name": "vllm"},
@@ -22,7 +22,7 @@ def config():
     return OmegaConf.create(
         {
             "distillation": {"enabled": True},
-            "reward": {"active_managers": ["math"], "managers": {"math": teacher}},
+            "reward": {"active_loops": ["math"], "reward_loops": {"math": teacher}},
             "gen_actor_rollout_ref": {"rollout": {"agent": {"traj_reward_mode": "traj"}}},
             "data": {
                 "train_datas": [
@@ -43,10 +43,10 @@ def config():
 
 def test_multi_teacher_dataset_routes():
     cfg = config()
-    teacher = copy.deepcopy(cfg.reward.managers.math)
+    teacher = copy.deepcopy(cfg.reward.reward_loops.math)
     teacher.reward_model_name = "code"
-    cfg.reward.managers.code = teacher
-    cfg.reward.active_managers.append("code")
+    cfg.reward.reward_loops.code = teacher
+    cfg.reward.active_loops.append("code")
     cfg.data.train_datas.append(
         {
             "reward_model_dicts": [
@@ -66,9 +66,9 @@ def test_multi_teacher_dataset_routes():
 def test_invalid_teacher_config(damage):
     cfg = config()
     if damage == "no_service":
-        cfg.reward.active_managers = []
+        cfg.reward.active_loops = []
     elif damage == "duplicate_service":
-        cfg.reward.active_managers.append("math")
+        cfg.reward.active_loops.append("math")
     elif damage == "missing":
         cfg.data.train_datas[0].reward_model_dicts = []
     elif damage == "duplicate":

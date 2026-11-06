@@ -125,9 +125,9 @@ def resolve_tp_pp_for_role_model(config: Any, role_name: Any, model_name: str) -
         return format_tp_pp_key(tp, pp)
     if role_key == "rewardmodel":
         reward_config = _read_config_value(config, "reward")
-        manager_configs = _read_config_value(reward_config, "managers", {})
-        active_names = _read_config_value(reward_config, "active_managers", [])
-        reward_models = [manager_configs[name] for name in active_names if name in manager_configs]
+        loop_configs = _read_config_value(reward_config, "reward_loops", {})
+        active_names = _read_config_value(reward_config, "active_loops", [])
+        reward_models = [loop_configs[name] for name in active_names if name in loop_configs]
         for reward_cfg in reward_models:
             reward_model_name = _read_config_value(reward_cfg, "reward_model_name")
             model_path = _read_nested_config_value(reward_cfg, "model", "path")

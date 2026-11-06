@@ -167,9 +167,9 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path="${PSRL_PATH}/p
     algorithm.rollout_correction.rollout_is=${rollout_is} \
     algorithm.rollout_correction.rollout_is_threshold=${rollout_is_threshold} \
     \
-    reward.active_managers='[naive]' \
-    reward.managers.naive.reward_fn.0.path=${PSRL_PATH}/examples/retool/retool.py \
-    reward.managers.naive.reward_fn.0.name=compute_score \
+    reward.active_loops='[naive]' \
+    reward.reward_loops.naive.reward_fn.0.path=${PSRL_PATH}/examples/retool/retool.py \
+    reward.reward_loops.naive.reward_fn.0.name=compute_score \
     \
     +data.train_files="$train_files" \
     data.reward_model_dicts.0.reward_loop_type=naive \

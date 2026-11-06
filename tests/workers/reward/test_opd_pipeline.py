@@ -147,8 +147,8 @@ def make_worker(cfg, loops):
     worker.inference_orchestrator = None
     worker.completed = worker.failed = 0
     scalar = SimpleNamespace(run_single=AsyncMock(return_value={"reward_score": 4.0, "reward_extra_info": {}}))
-    worker.reward_spec_to_manager = {RewardSpec("opd", "default", name): loop for name, loop in loops.items()}
-    worker.reward_spec_to_manager[RewardSpec("naive", "compute_score", None)] = scalar
+    worker.reward_spec_to_loop = {RewardSpec("opd", "default", name): loop for name, loop in loops.items()}
+    worker.reward_spec_to_loop[RewardSpec("naive", "compute_score", None)] = scalar
     return worker
 
 

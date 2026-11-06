@@ -16,8 +16,8 @@ pytestmark = pytest.mark.cpu_test
 _ROLLOUT_CONFIG_PATHS = (
     "gen_actor_rollout_ref.rollout",
     "train_actor_rollout_ref.rollout",
-    "reward.managers.gen_qwen3_8b.rollout",
-    "reward.managers.gen_skywork.rollout",
+    "reward.reward_loops.gen_qwen3_8b.rollout",
+    "reward.reward_loops.gen_skywork.rollout",
 )
 
 

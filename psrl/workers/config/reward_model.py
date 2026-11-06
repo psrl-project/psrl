@@ -15,7 +15,7 @@ __all__ = [
     "SingleRewardModelConfig",
     "RewardLoopWorkerConfig",
     "MultiRewardModelConfig",
-    "resolve_active_managers",
+    "resolve_active_loops",
 ]
 
 
@@ -74,7 +74,7 @@ class RewardModelConfig(BaseConfig):
     enable_resource_pool: bool = False
     n_gpus_per_node: int = 0
     nnodes: int = 0
-    reward_manager: str = "naive"
+    reward_loop: str = "naive"
     launch_reward_fn_async: bool = False
     # Optional cap for concurrently occupied requests per RM instance.
     # None means unlimited (backward-compatible behavior).
@@ -153,21 +153,19 @@ class RewardLoopWorkerConfig(BaseConfig):
 
 @dataclass
 class MultiRewardModelConfig(BaseConfig):
-    """Configuration for multi-reward model setup.
+    """
+    Configuration for named reward loops and their worker pools.
 
     Args:
         launch_reward_fn_async (bool): Whether to launch reward function asynchronously.
-        # reward_models (list[SingleRewardModelConfig]): List of reward model configurations.
-        active_managers (list[str]): Ordered list of manager names to activate.
-        managers (dict[str, SingleRewardModelConfig]): Named reward manager definitions.
+        active_loops (list[str]): Ordered list of loop names to activate.
+        reward_loops (dict[str, SingleRewardModelConfig]): Named reward loop definitions.
         profiler (ProfilerConfig): Profiler configuration.
     """
 
     launch_reward_fn_async: bool = False
-    # reward_models: list[SingleRewardModelConfig] = field(default_factory=list)
-    # profiler: ProfilerConfig = field(default_factory=ProfilerConfig)
-    active_managers: list[str] = field(default_factory=list)
-    managers: dict[str, SingleRewardModelConfig] = field(default_factory=dict)
+    active_loops: list[str] = field(default_factory=list)
+    reward_loops: dict[str, SingleRewardModelConfig] = field(default_factory=dict)
     reward_loop_worker: RewardLoopWorkerConfig = field(default_factory=RewardLoopWorkerConfig)
     validation_reward_loop_worker: RewardLoopWorkerConfig = field(
         default_factory=lambda: RewardLoopWorkerConfig(num_workers=2)
@@ -175,30 +173,27 @@ class MultiRewardModelConfig(BaseConfig):
     profiler: ProfilerConfig = field(default_factory=ProfilerConfig)
 
 
-def resolve_active_managers(reward_config) -> list:
-    """Resolve active_managers names to an ordered list of reward model configurations.
-
-    Takes the reward config (either a dataclass instance or an OmegaConf DictConfig)
-    and returns the list of manager configs corresponding to the names in active_managers.
+def resolve_active_loops(reward_config) -> list:
+    """
+    Resolve named reward loop configurations in activation order.
 
     Args:
-        reward_config: The reward configuration object containing ``active_managers``
-            and ``managers`` fields.
+        reward_config: Configuration containing `active_loops` and `reward_loops`.
 
     Returns:
-        list: Ordered list of reward model configurations (SingleRewardModelConfig or DictConfig).
+        list: Ordered reward loop configurations.
 
     Raises:
-        ValueError: If a name in active_managers is not found in managers.
+        ValueError: If an active loop name has no configuration.
     """
-    active = reward_config.active_managers
-    managers = reward_config.managers
+    active = reward_config.active_loops
+    loops = reward_config.reward_loops
     resolved = []
     for name in active:
-        if name not in managers:
-            available = list(managers.keys())
+        if name not in loops:
+            available = list(loops.keys())
             raise ValueError(
-                f"Reward manager '{name}' in active_managers not found in managers. Available: {available}"
+                f"Reward loop {name!r} in active_loops is not defined in reward_loops. Available: {available!r}."
             )
-        resolved.append(managers[name])
+        resolved.append(loops[name])
     return resolved

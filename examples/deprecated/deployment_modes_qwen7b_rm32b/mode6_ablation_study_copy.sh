@@ -98,12 +98,12 @@ psrl.deployment.elastic.throughput_optimal.enable_heterogeneous_parallelism_cand
 psrl.deployment.elastic.throughput_optimal.enable_request_level_candidate_evaluation=${REQUEST_LEVEL_OVERRIDE} \
 psrl.deployment.elastic.throughput_optimal.rebalance_after_scale_up=${REBALANCE_OVERRIDE} \
 ${COST_MODEL_OVERRIDE} \
-+reward.managers.gen_qwen3_8b.routing_strategy.method=itl \
-+reward.managers.gen_qwen3_8b.routing_strategy.cost_model_path=${RM_COST_MODEL} \
-+reward.managers.gen_qwen3_8b.routing_strategy.delta_throughput_threshold=0.005 \
-+reward.managers.gen_qwen3_8b.routing_strategy.request_budget=1024 \
-+reward.managers.gen_qwen3_8b.routing_strategy.max_num_waiting_reqs_after_preemption=3 \
-+reward.managers.gen_qwen3_8b.routing_strategy.max_concurrent_seqs_per_instance=128 \
++reward.reward_loops.llm_as_a_judge.routing_strategy.method=itl \
++reward.reward_loops.llm_as_a_judge.routing_strategy.cost_model_path=${RM_COST_MODEL} \
++reward.reward_loops.llm_as_a_judge.routing_strategy.delta_throughput_threshold=0.005 \
++reward.reward_loops.llm_as_a_judge.routing_strategy.request_budget=1024 \
++reward.reward_loops.llm_as_a_judge.routing_strategy.max_num_waiting_reqs_after_preemption=3 \
++reward.reward_loops.llm_as_a_judge.routing_strategy.max_concurrent_seqs_per_instance=128 \
 "
 
 echo "mode6 ablation: POLICY=${POLICY} USE_COST_MODEL=${USE_COST_MODEL} USE_REBALANCE=${USE_REBALANCE} INTERRUPT_VLLM_WAITING=${INTERRUPT_VLLM_WAITING}"

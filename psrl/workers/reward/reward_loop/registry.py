@@ -5,7 +5,6 @@ from functools import partial
 from typing import Any, cast
 
 from omegaconf import DictConfig
-from verl.workers.config.reward import RewardManagerConfig
 
 from psrl.utils.reward_score import default_compute_score_async
 from psrl.workers.reward.gen_reward_function import get_gen_reward_function_cls
@@ -90,7 +89,7 @@ def get_custom_reward_fn(reward_fn_config: DictConfig) -> RawRewardFn | None:
 def load_reward_loop(
     config: DictConfig,
     tokenizer: Any,
-    reward_loop_cfg: RewardManagerConfig,
+    reward_loop_cfg: DictConfig,
     reward_fn_config: DictConfig,
     reward_model_manager: RewardModelRuntimeInfo | None = None,
     **reward_kwargs: Any,
@@ -102,7 +101,7 @@ def load_reward_loop(
             The configuration for the reward loop.
         tokenizer: `(Any)`
             The tokenizer for the input.
-        reward_loop_cfg: `(RewardManagerConfig)`
+        reward_loop_cfg: `(DictConfig)`
             The configuration that selects the reward loop class.
         reward_fn_config: `(DictConfig)`
             The configuration for the reward function.

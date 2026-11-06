@@ -9,6 +9,7 @@ set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/_common_deployment.sh"
+PSRL_PATH=$(cd -- "${SCRIPT_DIR}/../../.." && pwd)
 
 export PSRL_DEPLOY_MODE=elastic_rl
 export PSRL_DEPLOY_EXPERIMENT=mode5_overhead_bs_128_share_32_elastic_rl
@@ -49,12 +50,12 @@ psrl.deployment.elastic.throughput_optimal.router_waiting_top_t=-1 \
 psrl.deployment.elastic.throughput_optimal.role_throughput_weight_enable=true \
 psrl.deployment.elastic.throughput_optimal.role_throughput_weight_basis=request_count \
 psrl.deployment.elastic.throughput_optimal.role_throughput_weight_mode=raw \
-+reward.managers.gen_qwen3_8b.routing_strategy.method=itl \
-+reward.managers.gen_qwen3_8b.routing_strategy.cost_model_path=/apdcephfs_zwfy10/share_303541817/yfzhao/psrl/psrl/trainer/config/cost_model/qwen3.5_122b_a10b.json \
-+reward.managers.gen_qwen3_8b.routing_strategy.delta_throughput_threshold=0.005 \
-+reward.managers.gen_qwen3_8b.routing_strategy.request_budget=1024 \
-+reward.managers.gen_qwen3_8b.routing_strategy.max_num_waiting_reqs_after_preemption=3 \
-+reward.managers.gen_qwen3_8b.routing_strategy.max_concurrent_seqs_per_instance=128 \
++reward.reward_loops.llm_as_a_judge.routing_strategy.method=itl \
++reward.reward_loops.llm_as_a_judge.routing_strategy.cost_model_path=${PSRL_PATH}/psrl/trainer/config/cost_model/qwen3.5_122b_a10b.json \
++reward.reward_loops.llm_as_a_judge.routing_strategy.delta_throughput_threshold=0.005 \
++reward.reward_loops.llm_as_a_judge.routing_strategy.request_budget=1024 \
++reward.reward_loops.llm_as_a_judge.routing_strategy.max_num_waiting_reqs_after_preemption=3 \
++reward.reward_loops.llm_as_a_judge.routing_strategy.max_concurrent_seqs_per_instance=128 \
 "
 
 

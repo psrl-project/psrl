@@ -76,12 +76,12 @@ psrl.deployment.elastic.throughput_optimal.candidate_evaluation_backend=${PSRL_C
 psrl.deployment.elastic.throughput_optimal.candidate_evaluation_max_workers=${PSRL_CANDIDATE_EVALUATION_MAX_WORKERS} \
 psrl.deployment.elastic.throughput_optimal.candidate_evaluation_cpp_binary=${PSRL_CANDIDATE_EVALUATION_CPP_BINARY} \
 psrl.deployment.elastic.throughput_optimal.candidate_evaluation_cpp_timeout_s=${PSRL_CANDIDATE_EVALUATION_CPP_TIMEOUT_S} \
-+reward.managers.gen_qwen3_8b.routing_strategy.method=itl \
-+reward.managers.gen_qwen3_8b.routing_strategy.cost_model_path=${RM_COST_MODEL} \
-+reward.managers.gen_qwen3_8b.routing_strategy.delta_throughput_threshold=0.005 \
-+reward.managers.gen_qwen3_8b.routing_strategy.request_budget=1024 \
-+reward.managers.gen_qwen3_8b.routing_strategy.max_num_waiting_reqs_after_preemption=3 \
-+reward.managers.gen_qwen3_8b.routing_strategy.max_concurrent_seqs_per_instance=128 \
++reward.reward_loops.llm_as_a_judge.routing_strategy.method=itl \
++reward.reward_loops.llm_as_a_judge.routing_strategy.cost_model_path=${RM_COST_MODEL} \
++reward.reward_loops.llm_as_a_judge.routing_strategy.delta_throughput_threshold=0.005 \
++reward.reward_loops.llm_as_a_judge.routing_strategy.request_budget=1024 \
++reward.reward_loops.llm_as_a_judge.routing_strategy.max_num_waiting_reqs_after_preemption=3 \
++reward.reward_loops.llm_as_a_judge.routing_strategy.max_concurrent_seqs_per_instance=128 \
 "
 
 launch_qwen7b_rm32b_deployment_mode \

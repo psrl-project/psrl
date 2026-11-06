@@ -187,14 +187,14 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config --conf
     +train_actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full \
     +train_actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1 \
     \
-    reward.active_managers='[dapo]' \
-    reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer} \
-    reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len} \
-    reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \
-    reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.log=False \
-    reward.managers.dapo.reward_kwargs.max_resp_len=${max_response_length} \
-    reward.managers.dapo.reward_fn.0.path=${PSRL_PATH}/examples/retool/retool.py \
-    reward.managers.dapo.reward_fn.0.name=compute_score \
+    reward.active_loops='[dapo]' \
+    reward.reward_loops.dapo.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer} \
+    reward.reward_loops.dapo.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len} \
+    reward.reward_loops.dapo.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \
+    reward.reward_loops.dapo.reward_kwargs.overlong_buffer_cfg.log=False \
+    reward.reward_loops.dapo.reward_kwargs.max_resp_len=${max_response_length} \
+    reward.reward_loops.dapo.reward_fn.0.path=${PSRL_PATH}/examples/retool/retool.py \
+    reward.reward_loops.dapo.reward_fn.0.name=compute_score \
     \
     algorithm.rollout_correction.rollout_is=${rollout_is} \
     algorithm.rollout_correction.rollout_is_threshold=${rollout_is_threshold} \

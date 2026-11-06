@@ -1,0 +1,11 @@
+defaults:
+  - _model
+  - _self_
+
+reward_loop:
+  source: register
+  name: gen
+reward_loop_type: gen
+reward_fn:
+  - path: null
+    name: default

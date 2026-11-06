@@ -98,7 +98,7 @@ from psrl.utils.transfer_queue.payload import PayloadState, clear_payload
 from psrl.workers.agent_loop.manager import PSRL_AgentLoopManager
 from psrl.workers.agent_loop.prometheus_utils import update_prometheus_config
 from psrl.workers.agent_loop.worker import PSRL_AgentLoopWorker
-from psrl.workers.config.reward_model import resolve_active_managers
+from psrl.workers.config.reward_model import resolve_active_loops
 from psrl.workers.elastic.executor import ElasticExecutor, ReplicaRegistration
 from psrl.workers.elastic.sleep_wake_orchestrator import SleepWakeOrchestrator
 from psrl.workers.gen.rollout_gateway import RolloutGateway
@@ -688,7 +688,7 @@ class PSRL_RayPPOTrainer(RayPPOTrainer):
 
     def init_reward_gateways(self):
         """Launch one smg gateway per named generative reward model."""
-        for rm_cfg in resolve_active_managers(self.config.reward):
+        for rm_cfg in resolve_active_loops(self.config.reward):
             if rm_cfg.reward_loop_type not in ("gen", "opd"):
                 continue
             reward_model_name = rm_cfg.get("reward_model_name", rm_cfg.model.path.split("/")[-1])
@@ -707,7 +707,7 @@ class PSRL_RayPPOTrainer(RayPPOTrainer):
         Args:
             all_wg: dict mapping worker-group name → RayWorkerGroup.
         """
-        for rm_cfg in resolve_active_managers(self.config.reward):
+        for rm_cfg in resolve_active_loops(self.config.reward):
             if rm_cfg.reward_loop_type not in ("gen", "opd"):
                 continue
             reward_model_name = rm_cfg.get("reward_model_name", rm_cfg.model.path.split("/")[-1])
@@ -913,7 +913,7 @@ class PSRL_RayPPOTrainer(RayPPOTrainer):
                         self.config,
                         self.tokenizer,
                         self.processor,
-                        resolve_active_managers(self.config.reward),
+                        resolve_active_loops(self.config.reward),
                         reward_model_runtime_infos,
                         worker_id=i,
                         worker_num=worker_cfg.num_workers,
@@ -1720,7 +1720,7 @@ class PSRL_RayPPOTrainer(RayPPOTrainer):
 
         # Allocate resource pools for reward model replicas.
         reward_replica_idx = 0
-        for reward_model in resolve_active_managers(self.config.reward):
+        for reward_model in resolve_active_loops(self.config.reward):
             if reward_model.reward_loop_type not in ("gen", "opd"):
                 continue
             reward_model_name = reward_model.get("reward_model_name", reward_model.model.path.split("/")[-1])
@@ -1852,7 +1852,7 @@ class PSRL_RayPPOTrainer(RayPPOTrainer):
         self.rollout_wg_list = [all_wg[f"rollout_{i}"] for i in range(self.n_rollout_instances)]
         self.validate_wg_list = [all_wg[f"validate_{i}"] for i in range(self.n_validate_instances)]
         self.reward_model_to_wg_list = {}
-        for reward_model in resolve_active_managers(self.config.reward):
+        for reward_model in resolve_active_loops(self.config.reward):
             if reward_model.reward_loop_type not in ("gen", "opd"):
                 continue
             reward_model_name = reward_model.get("reward_model_name", reward_model.model.path.split("/")[-1])

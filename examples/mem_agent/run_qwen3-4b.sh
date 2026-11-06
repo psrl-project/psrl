@@ -185,12 +185,12 @@ PYTHONUNBUFFERED=1 python3 -m psrl.trainer.main_ppo \
     train_actor_rollout_ref.ref.megatron.param_offload=False \
     \
     reward.launch_reward_fn_async=True \
-    reward.active_managers='[dapo]' \
-    reward.managers.dapo.reward_fn.0.path=${reward_path} \
-    reward.managers.dapo.reward_fn.0.name=compute_score \
-    reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.enable=False \
-    reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.len=${max_response_length} \
-    reward.managers.dapo.reward_kwargs.max_resp_len=${max_response_length} \
+    reward.active_loops='[dapo]' \
+    reward.reward_loops.dapo.reward_fn.0.path=${reward_path} \
+    reward.reward_loops.dapo.reward_fn.0.name=compute_score \
+    reward.reward_loops.dapo.reward_kwargs.overlong_buffer_cfg.enable=False \
+    reward.reward_loops.dapo.reward_kwargs.overlong_buffer_cfg.len=${max_response_length} \
+    reward.reward_loops.dapo.reward_kwargs.max_resp_len=${max_response_length} \
     \
     +data.train_files=${train_files} \
     +data.val_files=${test_files} \

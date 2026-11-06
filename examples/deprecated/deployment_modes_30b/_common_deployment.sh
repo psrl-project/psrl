@@ -339,51 +339,51 @@ launch_deployment_mode() {
     esac
 
     REWARD_MODELS=(
-        reward.active_managers='[naive,dapo,gen_qwen3_8b]'
+        reward.active_loops='[naive,dapo,llm_as_a_judge]'
         reward.reward_normalization=none
-        reward.managers.naive.reward_loop_type=naive
-        reward.managers.dapo.reward_loop_type=dapo
-        reward.managers.dapo.reward_kwargs.max_resp_len=10240
-        reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.enable=True
-        reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.len=5120
-        reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.penalty_factor=1.0
-        reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.log=False
-        reward.managers.gen_qwen3_8b.reward_loop_type=gen
-        reward.managers.gen_qwen3_8b.reward_model_name=${RM_MODEL_NAME}
-        reward.managers.gen_qwen3_8b.enable_resource_pool=True
-        reward.managers.gen_qwen3_8b.rollout_ngpus_per_instance_per_node=${RM_NGPUS_PER_NODE_PER_INSTANCE}
-        reward.managers.gen_qwen3_8b.rollout_nnodes_per_instance=1
-        reward.managers.gen_qwen3_8b.max_concurrent_requests_per_instance=128
-        reward.managers.gen_qwen3_8b.model.path=${RM_MODEL_PATH}
-        reward.managers.gen_qwen3_8b.model.use_shm=False
-        reward.managers.gen_qwen3_8b.model.trust_remote_code=False
-        reward.managers.gen_qwen3_8b.rollout._target_=psrl.workers.config.RolloutConfig
-        reward.managers.gen_qwen3_8b.rollout.name=vllm
-        reward.managers.gen_qwen3_8b.rollout.mode=psrl_async
-        reward.managers.gen_qwen3_8b.rollout.disable_attn=False
-        reward.managers.gen_qwen3_8b.rollout.dtype=bfloat16
-        reward.managers.gen_qwen3_8b.rollout.gpu_memory_utilization=0.65
-        reward.managers.gen_qwen3_8b.rollout.enforce_eager=true
-        reward.managers.gen_qwen3_8b.rollout.free_cache_engine=true
-        reward.managers.gen_qwen3_8b.rollout.data_parallel_size=1
-        reward.managers.gen_qwen3_8b.rollout.expert_parallel_size=${RM_EP}
-        reward.managers.gen_qwen3_8b.rollout.tensor_model_parallel_size=${RM_TP}
-        reward.managers.gen_qwen3_8b.rollout.pipeline_model_parallel_size=${RM_PP}
-        reward.managers.gen_qwen3_8b.rollout.max_num_batched_tokens=$((1024 * 16 + 1024 * 20))
-        reward.managers.gen_qwen3_8b.rollout.max_num_seqs=512
-        reward.managers.gen_qwen3_8b.rollout.enable_chunked_prefill=false
-        reward.managers.gen_qwen3_8b.rollout.enable_prefix_caching=false
-        +reward.managers.gen_qwen3_8b.rollout.engine_kwargs.vllm.async_scheduling=false
-        reward.managers.gen_qwen3_8b.rollout.disable_log_stats=false
-        reward.managers.gen_qwen3_8b.rollout.skip_tokenizer_init=false
-        reward.managers.gen_qwen3_8b.rollout.prompt_length=$((1024 * 16))
-        reward.managers.gen_qwen3_8b.rollout.response_length=$((1024 * 20))
-        reward.managers.gen_qwen3_8b.rollout.max_model_len=$((1024 * 16 + 1024 * 20))
-        reward.managers.gen_qwen3_8b.rollout.runner=generate
-        reward.managers.gen_qwen3_8b.rollout.task=generate
-        reward.managers.gen_qwen3_8b.sampling_config.temperature=1.0
-        reward.managers.gen_qwen3_8b.sampling_config.top_p=1.0
-        reward.managers.gen_qwen3_8b.sampling_config.top_k=-1
+        reward.reward_loops.naive.reward_loop_type=naive
+        reward.reward_loops.dapo.reward_loop_type=dapo
+        reward.reward_loops.dapo.reward_kwargs.max_resp_len=10240
+        reward.reward_loops.dapo.reward_kwargs.overlong_buffer_cfg.enable=True
+        reward.reward_loops.dapo.reward_kwargs.overlong_buffer_cfg.len=5120
+        reward.reward_loops.dapo.reward_kwargs.overlong_buffer_cfg.penalty_factor=1.0
+        reward.reward_loops.dapo.reward_kwargs.overlong_buffer_cfg.log=False
+        reward.reward_loops.llm_as_a_judge.reward_loop_type=gen
+        reward.reward_loops.llm_as_a_judge.reward_model_name=${RM_MODEL_NAME}
+        reward.reward_loops.llm_as_a_judge.enable_resource_pool=True
+        reward.reward_loops.llm_as_a_judge.rollout_ngpus_per_instance_per_node=${RM_NGPUS_PER_NODE_PER_INSTANCE}
+        reward.reward_loops.llm_as_a_judge.rollout_nnodes_per_instance=1
+        reward.reward_loops.llm_as_a_judge.max_concurrent_requests_per_instance=128
+        reward.reward_loops.llm_as_a_judge.model.path=${RM_MODEL_PATH}
+        reward.reward_loops.llm_as_a_judge.model.use_shm=False
+        reward.reward_loops.llm_as_a_judge.model.trust_remote_code=False
+        reward.reward_loops.llm_as_a_judge.rollout._target_=psrl.workers.config.RolloutConfig
+        reward.reward_loops.llm_as_a_judge.rollout.name=vllm
+        reward.reward_loops.llm_as_a_judge.rollout.mode=psrl_async
+        reward.reward_loops.llm_as_a_judge.rollout.disable_attn=False
+        reward.reward_loops.llm_as_a_judge.rollout.dtype=bfloat16
+        reward.reward_loops.llm_as_a_judge.rollout.gpu_memory_utilization=0.65
+        reward.reward_loops.llm_as_a_judge.rollout.enforce_eager=true
+        reward.reward_loops.llm_as_a_judge.rollout.free_cache_engine=true
+        reward.reward_loops.llm_as_a_judge.rollout.data_parallel_size=1
+        reward.reward_loops.llm_as_a_judge.rollout.expert_parallel_size=${RM_EP}
+        reward.reward_loops.llm_as_a_judge.rollout.tensor_model_parallel_size=${RM_TP}
+        reward.reward_loops.llm_as_a_judge.rollout.pipeline_model_parallel_size=${RM_PP}
+        reward.reward_loops.llm_as_a_judge.rollout.max_num_batched_tokens=$((1024 * 16 + 1024 * 20))
+        reward.reward_loops.llm_as_a_judge.rollout.max_num_seqs=512
+        reward.reward_loops.llm_as_a_judge.rollout.enable_chunked_prefill=false
+        reward.reward_loops.llm_as_a_judge.rollout.enable_prefix_caching=false
+        +reward.reward_loops.llm_as_a_judge.rollout.engine_kwargs.vllm.async_scheduling=false
+        reward.reward_loops.llm_as_a_judge.rollout.disable_log_stats=false
+        reward.reward_loops.llm_as_a_judge.rollout.skip_tokenizer_init=false
+        reward.reward_loops.llm_as_a_judge.rollout.prompt_length=$((1024 * 16))
+        reward.reward_loops.llm_as_a_judge.rollout.response_length=$((1024 * 20))
+        reward.reward_loops.llm_as_a_judge.rollout.max_model_len=$((1024 * 16 + 1024 * 20))
+        reward.reward_loops.llm_as_a_judge.rollout.runner=generate
+        reward.reward_loops.llm_as_a_judge.rollout.task=generate
+        reward.reward_loops.llm_as_a_judge.sampling_config.temperature=1.0
+        reward.reward_loops.llm_as_a_judge.sampling_config.top_p=1.0
+        reward.reward_loops.llm_as_a_judge.sampling_config.top_k=-1
     )
 
     mkdir -p "${PSRL_WORKSPACE}/logs/${project_name}"
@@ -416,7 +416,7 @@ launch_deployment_mode() {
                 psrl.deployment.elastic.enable=False
             )
             if [[ "${PSRL_DEPLOY_RM_NUM_REPLICAS}" != "0" ]]; then
-                DEPLOY_ARGS+=( reward.managers.gen_qwen3_8b.num_replicas=${PSRL_DEPLOY_RM_NUM_REPLICAS} )
+                DEPLOY_ARGS+=( reward.reward_loops.llm_as_a_judge.num_replicas=${PSRL_DEPLOY_RM_NUM_REPLICAS} )
             fi
             ;;
         colocated|rollout_rm_colocated|elastic_rl)
@@ -450,8 +450,8 @@ launch_deployment_mode() {
                 psrl.rollout_coordination.routing_strategy.enable_multi_priority_queue=False
                 psrl.rollout_coordination.routing_strategy.max_num_waiting_reqs_after_preemption=10000
                 ++gen_actor_rollout_ref.rollout.use_psrl_scheduler=True
-                ++reward.managers.gen_qwen3_8b.routing_strategy.method=round_robin
-                ++reward.managers.gen_qwen3_8b.rollout.use_psrl_scheduler=True
+                ++reward.reward_loops.llm_as_a_judge.routing_strategy.method=round_robin
+                ++reward.reward_loops.llm_as_a_judge.rollout.use_psrl_scheduler=True
             )
             ;;
     esac

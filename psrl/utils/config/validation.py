@@ -147,23 +147,44 @@ def validate_nixl_actor_offload(config: DictConfig) -> None:
 
 
 # TODO(zyf): After refactoring, elastic rl's configuration check should be considered.
+def validate_reward_loops(config: DictConfig) -> None:
+    """
+    Require explicit model identity and checkpoint paths for active model reward loops.
+    """
+    reward_config = config.get("reward")
+    if reward_config is None or not reward_config.get("active_loops", []):
+        return
+    from psrl.workers.config.reward_model import resolve_active_loops
+
+    for name, loop in zip(reward_config.active_loops, resolve_active_loops(reward_config), strict=True):
+        if loop.get("reward_loop_type") not in ("gen", "opd"):
+            continue
+        model = loop.get("model") or {}
+        for field, value in (
+            ("reward_model_name", loop.get("reward_model_name")),
+            ("model.path", model.get("path")),
+        ):
+            if not isinstance(value, str) or not value.strip() or value == "???":
+                raise ValueError(f"Active reward loop {name!r} requires a nonempty {field}.")
+
+
 def validate_opd_config(config: DictConfig) -> None:
     """Check teacher service registration and explicit dataset routing before GPU allocation."""
     if not config.get("distillation", {}).get("enabled", False):
         return
     from psrl.utils.dataset.utils import normalize_reward_model_dicts
-    from psrl.workers.config.reward_model import resolve_active_managers
+    from psrl.workers.config.reward_model import resolve_active_loops
     from psrl.workers.reward.reward_protocol import resolve_reward_function_name
 
-    teachers = [item for item in resolve_active_managers(config.reward) if item.reward_loop_type == "opd"]
+    teachers = [item for item in resolve_active_loops(config.reward) if item.reward_loop_type == "opd"]
     if not teachers:
-        raise ValueError("Distillation requires at least one active OPD reward manager.")
+        raise ValueError("Distillation requires at least one active OPD reward loop.")
     names = [teacher.get("reward_model_name") for teacher in teachers]
     if any(not isinstance(name, str) or not name for name in names) or len(set(names)) != len(names):
         raise ValueError("OPD teachers require unique, nonempty reward_model_name values.")
     signatures = []
     for teacher in teachers:
-        if teacher.reward_manager.name != "opd" or teacher.rollout.name != "vllm":
+        if teacher.reward_loop.name != "opd" or teacher.rollout.name != "vllm":
             raise ValueError("OPD requires an OPD reward loop and a vLLM reward service.")
         for function in teacher.reward_fn:
             signatures.append((teacher.reward_model_name, function.name))
@@ -186,7 +207,7 @@ def validate_opd_config(config: DictConfig) -> None:
             route.get("reward_model_name"),
             resolve_reward_function_name(route.get("reward_fn", "default")),
         ) not in signatures:
-            raise ValueError("Dataset OPD teacher does not exactly match an active reward manager.")
+            raise ValueError("Dataset OPD teacher does not exactly match an active reward loop.")
 
 
 def validate_config(
@@ -204,6 +225,7 @@ def validate_config(
 
     resolve_deployment_mode(config)
     validate_nixl_actor_offload(config)
+    validate_reward_loops(config)
     validate_opd_config(config)
 
     train_n_gpus = config.psrl.deployment.train_ngpus_per_node * config.psrl.deployment.train_nnodes

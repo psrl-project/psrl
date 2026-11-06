@@ -38,8 +38,8 @@ def _config(rollout_method="throughput_optimal", rm_method="itl"):
             ),
         ),
         reward=SimpleNamespace(
-            active_managers=["default"],
-            managers={
+            active_loops=["default"],
+            reward_loops={
                 "default": SimpleNamespace(
                     routing_strategy=SimpleNamespace(method=rm_method),
                 )

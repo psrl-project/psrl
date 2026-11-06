@@ -57,9 +57,9 @@ psrl.tms.enable_nixl=True \
 ++psrl.nixl.weight_arena.reward_cpu_cache_pin_memory=false \
 ++psrl.nixl.weight_arena.max_chunk_gb=4 \
 ++psrl.nixl.weight_arena.alignment_bytes=256 \
-+reward.managers.gen_qwen3_8b.rollout.engine_kwargs.vllm.hf_overrides.rope_parameters.rope_type=yarn \
-+reward.managers.gen_qwen3_8b.rollout.engine_kwargs.vllm.hf_overrides.rope_parameters.factor=1.25 \
-+reward.managers.gen_qwen3_8b.rollout.engine_kwargs.vllm.hf_overrides.rope_parameters.original_max_position_embeddings=32768 \
++reward.reward_loops.llm_as_a_judge.rollout.engine_kwargs.vllm.hf_overrides.rope_parameters.rope_type=yarn \
++reward.reward_loops.llm_as_a_judge.rollout.engine_kwargs.vllm.hf_overrides.rope_parameters.factor=1.25 \
++reward.reward_loops.llm_as_a_judge.rollout.engine_kwargs.vllm.hf_overrides.rope_parameters.original_max_position_embeddings=32768 \
 "
 
 launch_elastic "$@"

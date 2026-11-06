@@ -67,15 +67,15 @@ def test_fixed_idle_driver_preserves_main_pools_and_registers_sliced_borrowers()
         rollout_ngpus_per_instance_per_node=2,
         rollout_nnodes_per_instance=1,
     )
-    cfg.reward.active_managers = ["judge"]
-    cfg.reward.managers = {"judge": rm}
+    cfg.reward.active_loops = ["judge"]
+    cfg.reward.reward_loops = {"judge": rm}
     runner = object.__new__(TaskRunner.__ray_metadata__.modified_class)
     runner.mapping = {}
     manager = runner.init_resource_pool_mgr(cfg)
     assert manager.mapping[PSRL_Role.Rollout] == [f"rollout_{index}" for index in range(4)], (
         "Configured main replicas and fixed borrowers must have distinct worker groups."
     )
-    assert cfg.reward.managers.judge.num_replicas == 2, "Idle reward workers must join their named model manager."
+    assert cfg.reward.reward_loops.judge.num_replicas == 2, "Idle reward workers must join their named model manager."
     placements = manager.elastic_replica_placements
     assert placements["rollout_0"].pool_id == "rollout_pool_0", "Main rollout must keep its independent GPU pool."
     assert placements["reward_model_reward_0"].pool_id == "reward_pool_reward_0", (
@@ -153,7 +153,7 @@ def test_driver_counts_both_pools_without_allocating_extra_gpus(monkeypatch, ena
         "elastic_pool_specs": elastic_pool_specs,
         "plan_replicas": plan_replicas,
         "expand_ngpus_per_node": expand_ngpus_per_node,
-        "resolve_active_managers": lambda cfg: [cfg.manager],
+        "resolve_active_loops": lambda cfg: [cfg.manager],
         "psrl_logger": logging.getLogger(__name__),
     }
     exec(compile(ast.Module(body=[method], type_ignores=[]), "main_ppo.py", "exec"), namespace)

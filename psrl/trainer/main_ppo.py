@@ -17,7 +17,7 @@ from psrl.trainer.constants_ppo import get_ppo_ray_runtime_env
 from psrl.trainer.ppo.utils import PSRL_Role
 from psrl.utils.config.deployment_mode import expand_ngpus_per_node, resolve_deployment_mode
 from psrl.utils.config.validation import validate_config
-from psrl.workers.config.reward_model import resolve_active_managers
+from psrl.workers.config.reward_model import resolve_active_loops
 from psrl.workers.elastic.pool_layout import ReplicaPlacement, elastic_pool_specs, plan_idle_replicas, plan_replicas
 
 psrl_logger = logging.getLogger(__file__)
@@ -322,7 +322,7 @@ class TaskRunner:
 
         # Reward model resource pool
         total_reward_pool_id_list = []
-        for reward_model in resolve_active_managers(config.reward):
+        for reward_model in resolve_active_loops(config.reward):
             if reward_model.reward_loop_type not in ("gen", "opd"):
                 continue
             if deployment_config.elastic.enable:
@@ -374,7 +374,7 @@ class TaskRunner:
                 rollout.tensor_model_parallel_size * rollout.pipeline_model_parallel_size * rollout.data_parallel_size
             )
             requests.append(("idle_rollout", int(deployment_config.trainer_pool_idle_rollout_instances), rollout_size))
-            rewards = [rm for rm in resolve_active_managers(config.reward) if rm.reward_loop_type in ("gen", "opd")]
+            rewards = [rm for rm in resolve_active_loops(config.reward) if rm.reward_loop_type in ("gen", "opd")]
             for rm in rewards:
                 name = rm.get("reward_model_name") or rm.model.path.split("/")[-1]
                 size = (

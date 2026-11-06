@@ -13,7 +13,7 @@ export PSRL_DEPLOY_RM_TP=4
 
 launch_qwen7b_rm32b_deployment_mode() {
     launch_deployment_mode \
-        reward.managers.gen_qwen3_8b.rollout.gpu_memory_utilization=0.65 \
-        reward.managers.gen_qwen3_8b.rollout.max_num_seqs=512 \
+        reward.reward_loops.llm_as_a_judge.rollout.gpu_memory_utilization=0.65 \
+        reward.reward_loops.llm_as_a_judge.rollout.max_num_seqs=512 \
         "$@"
 }

@@ -65,8 +65,8 @@ def test_resolve_cost_model_params_uses_config_parallelism_for_tp_pp():
             rollout=SimpleNamespace(tensor_model_parallel_size=1, pipeline_model_parallel_size=1)
         ),
         reward=SimpleNamespace(
-            active_managers=["default"],
-            managers={
+            active_loops=["default"],
+            reward_loops={
                 "default": SimpleNamespace(
                     reward_model_name="Qwen3-8B",
                     rollout=SimpleNamespace(tensor_model_parallel_size=1, pipeline_model_parallel_size=1),

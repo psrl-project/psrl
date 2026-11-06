@@ -181,12 +181,12 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo \
     psrl.group_post_process.enable=${enable_dynamic_sampling_filter} \
     psrl.group_post_process.name=dynamic_sampling_filter \
     \
-    reward.active_managers='[dapo]' \
-    reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer} \
-    reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len} \
-    reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \
-    reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.log=False \
-    reward.managers.dapo.reward_kwargs.max_resp_len=${max_response_length} \
+    reward.active_loops='[dapo]' \
+    reward.reward_loops.dapo.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer} \
+    reward.reward_loops.dapo.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len} \
+    reward.reward_loops.dapo.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \
+    reward.reward_loops.dapo.reward_kwargs.overlong_buffer_cfg.log=False \
+    reward.reward_loops.dapo.reward_kwargs.max_resp_len=${max_response_length} \
     \
     data.train_files="${train_files}" \
     data.val_files="${test_files}" \
