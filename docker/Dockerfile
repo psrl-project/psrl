@@ -236,6 +236,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # Rust is needed for the SMG gateway and its Python binding. SMG may carry a
 # rust-toolchain file; rustup will honor it when Cargo enters the checkout.
+# The two roots follow the rustup environment contract so a build network that
+# cannot reach the public distribution host can point at a mirror of it.
+ARG RUSTUP_UPDATE_ROOT=https://static.rust-lang.org/rustup
+ARG RUSTUP_DIST_SERVER=https://static.rust-lang.org
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
         sh -s -- -y --profile minimal --default-toolchain stable && \
     rustup component add rustfmt clippy
