@@ -2253,7 +2253,7 @@ index b724eae7..9cf2539e 100644
          # 1. build reference model
          if "ref" in self.role:
 diff --git a/verl/workers/utils/losses.py b/verl/workers/utils/losses.py
-index aff27653..7fba900f 100644
+index aff27653..d0324198 100644
 --- a/verl/workers/utils/losses.py
 +++ b/verl/workers/utils/losses.py
 @@ -66,6 +66,7 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
@@ -2289,16 +2289,29 @@ index aff27653..7fba900f 100644
      fields = ["response_mask", "old_log_probs", "advantages"]
      if "rollout_is_weights" in data:
          fields.append("rollout_is_weights")
-@@ -110,8 +129,6 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
+@@ -108,9 +127,19 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
+     advantages = data["advantages"]
+     rollout_is_weights = data.get("rollout_is_weights", None)
  
-     loss_agg_mode = config.loss_agg_mode
+-    loss_agg_mode = config.loss_agg_mode
++    if not bool(response_mask.any()):
++        # Dynamic batching can put a single masked-out row into a micro-batch of its own,
++        # when the trajectory ran out of budget or was never graded. It trains no tokens,
++        # so every masked statistic would divide by zero. Keep one synthetic support token
++        # so the statistic shapes stay well defined and every micro-batch reports the same
++        # metric keys, then zero the loss and the metrics at the end.
++        response_mask = response_mask.clone()
++        response_mask.reshape(-1)[0] = True
++        empty_mask = True
++    else:
++        empty_mask = False
  
 -    loss_mode = config.policy_loss.get("loss_mode", "vanilla")
--
++    loss_agg_mode = config.loss_agg_mode
+ 
      policy_loss_fn = get_policy_loss_fn(loss_mode)
      policy_loss_kwargs = {"sc_correction": sc_outputs["sc_correction"]} if sc_outputs else {}
-     pg_loss, pg_metrics = policy_loss_fn(
-@@ -135,6 +152,7 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
+@@ -135,6 +164,7 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
          for key in (
              "sc_sampler_head_mass",
              "sc_train_head_mass",
@@ -2306,6 +2319,21 @@ index aff27653..7fba900f 100644
              "sc_support_aligned",
              "sc_sampler_tail_mass",
              "sc_support_unknown",
+@@ -181,6 +211,14 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
+         metrics["kl_loss"] = Metric(value=kl_loss, aggregation=metric_aggregation)
+         metrics["kl_coef"] = config.kl_loss_coef
+ 
++    if empty_mask:
++        # The synthetic token keeps the statistics well defined, not measured.
++        policy_loss = policy_loss * 0
++        metrics = {
++            key: Metric(aggregation=value.aggregation, value=0.0) if isinstance(value, Metric) else 0.0
++            for key, value in metrics.items()
++        }
++
+     return policy_loss, metrics
+ 
+ 
 diff --git a/verl/trainer/config/data/legacy_data.yaml b/verl/trainer/config/data/legacy_data.yaml
 index 2971c6b5..8f0ad7dd 100644
 --- a/verl/trainer/config/data/legacy_data.yaml
@@ -2319,3 +2347,39 @@ index 2971c6b5..8f0ad7dd 100644
  
  # Seed to use when shuffling the data
  seed: null
+diff --git a/verl/utils/tensordict_utils.py b/verl/utils/tensordict_utils.py
+index 91d82b15..40e30180 100644
+--- a/verl/utils/tensordict_utils.py
++++ b/verl/utils/tensordict_utils.py
+@@ -911,8 +911,29 @@ def maybe_fix_3d_position_ids(data: TensorDict):
+     # note for tensordict with pickle/unpickle. nested tensor in tensordict after consolidate and pickle/unpickle
+     # will incur indexing error for ragged tensor. This only happens when using 3D position ids in VLMs.
+     # This is likely a bug in tensordict. As a workaround, we manually set _ragged_index.
+-    if "position_ids" in data.keys() and data["position_ids"].dim() == 3 and data["position_ids"].is_nested:
+-        data["position_ids"]._ragged_idx = 2
++    #
++    # Two layouts reach this point, and the ragged axis is not the same in both:
++    #   * (num_axes, total_tokens), built by concatenating (num_axes, tokens_i)
++    #     samples along the token axis. The ragged axis is the token axis.
++    #   * (batch * num_axes, max_seq_len), built with as_nested_tensor over
++    #     (num_axes, seq_len) samples. The ragged axis is the axis the samples
++    #     were stacked on, and the token axis keeps the padded length.
++    # Both report dim() == 3 once nested, so the axis has to be read from the
++    # offsets: the ragged axis is whichever extent equals the offset total.
++    if "position_ids" not in data.keys():
++        return
++    position_ids = data["position_ids"]
++    if not (isinstance(position_ids, torch.Tensor) and position_ids.is_nested and position_ids.dim() == 3):
++        return
++    values = position_ids.values()
++    offsets = position_ids.offsets()
++    if values.dim() != 2 or offsets.numel() < 2:
++        return
++    total = int(offsets[-1])
++    if values.shape[1] == total and values.shape[0] != total:
++        position_ids._ragged_idx = 2
++    elif values.shape[0] == total:
++        position_ids._ragged_idx = 1
+ 
+ 
+ def list_of_dict_to_tensordict(list_of_dicts: list[dict[str, Any]]) -> TensorDict:
