@@ -241,8 +241,11 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
     rustup component add rustfmt clippy
 
 # Go is needed to compile the p3b sandbox service (p3b/cmd/sandboxd).
+# GO_DOWNLOAD_URL lets a build that cannot reach the public distribution host
+# take the same tarball from a mirror without editing this file.
 ARG GO_VERSION=1.23.4
-RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" \
+ARG GO_DOWNLOAD_URL=https://go.dev/dl
+RUN curl -fsSL "${GO_DOWNLOAD_URL}/go${GO_VERSION}.linux-amd64.tar.gz" \
         -o /tmp/go.tar.gz && \
     tar -C /usr/local -xzf /tmp/go.tar.gz && \
     rm /tmp/go.tar.gz && \
