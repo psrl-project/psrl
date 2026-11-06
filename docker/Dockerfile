@@ -327,6 +327,15 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         "from importlib.metadata import version; import nixl; version('nixl-cu13'); \
         nixl.nixl_agent('psrl-build-check')"
 
+# Cargo's HTTP/2 multiplexing fails behind the build proxy with PROTOCOL_ERROR,
+# and the sparse mirror answers faster there. Set both before the first Cargo
+# invocation, which happens inside vLLM's build backend.
+ENV CARGO_HTTP_MULTIPLEXING=false \
+    CARGO_NET_RETRY=10
+RUN mkdir -p /root/.cargo && \
+    printf '[source.crates-io]\nreplace-with = "ustc"\n[source.ustc]\nregistry = "sparse+https://mirrors.ustc.edu.cn/crates.io-index/"\n[http]\nmultiplexing = false\ntimeout = 60\n' \
+        > /root/.cargo/config.toml
+
 # vLLM is installed from a patched editable checkout. The source patch is kept
 # deliberately narrow: it declares the PSRL scheduler-stats fields and clamps the
 # v1 runner's cached block IDs. All other PSRL behavior lives in the vllm_patches
