@@ -2347,3 +2347,39 @@ index 2971c6b5..8f0ad7dd 100644
  
  # Seed to use when shuffling the data
  seed: null
+diff --git a/verl/utils/tensordict_utils.py b/verl/utils/tensordict_utils.py
+index 91d82b15..40e30180 100644
+--- a/verl/utils/tensordict_utils.py
++++ b/verl/utils/tensordict_utils.py
+@@ -911,8 +911,29 @@ def maybe_fix_3d_position_ids(data: TensorDict):
+     # note for tensordict with pickle/unpickle. nested tensor in tensordict after consolidate and pickle/unpickle
+     # will incur indexing error for ragged tensor. This only happens when using 3D position ids in VLMs.
+     # This is likely a bug in tensordict. As a workaround, we manually set _ragged_index.
+-    if "position_ids" in data.keys() and data["position_ids"].dim() == 3 and data["position_ids"].is_nested:
+-        data["position_ids"]._ragged_idx = 2
++    #
++    # Two layouts reach this point, and the ragged axis is not the same in both:
++    #   * (num_axes, total_tokens), built by concatenating (num_axes, tokens_i)
++    #     samples along the token axis. The ragged axis is the token axis.
++    #   * (batch * num_axes, max_seq_len), built with as_nested_tensor over
++    #     (num_axes, seq_len) samples. The ragged axis is the axis the samples
++    #     were stacked on, and the token axis keeps the padded length.
++    # Both report dim() == 3 once nested, so the axis has to be read from the
++    # offsets: the ragged axis is whichever extent equals the offset total.
++    if "position_ids" not in data.keys():
++        return
++    position_ids = data["position_ids"]
++    if not (isinstance(position_ids, torch.Tensor) and position_ids.is_nested and position_ids.dim() == 3):
++        return
++    values = position_ids.values()
++    offsets = position_ids.offsets()
++    if values.dim() != 2 or offsets.numel() < 2:
++        return
++    total = int(offsets[-1])
++    if values.shape[1] == total and values.shape[0] != total:
++        position_ids._ragged_idx = 2
++    elif values.shape[0] == total:
++        position_ids._ragged_idx = 1
+ 
+ 
+ def list_of_dict_to_tensordict(list_of_dicts: list[dict[str, Any]]) -> TensorDict:
