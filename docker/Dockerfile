@@ -373,7 +373,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     cd ${PSRL_THIRD_PARTY}/vllm && \
     # The helper reinstalls torch, whose exact NCCL pin would downgrade the
     # 2.31 headers DeepEP's Gin backend needs. torch/cmake/ninja are present.
-    sed -i 's/uv pip install cmake torch ninja/uv pip install --no-deps cmake ninja/' \
+    sed -i -e 's/uv pip install cmake torch ninja/uv pip install --no-deps cmake ninja/' \
+           -e 's/uv pip install --system cmake torch ninja/uv pip install --system --no-deps cmake ninja/' \
         tools/ep_kernels/install_python_libraries.sh && \
     NVSHMEM_VER=${NVSHMEM_VERSION} \
     TORCH_CUDA_ARCH_LIST="9.0a 10.0a" \
