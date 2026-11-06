@@ -376,6 +376,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     sed -i -e 's/uv pip install cmake torch ninja/uv pip install --no-deps cmake ninja/' \
            -e 's/uv pip install --system cmake torch ninja/uv pip install --system --no-deps cmake ninja/' \
         tools/ep_kernels/install_python_libraries.sh && \
+    CUDA_MAJOR="${CUDA_VERSION%%.*}" && \
+    uv pip install "nvidia-nccl-cu${CUDA_MAJOR}==2.31.2" && \
     NVSHMEM_VER=${NVSHMEM_VERSION} \
     TORCH_CUDA_ARCH_LIST="9.0a 10.0a" \
         bash tools/ep_kernels/install_python_libraries.sh \
