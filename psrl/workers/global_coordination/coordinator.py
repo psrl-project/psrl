@@ -47,7 +47,7 @@ class GlobalCoordinator:
     ) -> None:
         self.config = config
         self.gateway = GatewayClient()
-        self.lifecycle = ReplicaLifecycle(self.gateway)
+        self.lifecycle = ReplicaLifecycle(self.gateway, config.psrl.ps_mode in ("nixl_cpu", "nixl_gpu"))
         self.commands = CommandService(config, self.gateway, self.lifecycle)
         self.telemetry = TelemetryService(config, self.gateway, ps_manager)
         self.weights = WeightSynchronization(config, ps_manager, self.gateway, self.lifecycle, self.commands)

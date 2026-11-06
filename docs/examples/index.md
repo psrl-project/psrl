@@ -56,7 +56,7 @@ Launch model-pair recipes with FSDP2 or Megatron and tune resource allocation.
 | [SWE-agent](agentic_rl/swe/index) | Software Engineering | Test execution (F2P/P2P) | FSDP / Megatron | Ready |
 | [Elastic RL](elastic) | Math / Reasoning | Verifiable + generative | FSDP / Megatron | Ready |
 | [LLM-as-a-Judge](generative_reward_model/llm_as_a_judge) | Math / Custom | Judge LLM score | FSDP / Megatron | Available |
-| [On-Policy Distillation](generative_reward_model/on_policy_distillation) | General / Open-ended | Teacher LLM token-level supervision |, | TBD |
+| [On-Policy Distillation](generative_reward_model/on_policy_distillation) | General / Open-ended | Teacher LLM token-level supervision | FSDP / Megatron | Available |
 
 ```{toctree}
 :maxdepth: 2

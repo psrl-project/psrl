@@ -1,5 +1,6 @@
 import copy
 import logging
+import math
 import os
 from typing import Any
 
@@ -39,6 +40,17 @@ def _spec_dict(item: Any) -> dict:
         item = OmegaConf.to_container(item, resolve=True)
     if not isinstance(item, dict):
         raise TypeError(f"Each reward_model_dicts entry must be a dict, got {type(item)!r}.")
+    if item.get("reward_loop_type") == "opd":
+        item = item.copy()
+        weight = item.get("teacher_weight", 1.0)
+        if (
+            isinstance(weight, bool)
+            or not isinstance(weight, (int, float))
+            or not math.isfinite(weight)
+            or weight <= 0
+        ):
+            raise ValueError(f"OPD teacher_weight must be finite and positive, got {weight!r}.")
+        item["teacher_weight"] = float(weight)
     return item
 
 

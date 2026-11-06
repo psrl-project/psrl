@@ -4,11 +4,10 @@ set -xeuo pipefail
 ############################ Quick Config ############################
 
 # Activate PSRL conda env.
-source ./env/env_311.sh
+source env/psrl.sh
 
 PSRL_PATH=$(python -c "import psrl; import os; print(os.path.dirname(os.path.dirname(psrl.__file__)))")
 PSRL_WORKSPACE=${PSRL_WORKSPACE:-$PSRL_PATH}
-HOME=${PSRL_WORKSPACE}
 
 ROLLOUT_NAME="vllm"
 DATA_PATH="${PSRL_WORKSPACE}/data"
@@ -77,7 +76,18 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path="${PSRL_PATH}/p
     psrl.deployment.train_ngpus_per_node=${STUDENT_WORLD_SIZE} \
     psrl.deployment.total_nnodes=${NNODES} \
     \
-    data.train_datas="[{file:${gsm8k_train_path},data_source_name:openai/gsm8k,prompt_key:prompt,reward_model_dicts:[{reward_fn_key:data_source,reward_loop_type:naive,reward_fn:default,reward_model_name:null,reward_coef:1.0},{reward_fn_key:data_source,reward_loop_type:opd,reward_fn:default,reward_model_name:${TEACHER_MODEL_NAME},reward_coef:1.0}]}]" \
+    reward.active_managers='[naive,gen_qwen3_8b]' \
+    reward.managers.gen_qwen3_8b.reward_loop_type=opd \
+    reward.managers.gen_qwen3_8b.reward_manager.name=opd \
+    reward.managers.gen_qwen3_8b.reward_model_name=${TEACHER_MODEL_NAME} \
+    reward.managers.gen_qwen3_8b.model.path=${TEACHER_MODEL_PATH} \
+    reward.managers.gen_qwen3_8b.n_gpus_per_node=${TEACHER_WORLD_SIZE} \
+    reward.managers.gen_qwen3_8b.num_replicas=${TEACHER_WORLD_SIZE} \
+    reward.managers.gen_qwen3_8b.rollout.prompt_length=$((MAX_PROMPT + MAX_RESPONSE_LENGTH)) \
+    reward.managers.gen_qwen3_8b.rollout.response_length=1 \
+    reward.managers.gen_qwen3_8b.rollout.max_model_len=$((MAX_PROMPT + MAX_RESPONSE_LENGTH + 1)) \
+    gen_actor_rollout_ref.rollout.agent.traj_reward_mode=traj \
+    data.train_datas="[{file:${gsm8k_train_path},data_source_name:openai/gsm8k,prompt_key:prompt,reward_model_dicts:[{reward_fn_key:data_source,reward_loop_type:naive,reward_fn:default,reward_model_name:null,reward_coef:1.0},{reward_fn_key:data_source,reward_loop_type:opd,reward_fn:default,reward_model_name:${TEACHER_MODEL_NAME},teacher_weight:1.0}]}]" \
     data.val_datas="[{file:${gsm8k_test_path},prompt_key:prompt,reward_model_dicts:[{reward_fn_key:data_source,reward_loop_type:naive,reward_fn:default,reward_model_name:null,reward_coef:1.0}]}]" \
     data.train_datasets_ratios=[1.0] \
     data.max_prompt_length=${MAX_PROMPT} \
@@ -117,7 +127,6 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path="${PSRL_PATH}/p
     train_actor_rollout_ref.rollout.pipeline_model_parallel_size=${VAL_PP} \
     \
     distillation.enabled=True \
-    distillation.teacher_key=default \
     distillation.distillation_loss.loss_mode=${DISTILLATION_LOSS_MODE} \
     distillation.distillation_loss.topk=64 \
     distillation.distillation_loss.use_task_rewards=False \

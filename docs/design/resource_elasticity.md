@@ -116,6 +116,11 @@ executor's GPU ownership checks.
 `GlobalCoordinator` delegates inference sleep and wake operations to
 `ReplicaLifecycle`. Training uses `ElasticExecutor`'s training-pool lifecycle.
 
+Inference replicas and the GPU topology share `InstanceStatus`: `AWAKEN`,
+`ASLEEP`, and `UNKNOWN`. Failed transitions remain unavailable for routing.
+`UNKNOWN` blocks new scaling decisions and keeps its GPUs occupied until cleanup
+confirms `ASLEEP`, even when an engine reports a partially sleeping state.
+
 The worker APIs beneath this protocol are:
 
 | Role | Sleep path | Wake up path |

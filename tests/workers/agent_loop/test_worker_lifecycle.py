@@ -4,7 +4,7 @@ Test configured agent construction and fatal initialization failures.
 
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import psrl.workers.agent_loop.worker as worker_module
 import pytest
@@ -17,6 +17,47 @@ from psrl.workers.gen.utils import TokenOutput
 from verl.utils import tensordict_utils as tu
 
 pytestmark = pytest.mark.cpu_test
+
+
+def test_worker_initializes_with_teacher_reward_service(tmp_path, monkeypatch):
+    config = OmegaConf.create(
+        {
+            "distillation": {"enabled": True},
+            "data": {},
+            "reward": {"reward_loop_worker": {}, "validation_reward_loop_worker": {}},
+            "psrl": {
+                "logging_path": str(tmp_path),
+                "deployment": {"n_rollout_instances": 1},
+                "colocate_validate_and_train": False,
+                "rollout_gateway": {"server_max_concurrency": 4},
+            },
+            "gen_actor_rollout_ref": {
+                "model": {},
+                "rollout": {"agent": {"agent_loop_config_path": None, "default_agent_loop": "single_turn_agent"}},
+            },
+            "trainer": {"project_name": "test", "experiment_name": "opd"},
+        }
+    )
+    model = SimpleNamespace(tokenizer=object(), processor=None)
+    monkeypatch.setattr(worker_module, "omega_conf_to_dataclass", Mock(return_value=model))
+    monkeypatch.setattr(worker_module, "spawn_actor_reaper", Mock(return_value=SimpleNamespace(pid=0)))
+    monkeypatch.setattr(worker_module.atexit, "register", Mock())
+    monkeypatch.setenv("PSRL_ACTOR_ID", "test")
+    monkeypatch.setattr(worker_module.tq, "init", Mock())
+    monkeypatch.setattr(worker_module, "get_dataset_class", Mock(return_value=object))
+    monkeypatch.setattr(worker_module, "reward_producer_concurrency", Mock(return_value=1))
+    monkeypatch.setattr(worker_module, "init_http_client", Mock())
+    monkeypatch.setattr(worker_module, "init_http_io_thread", Mock())
+    monkeypatch.setattr(worker_module, "get_agent_loop_config", Mock(return_value={}))
+    monkeypatch.setattr(worker_module.RolloutTraceConfig, "init", Mock())
+    handler = worker_module.logging.NullHandler()
+    monkeypatch.setattr(worker_module, "DualOutputHandler", Mock(return_value=handler))
+    cls = worker_module.PSRL_AgentLoopWorker.__ray_metadata__.modified_class
+    worker = cls(config, None, "http://rollout", "http://session")
+    assert worker.tokenizer is model.tokenizer, "OPD must reach normal agent worker initialization."
+    assert not worker.pending_program_queue, "An initialized worker must be ready for rollout requests."
+    worker_module.logging.getLogger("psrl").removeHandler(handler)
+    worker_module.psrl_logger.removeHandler(handler)
 
 
 @pytest.fixture
@@ -38,6 +79,7 @@ def worker(monkeypatch):
     worker.rollout_gateway_url = "http://rollout"
     worker.session_router_url = "http://session"
     worker.reward_manager = None
+    worker.inference_orchestrator = None
     worker.tokenizer = object()
     worker.processor = None
     worker.dataset_cls = object

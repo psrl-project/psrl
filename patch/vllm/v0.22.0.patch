@@ -86,6 +86,32 @@ index fb6951ea7dd1b3a5bb38b3fa0bbb7998a378aec5..893a242bc9b42aab32394565ce725ac4
      @staticmethod
      def default_factory(**kwargs):
          """
+diff --git a/vllm/distributed/device_communicators/custom_all_reduce.py b/vllm/distributed/device_communicators/custom_all_reduce.py
+index 65a19626468443e3c7a51455f018e6d5bf851f8f..6b69228fb0956a1d359c24ddda859c2aba16bbbb 100644
+--- a/vllm/distributed/device_communicators/custom_all_reduce.py
++++ b/vllm/distributed/device_communicators/custom_all_reduce.py
+@@ -281,6 +281,21 @@ class CustomAllreduce:
+             # latency) compared to the performance gain of using custom kernels
+             return self.all_reduce(input, registered=False)
+ 
++    def reset_graph_buffers(self) -> None:
++        """Reclaim graph registrations after every rank has released its graphs."""
++        if self.disabled:
++            return
++        assert not self._IS_CAPTURING, "Cannot reset buffers during graph capture."
++
++        # Peer graphs must finish before their IPC mappings can be closed.
++        dist.barrier(group=self.group)
++        ops.dispose(self._ptr)
++        self._ptr = 0
++        self._ptr = ops.init_custom_ar(
++            self.meta_ptrs, self.rank_data, self.rank, self.fully_connected
++        )
++        ops.register_buffer(self._ptr, self.buffer_ptrs)
++
+     def close(self):
+         if not self.disabled and self._ptr:
+             if ops is not None:
 diff --git a/vllm/distributed/device_communicators/nccl_suspend.py b/vllm/distributed/device_communicators/nccl_suspend.py
 new file mode 100644
 index 0000000000000000000000000000000000000000..76deb7eb7e9584274eec89f8dfe9992f54e9baf3
@@ -302,7 +328,7 @@ index 0000000000000000000000000000000000000000..76deb7eb7e9584274eec89f8dfe9992f
 +    return {"reclaimed_bytes": reclaimed, "n": n_ok, "total": len(handles)}
 \ No newline at end of file
 diff --git a/vllm/distributed/parallel_state.py b/vllm/distributed/parallel_state.py
-index 712167c601cf35966e319e36c060c867813b6960..9b96ea5e4061e96a9383a780600f7954cc72d256 100644
+index 712167c601cf35966e319e36c060c867813b6960..a35191aeb6bf53a4871ac62df4dfa780556be0ed 100644
 --- a/vllm/distributed/parallel_state.py
 +++ b/vllm/distributed/parallel_state.py
 @@ -23,18 +23,17 @@ If you only need to use the distributed environment without model/pipeline
@@ -326,7 +352,27 @@ index 712167c601cf35966e319e36c060c867813b6960..9b96ea5e4061e96a9383a780600f7954
  
  import torch
  import torch.distributed
-@@ -1957,6 +1956,24 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
+@@ -127,6 +126,19 @@ def _register_group(group: "GroupCoordinator") -> None:
+     _groups[group.unique_name] = weakref.ref(group)
+ 
+ 
++def reset_cudagraph_communication_buffers() -> None:
++    """Reset custom allreduce registrations after local graphs are finalized."""
++    seen: set[int] = set()
++    for group_ref in _groups.values():
++        group = group_ref()
++        if group is None or group.device_communicator is None:
++            continue
++        communicator = getattr(group.device_communicator, "ca_comm", None)
++        if communicator is not None and id(communicator) not in seen:
++            seen.add(id(communicator))
++            communicator.reset_graph_buffers()
++
++
+ def all_reduce(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
+     assert group_name in _groups, f"Group {group_name} is not found."
+     group = _groups[group_name]()
+@@ -1957,6 +1969,24 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
              )
  
  
@@ -351,7 +397,7 @@ index 712167c601cf35966e319e36c060c867813b6960..9b96ea5e4061e96a9383a780600f7954
  def in_the_same_node_as(
      pg: ProcessGroup | StatelessProcessGroup, source_rank: int = 0
  ) -> list[bool]:
-@@ -1965,90 +1982,23 @@ def in_the_same_node_as(
+@@ -1965,90 +1995,23 @@ def in_the_same_node_as(
      as the source rank. It tests if processes are attached to the same
      memory system (shared access to shared memory).
      """
@@ -1511,10 +1557,18 @@ index d51bf2284096cb2dd8f351157e89b65ff7fd233b..7da450232d70e30eef2036ed8ec4b465
          self,
          desc: BatchDescriptor,
 diff --git a/vllm/v1/worker/gpu_worker.py b/vllm/v1/worker/gpu_worker.py
-index 582c6a17cb4e9181c15b0506d8c64f635ac584d2..ac3fa11d161e75dad7c6ab80676b3d9685847816 100644
+index 582c6a17cb4e9181c15b0506d8c64f635ac584d2..04320e32bf4065a86590c831c5dc2af5879a87d1 100644
 --- a/vllm/v1/worker/gpu_worker.py
 +++ b/vllm/v1/worker/gpu_worker.py
-@@ -134,6 +134,22 @@ class Worker(WorkerBase):
+@@ -35,6 +35,7 @@ from vllm.distributed.parallel_state import (
+     Handle,
+     get_pp_group,
+     get_tp_group,
++    reset_cudagraph_communication_buffers,
+ )
+ from vllm.distributed.weight_transfer import (
+     WeightTransferEngine,
+@@ -134,6 +135,22 @@ class Worker(WorkerBase):
          # Buffers saved before sleep
          self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
  
@@ -1537,7 +1591,16 @@ index 582c6a17cb4e9181c15b0506d8c64f635ac584d2..ac3fa11d161e75dad7c6ab80676b3d96
          # Weight transfer engine is created in `load_model` once the model
          # is available, since the engine needs a reference to the model.
          self.weight_transfer_engine: WeightTransferEngine | None = None
-@@ -166,8 +182,32 @@ class Worker(WorkerBase):
+@@ -159,15 +176,44 @@ class Worker(WorkerBase):
+ 
+         free_bytes_before_sleep = torch.cuda.mem_get_info()[0]
+ 
+-        # Save the buffers before level 2 sleep
+-        if level == 2:
++        # A failed wake can leave buffers unmapped with valid CPU backups.
++        if level == 2 and not getattr(self, "_weights_suspended", False):
+             model = self.model_runner.model
+             self._sleep_saved_buffers = {
                  name: buffer.cpu().clone() for name, buffer in model.named_buffers()
              }
  
@@ -1546,7 +1609,12 @@ index 582c6a17cb4e9181c15b0506d8c64f635ac584d2..ac3fa11d161e75dad7c6ab80676b3d96
 +        # 32B model (vs ~2s without graphs); releasing graphs first restores the
 +        # fast unmap path. Re-captured lazily on wake_up(). No-op when
 +        # cudagraph_mode is NONE.
-+        self._cudagraphs_released = self.model_runner.release_cudagraphs()
++        released_graphs = self.model_runner.release_cudagraphs()
++        if released_graphs:
++            reset_cudagraph_communication_buffers()
++        self._cudagraphs_released = released_graphs or getattr(
++            self, "_cudagraphs_released", False
++        )
 +
 +        # The cumem unmap below drops the weights and KV cache from GPU virtual
 +        # memory (weights are offloaded to CPU on level-1 sleep, discarded on
@@ -1570,7 +1638,7 @@ index 582c6a17cb4e9181c15b0506d8c64f635ac584d2..ac3fa11d161e75dad7c6ab80676b3d96
          free_bytes_after_sleep, total = torch.cuda.mem_get_info()
          freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
          used_bytes = total - free_bytes_after_sleep
-@@ -184,6 +224,23 @@ class Worker(WorkerBase):
+@@ -184,8 +230,25 @@ class Worker(WorkerBase):
          allocator = CuMemAllocator.get_instance()
          allocator.wake_up(tags)
  
@@ -1592,9 +1660,12 @@ index 582c6a17cb4e9181c15b0506d8c64f635ac584d2..ac3fa11d161e75dad7c6ab80676b3d96
 +            self._kv_cache_suspended = False
 +
          # Restore the buffers after level 2 sleep
-         if len(self._sleep_saved_buffers):
+-        if len(self._sleep_saved_buffers):
++        if not self._weights_suspended and len(self._sleep_saved_buffers):
              model = self.model_runner.model
-@@ -195,6 +252,24 @@ class Worker(WorkerBase):
+             for name, buffer in model.named_buffers():
+                 if name in self._sleep_saved_buffers:
+@@ -195,6 +258,24 @@ class Worker(WorkerBase):
          if tags is None or "kv_cache" in tags:
              self.model_runner.post_kv_cache_wake_up()
  

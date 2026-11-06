@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 import ray
 from transfer_queue.metadata import KVBatchMeta
+from verl.trainer.distillation.losses import is_distillation_enabled
 from verl.utils.debug import marked_timer
 
 from psrl.trainer.ppo.strategies.base import StepStrategy, psrl_logger
@@ -129,7 +130,9 @@ class FineGrainOverlapStrategy(StepStrategy):
                 with marked_timer("values", timing_raw, color="cyan"):
                     chunk_meta = t._compute_values(chunk_meta, metrics=metrics)
 
-            if t.config.reward.launch_reward_fn_async:
+            if t.config.reward.launch_reward_fn_async or is_distillation_enabled(
+                getattr(t.config, "distillation", None)
+            ):
                 with marked_timer("async_reward_get", timing_raw, color="yellow"):
                     chunk_meta = ray.get(t.reward_manager.wait_for_reward_of_requests.remote(chunk_meta))
             else:

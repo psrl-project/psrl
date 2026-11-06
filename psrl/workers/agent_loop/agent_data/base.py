@@ -15,6 +15,7 @@ from psrl.environments.base import ConversationType, Environment
 from psrl.utils.dataset.utils import as_object_sample
 from psrl.workers.gen.utils import RolloutInstanceId, TokenOutput
 from psrl.workers.reward.client import RewardSubmissionClient
+from psrl.workers.reward.utils import attach_reward_trajectories
 
 psrl_logger = logging.getLogger(__name__)
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
@@ -682,6 +683,7 @@ class AgentData(ABC, Generic[ObsType, ActType]):
                 },
             )
 
+            attach_reward_trajectories(reward_data, outputs)
             reward_result = await self.reward_manager.compute_score(reward_data)
             if not self.config.reward.launch_reward_fn_async:
                 if not reward_result:

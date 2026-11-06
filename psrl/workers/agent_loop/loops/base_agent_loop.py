@@ -30,8 +30,10 @@ from psrl.utils.rollout.vision_utils import (
 )
 from psrl.workers.agent_loop.context import AgentLoopContext
 from psrl.workers.agent_loop.loops.utils import TerminateReason
+from psrl.workers.elastic.sleep_wake_orchestrator import inference_lease
 from psrl.workers.gen.utils import TokenInput, TokenOutput
 from psrl.workers.ps.request_status_tracker import PSRL_RequestStatus
+from psrl.workers.reward.utils import attach_reward_trajectories
 
 psrl_logger = logging.getLogger(__name__)
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
@@ -53,6 +55,7 @@ class AgentLoopBase(ABC):
         self.rollout_gateway_url = context.rollout_gateway_url.rstrip("/")
 
         self.reward_manager = context.reward_manager
+        self.inference_orchestrator = context.inference_orchestrator
         self.ps_manager_handle = context.ps_manager_handle
         self.tokenizer = context.tokenizer
         self.processor = context.processor
@@ -243,6 +246,7 @@ class AgentLoopBase(ABC):
             },
         )
 
+        attach_reward_trajectories(reward_requests, outputs)
         reward_result = await self.reward_manager.compute_score(reward_requests)
         if not self.config.reward.launch_reward_fn_async:
             if not reward_result:
@@ -268,7 +272,15 @@ class AgentLoopBase(ABC):
             if not self.rollout_gateway_url:
                 raise RuntimeError("Rollout gateway address is empty.")
             # `/generate` accepts pretokenized text and multimodal inputs.
-            return await self._generate_via_generate_endpoint(request_input, sampling_params, is_sticky_session)
+            async with self.generation_lease(bool(request.get("validate", False))):
+                return await self._generate_via_generate_endpoint(request_input, sampling_params, is_sticky_session)
+
+    def generation_lease(self, validate: bool):
+        """Keep shared inference storage resident until a model request completes."""
+        orchestrator = self.inference_orchestrator
+        if validate and self.config.psrl.deployment.mode == "rollout_rm_colocated":
+            orchestrator = None
+        return inference_lease(orchestrator, "validate" if validate else "rollout")
 
     async def _generate_via_generate_endpoint(
         self,

@@ -53,21 +53,13 @@ def resolve_deployment_mode(config) -> str:
     """Resolve `psrl.deployment.mode` into concrete `elastic` flags.
 
     Mutates `config` in place so downstream code sees a consistent flag set.
-    When `mode` is null, infer from existing flags for backward compatibility.
+    A null `mode` selects automatically from the elastic configuration.
     Returns the resolved mode string. Idempotent: safe to call multiple times.
     """
     deployment = config.psrl.deployment
     mode = deployment.get("mode", None)
     if mode is None:
-        # When `mode` is unset, prefer existing `elastic.enable`, then colocate.
-        if deployment.elastic.get("enable", False):
-            mode = "elastic_rl"
-        elif config.psrl.get("colocate", False):
-            # Legacy sync colocate path. keep disaggregated semantics for pool
-            # layout (the sync path does not use elastic pools).
-            mode = "disaggregated"
-        else:
-            mode = "disaggregated"
+        mode = "elastic_rl" if deployment.elastic.get("enable", False) else "disaggregated"
     mode = str(mode)
     if mode not in VALID_DEPLOYMENT_MODES:
         raise ValueError(f"Invalid psrl.deployment.mode={mode!r}; expected one of {VALID_DEPLOYMENT_MODES}.")
@@ -106,7 +98,7 @@ def validate_elastic_validation(config) -> None:
     """
     Require dedicated validation replicas on trainer GPUs for elastic deployments.
     """
-    if not config.psrl.deployment.elastic.enable:
+    if not config.psrl.deployment.elastic.enable and config.psrl.deployment.get("mode") != "trainer_pool_only":
         return
     if not config.psrl.colocate_validate_and_train:
         raise ValueError("Elastic deployments require psrl.colocate_validate_and_train=True.")

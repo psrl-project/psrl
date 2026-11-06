@@ -227,9 +227,6 @@ class PSRL_AgentLoopManager:
         psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "INFO"))
         psrl_logger.addHandler(DualOutputHandler(self.config.psrl.logging_path, self.log_prefix))
 
-        # SleepWakeOrchestrator handle (colocated modes 2/3). None otherwise.
-        self.sleep_wake_orchestrator = None
-
     # AGENT(VERL): `generate_sequences`, `_run_agent_loop` are moved to agent loop workers.
     # The manager only handles data distribution and coordination.
 
@@ -303,17 +300,14 @@ class PSRL_AgentLoopManager:
         self._failed_val_group_ids.clear()
         self._val_round_all_failed = False
 
+    def _requires_reward_commit(self) -> bool:
+        return self.config.reward.launch_reward_fn_async or bool(
+            getattr(getattr(self.config, "distillation", None), "enabled", False)
+        )
+
     def set_reward_manager(self, reward_manager: ray.actor.ActorHandle):
         """Set the reward manager for awaiting async reward completion."""
         self.reward_manager = reward_manager
-
-    def set_sleep_wake_orchestrator(self, orchestrator):
-        """Inject the SleepWakeOrchestrator (colocated modes 2/3).
-
-        Stored for phase gating / rollout-complete notifications. Unused when the
-        deployment mode is not colocated.
-        """
-        self.sleep_wake_orchestrator = orchestrator
 
     async def start_busy_loop(self):
         """Start the busy loop for continuous data processing from the queue."""
@@ -1304,12 +1298,7 @@ class PSRL_AgentLoopManager:
                                 "rollout_instance_id": entry_info.rollout_instance_id,
                             }
                         )
-        if (
-            not is_validate
-            and rollout_n > 1
-            and self.group_post_process_fn
-            and self.config.reward.launch_reward_fn_async
-        ):
+        if not is_validate and rollout_n > 1 and self.group_post_process_fn:
             for tag in tags:
                 tag["reward_ready"] = True
         return KVBatchMeta(keys=keys, tags=tags, partition_id=partition)
@@ -1339,8 +1328,8 @@ class PSRL_AgentLoopManager:
                 for i in range(entry_info.n_trajectory):
                     keys.append(f"{entry_info.prompt_id * self.rollout_n + entry_info.request_idx}_{i}")
 
-        # Async reward fields must be present in TQ before filtering.
-        if self.config.reward.launch_reward_fn_async:
+        # Teacher fields must be present before filtering publishes readiness.
+        if self._requires_reward_commit():
             await self.reward_manager.wait_for_reward_ready.remote(keys)
 
         # TODO(linsh): Fetch only columns required for post-processing.
@@ -1455,7 +1444,7 @@ class PSRL_AgentLoopManager:
             parent_ids = tu.get_non_tensor_data(processed_data, "parent_id")
             for parent_id, tag in zip(parent_ids, tags):
                 tag["parent_id"] = parent_id
-        if self.rollout_n > 1 and self.group_post_process_fn and self.config.reward.launch_reward_fn_async:
+        if self.rollout_n > 1 and self.group_post_process_fn and self._requires_reward_commit():
             for tag in tags:
                 tag["reward_ready"] = True
 

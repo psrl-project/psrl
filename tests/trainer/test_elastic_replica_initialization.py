@@ -71,9 +71,11 @@ def test_rollout_role_initializes_every_replica_before_sleeping(
     trainer.ps_manager_handle = None
     trainer.config = SimpleNamespace(
         psrl=SimpleNamespace(
+            ps_mode="nixl_cpu",
             deployment=SimpleNamespace(
                 rollout_ngpus_per_node_per_instance=1,
                 validate_ngpus_per_node_per_instance=1,
+                heterogeneous_rollout=SimpleNamespace(enable=False),
             ),
         ),
         gen_actor_rollout_ref=SimpleNamespace(rollout=_rollout_config()),
@@ -227,6 +229,7 @@ def test_reward_worker_pools_use_separate_roles_and_configuration(monkeypatch):
     trainer.ip_to_node_id = {"reward-service": "reward-node", "ps-service": "ps-node"}
     trainer.tokenizer = None
     trainer.processor = None
+    trainer.inference_orchestrator = None
     trainer._build_reward_model_runtime_infos = Mock(return_value={})
 
     trainer.init_reward_loop_workers()

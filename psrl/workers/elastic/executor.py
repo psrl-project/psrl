@@ -293,6 +293,23 @@ class ElasticExecutor:
                 raise RuntimeError(f"Placement registrations do not match coordinator instances for {model!r}.")
             self.register_role(role, model, ids, gpu_slots, pool_ids)
 
+        mode = self.config.psrl.deployment.mode
+        if mode in ("colocated", "rollout_rm_colocated"):
+            return
+        if mode == "trainer_pool_only":
+            for role, model in self.roles:
+                ids = [
+                    iid
+                    for iid in self.instances_status_flags[role][model]
+                    if self.instance_pool_ids[(role, model, iid)] != "train_pool"
+                ]
+                if ids:
+                    await self._transition_role_instances(
+                        CommandType.WAKE_UP,
+                        [{"role_name": role, "model_name": model, "instance_id": iid} for iid in ids],
+                    )
+            await self.release_trainer_pool()
+            return
         if self.elastic_config.get("enable_trainer_pool", False):
             await self.release_trainer_pool()
         minimum = max(0, int(self.elastic_config["min_awake_per_role"]))
@@ -365,11 +382,12 @@ class ElasticExecutor:
             await self._sleep_trainer()
             self._raise_if_runtime_failed()
             self._validation_active = True
-            await self._await_elastic_coordinator_command(
-                self._rollout_coordinator(),
-                Command(type=CommandType.WAKE_UP, instance_ids=self._validation_instance_ids),
-                stage="VALIDATION_WAKE",
-            )
+            if self.config.psrl.deployment.mode != "colocated":
+                await self._await_elastic_coordinator_command(
+                    self._rollout_coordinator(),
+                    Command(type=CommandType.WAKE_UP, instance_ids=self._validation_instance_ids),
+                    stage="VALIDATION_WAKE",
+                )
 
     async def _sleep_trainer(
         self,
@@ -510,6 +528,17 @@ class ElasticExecutor:
         self._raise_if_runtime_failed()
         self._trainer_pool_available = True
         self._trainer_pool_epoch += 1
+        if self.config.psrl.deployment.mode == "trainer_pool_only":
+            for role, model in self.roles:
+                ids = [
+                    iid
+                    for iid in self.instances_status_flags[role][model]
+                    if self.instance_pool_ids[(role, model, iid)] == "train_pool"
+                ]
+                if ids:
+                    await self._scale_up_instances(
+                        [{"role_name": role, "model_name": model, "instance_id": iid} for iid in ids]
+                    )
         psrl_logger.debug("Trainer pool released for elastic inference.")
 
     async def release_trainer_pool_for_wait(
@@ -1006,7 +1035,7 @@ class ElasticExecutor:
                     "role": role_name,
                     "model": s.model_name,
                     "instance": str(s.instance_id),
-                    "status": "AWAKEN" if bool(s.is_awaken) else "ASLEEP",
+                    "status": self.instances_status_flags[s.role_name][s.model_name][s.instance_id].name,
                     "running": int(s.running_queue_num),
                     "waiting": int(s.waiting_queue_num),
                     "kv_cache": float(s.kv_cache_utilization),
@@ -1248,6 +1277,10 @@ class ElasticExecutor:
         """
         role, model = instances[0]["role_name"], instances[0]["model_name"]
         instance_ids = list(dict.fromkeys(item["instance_id"] for item in instances))
+        self._instance_state_epoch += 1
+        for iid in instance_ids:
+            self.instances_status_flags[role][model][iid] = InstanceStatus.UNKNOWN
+            self.topology.set_status(role, model, iid, InstanceStatus.UNKNOWN)
         await self._await_elastic_coordinator_command(
             self.coordinators[role][model],
             Command(type=command_type, instance_ids=instance_ids),
@@ -1286,7 +1319,7 @@ class ElasticExecutor:
         role = role_need_to_scale_up["role_name"]
         model = role_need_to_scale_up["model_name"]
         target_ids = self._scale_up_target_ids(role_need_to_scale_up)
-        blocked = [iid for iid in target_ids if self.topology.has_other_role_awaken_on_shared_gpu(role, model, iid)]
+        blocked = [iid for iid in target_ids if self.topology.has_other_role_occupying_shared_gpu(role, model, iid)]
         if blocked:
             raise RuntimeError(f"Scale up targets still have occupied GPUs: role={role!r}, instances={blocked!r}.")
         return [{"role_name": role, "model_name": model, "instance_id": iid} for iid in target_ids]
@@ -1463,25 +1496,26 @@ class ElasticExecutor:
             versions = set()
             for instance_id in expected:
                 runtime = result[instance_id]
-                if not isinstance(runtime, dict) or not isinstance(runtime.get("is_sleeping"), bool):
+                if not isinstance(runtime, dict) or not isinstance(runtime.get("status"), InstanceStatus):
                     psrl_logger.error(f"Invalid elastic runtime state: instance={instance_id!r}, runtime={runtime!r}.")
                     return False
                 snapshot = runtime.get("engine_stats")
+                status = runtime["status"]
                 if (
                     not isinstance(snapshot, dict)
                     or not isinstance(runtime.get("model_version"), int)
                     or not isinstance(runtime.get("wake_model_version"), int)
-                    or (not runtime["is_sleeping"] and not isinstance(snapshot.get("scheduler_stats"), dict))
+                    or (status is InstanceStatus.AWAKEN and not isinstance(snapshot.get("scheduler_stats"), dict))
                 ):
                     psrl_logger.error(f"Invalid elastic version snapshot: instance={instance_id!r}.")
                     return False
                 versions.add(runtime["wake_model_version"])
                 role_stats[instance_id] = {
-                    **(EngineStats.get_default_snapshot() if runtime["is_sleeping"] else snapshot),
+                    **(snapshot if status is InstanceStatus.AWAKEN else EngineStats.get_default_snapshot()),
                     "elastic_model_version": runtime["model_version"],
                 }
-                role_statuses[instance_id] = InstanceStatus.ASLEEP if runtime["is_sleeping"] else InstanceStatus.AWAKEN
-                if not runtime["is_sleeping"] and ScalingPolicy._is_snapshot_staled(snapshot):
+                role_statuses[instance_id] = status
+                if status is InstanceStatus.AWAKEN and ScalingPolicy._is_snapshot_staled(snapshot):
                     return False
             if len(versions) != 1:
                 return False
@@ -1502,7 +1536,11 @@ class ElasticExecutor:
                     self.instances_status_flags[role_name][model_name][iid] = status
                     self.topology.set_status(role_name, model_name, iid, status)
         self.role_model_versions.update(staged_versions)
-        return True
+        return all(
+            status is not InstanceStatus.UNKNOWN
+            for statuses in staged_statuses.values()
+            for status in statuses.values()
+        )
 
     async def _sync_router_backlog_from_coordinators(self) -> bool:
         refs = []

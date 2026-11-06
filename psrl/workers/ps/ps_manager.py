@@ -1136,7 +1136,10 @@ class PSManager(RequestStatusTracker):
         self.model_store = ModelStore(version_tag=version_tag, model_state_dict=model_state_dict)
         if version_tag > 0:
             self.maybe_delete_buffer(version_tag - 1)
-        self.rollout_coordinator.set_ps_model_version.remote(version_tag)
+        if version_tag == 0:
+            self.rollout_coordinator.init_ps_model_version.remote(0)
+        else:
+            self.rollout_coordinator.set_ps_model_version.remote(version_tag)
         log_single_event(
             f"Model with version tag {version_tag} pushed successfully",
             psrl_logger,
@@ -1163,7 +1166,10 @@ class PSManager(RequestStatusTracker):
         self.model_store = ModelStore(version_tag=version_tag, model_state_dict_ref=model_state_dict_ref_list[0])
         if version_tag > 0:
             self.maybe_delete_buffer(version_tag - 1)
-        self.rollout_coordinator.set_ps_model_version.remote(version_tag)
+        if version_tag == 0:
+            self.rollout_coordinator.init_ps_model_version.remote(0)
+        else:
+            self.rollout_coordinator.set_ps_model_version.remote(version_tag)
         log_single_event(
             f"Model with version tag {version_tag} (ref) pushed successfully",
             psrl_logger,

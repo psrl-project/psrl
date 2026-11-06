@@ -822,11 +822,15 @@ class PSRL_vLLMHttpServer(vLLMHttpServer):
         """
         return await self.engine.engine_core.psrl_get_runtime_snapshots_async()
 
-    async def sleep(self, level: int):
+    async def sleep(self, level: int, force: bool = False):
         reward_model = self._is_reward_model()
         if reward_model:
             await self.close_grpc_generate_admission()
-        await self.engine.sleep(level, mode="abort")
+        if force:
+            await self.pause_generation(clear_cache=False)
+            await self.engine.engine_core.call_utility_async("psrl_sleep_memory", level)
+        else:
+            await self.engine.sleep(level, mode="abort")
         if level == 2 and not self._is_reward_model():
             # Released weights cannot satisfy a subsequent version check.
             self.curr_rollout_instance_model_version = [-1] * self.get_instance_num()
@@ -1410,12 +1414,12 @@ class PSRL_vLLMHttpServer(vLLMHttpServer):
         await self.wake_up()
         await self.collective_rpc(method="nixl_register_after_wake_up")
 
-    async def nixl_sleep(self, level: int):
+    async def nixl_sleep(self, level: int, force: bool = False):
         await self._is_init_nixl_client.wait()
         # Deregister while the current physical pages are still mapped. The
         # subsequent sleep may unmap or release those pages.
         await self.collective_rpc(method="nixl_deregister")
-        await self.sleep(level)
+        await self.sleep(level, force=force)
 
     async def nixl_get_local_client_info(self) -> list[ClientInfoUpdates]:
         """

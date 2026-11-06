@@ -41,6 +41,7 @@ class InstanceIdentifier:
 class InstanceStatus(Enum):
     ASLEEP = auto()
     AWAKEN = auto()
+    UNKNOWN = auto()
 
 
 @dataclass
@@ -153,14 +154,14 @@ class ClusterTopology:
 
     # ── Conflict detection ───────────────────────────────────────────────
 
-    def has_other_role_awaken_on_shared_gpu(
+    def has_other_role_occupying_shared_gpu(
         self,
         role: PSRL_Role,
         model_name: str,
         instance_id: RolloutInstanceId,
     ) -> bool:
         """
-        Return True if an awake instance of another role or model occupies these GPUs.
+        Return True unless every other role or model on these GPUs is confirmed asleep.
         """
         key = InstanceIdentifier(role=role, model_name=model_name, instance_id=instance_id)
         info = self.instances.get(key)
@@ -171,19 +172,19 @@ class ClusterTopology:
                 if (other_key.role, other_key.model_name) == (role, model_name):
                     continue
                 other_info = self.instances.get(other_key)
-                if other_info is not None and other_info.status == InstanceStatus.AWAKEN:
+                if other_info is not None and other_info.status is not InstanceStatus.ASLEEP:
                     return True
         return False
 
     # ── Batch queries ────────────────────────────────────────────────────
 
-    def get_awaken_gpu_slots(self) -> set[GPUSlot]:
+    def get_occupied_gpu_slots(self) -> set[GPUSlot]:
         """
-        Return the set of GPU slots currently occupied by AWAKEN instances.
+        Return GPU slots that have not been confirmed released.
         """
         occupied: set[GPUSlot] = set()
         for info in self.instances.values():
-            if info.status == InstanceStatus.AWAKEN:
+            if info.status is not InstanceStatus.ASLEEP:
                 occupied.update(info.gpu_slots)
         return occupied
 
@@ -196,9 +197,9 @@ class ClusterTopology:
         min_awake_num: int = 1,
     ) -> list[RolloutInstanceId]:
         """
-        Select up to *target_awake_num* instances whose GPUs don't overlap with already-AWAKEN instances.
+        Select up to *target_awake_num* instances whose GPUs are confirmed free.
 
-        The occupied GPU set is derived from all instances currently marked AWAKEN
+        The occupied GPU set includes instances marked `AWAKEN` or `UNKNOWN`
         in the topology, so no external state tracking is needed. Successive calls
         are safe as long as the caller marks the returned instances as AWAKEN (via
         ``set_status``) before the next call.
@@ -213,7 +214,7 @@ class ClusterTopology:
             raise ValueError(f"Invalid initial awake counts: target={target_awake_num}, minimum={min_awake_num}.")
         if target_awake_num == 0:
             return []
-        occupied_gpu_slots = self.get_awaken_gpu_slots()
+        occupied_gpu_slots = self.get_occupied_gpu_slots()
         selected_ids: list[RolloutInstanceId] = []
         for instance_id in sorted(instance_ids):
             key = InstanceIdentifier(role=role, model_name=model_name, instance_id=instance_id)

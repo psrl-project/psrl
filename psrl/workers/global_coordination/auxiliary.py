@@ -13,6 +13,7 @@ from pathlib import Path
 import aiohttp
 
 from psrl.utils.common.http_utils import find_available_port, get_host_info
+from psrl.workers.elastic.cluster_topology import InstanceStatus
 from psrl.workers.gen.session_scheduler import InstanceCapacity, SessionInfo, ThunderAgentScheduler
 
 from .lifecycle import GatewayClient
@@ -44,7 +45,7 @@ class PolicyAuxiliary:
                     iid, self.kv_capacity[iid[0]], round(stats.get_kv_cache_utilization() * self.kv_capacity[iid[0]])
                 )
                 for iid, stats in model.engine_status.items()
-                if iid[0] in self.kv_capacity and not model.replicas[iid[0]].sleeping
+                if iid[0] in self.kv_capacity and model.replicas[iid[0]].status is InstanceStatus.AWAKEN
             ]
             payload = await self.gateway.request("GET", f"{self.session_url}/control/sessions")
             sessions = []

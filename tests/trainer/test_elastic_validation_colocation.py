@@ -24,11 +24,16 @@ def _remote_handle():
 def _trainer(elastic=True):
     trainer = ray_trainer.PSRL_RayPPOTrainer.__new__(ray_trainer.PSRL_RayPPOTrainer)
     trainer.config = SimpleNamespace(
-        psrl=SimpleNamespace(colocate_validate_and_train=True),
+        psrl=SimpleNamespace(
+            colocate_validate_and_train=True,
+            ps_mode="nixl_cpu",
+            deployment=SimpleNamespace(mode="elastic_rl"),
+        ),
         train_actor_rollout_ref=SimpleNamespace(rollout=SimpleNamespace(data_parallel_size=1)),
     )
     trainer.is_rollout_mode_in_actor = True
     trainer.elastic_mode = elastic
+    trainer._trainer_lease_id = None
     trainer.n_rollout_instances = 2
     trainer.n_validate_instances = 1
     trainer.tag_to_base_worker_ids = {"validate": ["worker-validate"]}
@@ -98,7 +103,7 @@ def test_elastic_monitor_binds_manager_after_pipeline_start(start_succeeds):
 def test_switch_to_validation_delegates_to_executor(enable_trainer_pool):
     trainer = _trainer()
     trainer.config.psrl.deployment = SimpleNamespace(
-        elastic=SimpleNamespace(enable=True, enable_trainer_pool=enable_trainer_pool)
+        mode="elastic_rl", elastic=SimpleNamespace(enable=True, enable_trainer_pool=enable_trainer_pool)
     )
     with patch.object(ray_trainer.ray, "get", return_value=True):
         trainer.switch_to_rollout_mode()
@@ -269,6 +274,25 @@ def test_partial_validation_wake_failure_runs_cleanup():
         trainer._validate()
     trainer._run_validation.assert_not_called()
     trainer.switch_to_trainer_mode.assert_called_once_with(restore_trainer=False)
+
+
+def test_colocated_validation_failure_releases_admission_only_after_actor_storage_cleanup():
+    trainer = _trainer()
+    trainer.config.psrl.deployment.mode = "colocated"
+    events = []
+    trainer.inference_orchestrator = SimpleNamespace(
+        acquire=SimpleNamespace(remote=MagicMock(side_effect=lambda *args: events.append("reserved"))),
+        release=SimpleNamespace(remote=MagicMock(side_effect=lambda *args: events.append("admission_released"))),
+    )
+    trainer.elastic_executor.begin_validation.remote.side_effect = RuntimeError("Validation wake failed.")
+    trainer.elastic_executor.release_trainer_pool.remote.side_effect = lambda: events.append("storage_released")
+    with patch.object(ray_trainer.ray, "get", side_effect=lambda ref: ref):
+        with pytest.raises(RuntimeError, match="Validation wake failed"):
+            trainer._validate()
+    assert events == ["reserved", "storage_released", "admission_released"], (
+        "A failed initial validation cannot strand a training admission or admit inference before cleanup."
+    )
+    assert trainer._trainer_lease_id is None, "Successful storage cleanup must relinquish the driver's lease."
 
 
 def test_trainer_sleep_clears_gradients_and_preserves_optimizer_before_memory_release():

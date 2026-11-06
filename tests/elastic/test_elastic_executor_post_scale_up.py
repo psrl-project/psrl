@@ -158,18 +158,18 @@ def test_failed_transition_prevents_migration_and_releases_decision(modules, fai
         if failure_stage == "sleep":
             reward_coord.exec_command.remote.assert_not_awaited()
             assert executor.instances_status_flags[modules.role.Rollout]["model"][("replica-1", 0)] is (
-                modules.topology.InstanceStatus.AWAKEN
+                modules.topology.InstanceStatus.UNKNOWN
             )
         elif failure_stage == "primary_wake":
             assert executor.instances_status_flags[modules.role.RewardModel]["rm"][("reward-0", 0)] is (
-                modules.topology.InstanceStatus.ASLEEP
+                modules.topology.InstanceStatus.UNKNOWN
             )
         else:
             assert executor.instances_status_flags[modules.role.RewardModel]["rm"][("reward-0", 0)] is (
                 modules.topology.InstanceStatus.AWAKEN
             )
             assert executor.instances_status_flags[modules.role.Rollout]["model"][("rollout-spare", 0)] is (
-                modules.topology.InstanceStatus.ASLEEP
+                modules.topology.InstanceStatus.UNKNOWN
             )
 
     asyncio.run(scenario())

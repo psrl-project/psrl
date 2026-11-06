@@ -71,12 +71,23 @@ def _patch_engine_core_psrl_methods() -> None:
             raise RuntimeError("Memory restoration requires a paused scheduler.")
         self.model_executor.wake_up(tags)
 
+    def psrl_sleep_memory(self, level: int) -> None:
+        """Release every remaining allocation after an incomplete transition."""
+        if not self.is_scheduler_paused():
+            raise RuntimeError("Memory release requires a paused scheduler.")
+        self.model_executor.collective_rpc("sleep", kwargs={"level": level})
+        self.model_executor.sleeping_tags = {"weights", "kv_cache"}
+        if os.environ.get("PSRL_VLLM_PATCHES") == "TMS:GRAPH":
+            self.model_executor.sleeping_tags.add("graph")
+        self.model_executor.is_sleeping = True
+
     EngineCore.psrl_get_gpu_cache_info = psrl_get_gpu_cache_info
     EngineCore.psrl_pin_gpu = psrl_pin_gpu
     EngineCore.psrl_unpin_gpu = psrl_unpin_gpu
     EngineCore.psrl_get_runtime_snapshot = psrl_get_runtime_snapshot
     EngineCore.psrl_is_memory_sleeping = psrl_is_memory_sleeping
     EngineCore.psrl_wake_up_memory = psrl_wake_up_memory
+    EngineCore.psrl_sleep_memory = psrl_sleep_memory
     setattr(EngineCore, _SENTINEL, True)
 
     psrl_logger.info("Patched EngineCore PSRL utility methods.")

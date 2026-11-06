@@ -1,197 +1,136 @@
-"""
-Gate colocated rollout and reward phases through scoped global coordinator clients.
-
-Inference roles release their shared GPU memory before the next role wakes.
-The trainer driver owns training worker sleep and wake operations.
-"""
+"""Serialize ownership of GPU memory shared by inference and training roles."""
 
 import asyncio
-import enum
-import logging
-import os
+from collections import deque
+from contextlib import asynccontextmanager
+from enum import StrEnum
+from uuid import uuid4
 
 import ray
 
-psrl_logger = logging.getLogger(__file__)
-psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
 
-
-class OrchestratorPhase(str, enum.Enum):
+class OrchestratorPhase(StrEnum):
     ROLLOUT = "rollout"
+    VALIDATE = "validate"
     REWARD = "reward"
     TRAIN = "train"
 
 
+@asynccontextmanager
+async def inference_lease(orchestrator, phase: str, model: str = ""):
+    """Hold shared storage until the caller finishes using its current weights."""
+    if orchestrator is None:
+        yield
+        return
+    lease_id = uuid4().hex
+    admission = asyncio.ensure_future(orchestrator.acquire.remote(lease_id, phase, model))
+
+    async def release():
+        try:
+            await admission
+        except BaseException:
+            pass
+        await orchestrator.release.remote(lease_id)
+
+    try:
+        await asyncio.shield(admission)
+        yield
+    finally:
+        # Admission must settle before cancellation can release its identity.
+        await asyncio.shield(release())
+
+
 @ray.remote
 class SleepWakeOrchestrator:
-    """
-    Phased sleep/wake orchestrator for colocated deployment modes.
+    """Batch concurrent users of one role and fairly drain them before switching."""
 
-    Args:
-        mode: deployment mode string ("colocated" or "rollout_rm_colocated").
-        rollout_coordinator: Rollout scope client for the global coordinator.
-        reward_model_coordinators: Map from reward model names to scoped clients.
-        rollout_model_name: model name string for the rollout role.
-    """
-
-    def __init__(
-        self,
-        mode: str,
-        rollout_coordinator,
-        reward_model_coordinators: dict,
-        rollout_model_name: str,
-    ):
-        self.mode = str(mode)
+    def __init__(self, mode: str, rollout_coordinator, reward_model_coordinators: dict):
+        if mode not in ("colocated", "rollout_rm_colocated"):
+            raise ValueError(f"Unsupported phased deployment mode: {mode!r}.")
+        self.mode = mode
         self.rollout_coordinator = rollout_coordinator
-        self.reward_model_coordinators = dict(reward_model_coordinators or {})
-        self.rollout_model_name = rollout_model_name
-
-        self._phase: OrchestratorPhase = OrchestratorPhase.ROLLOUT
-        # The trainer driver sleeps both roles before the orchestrator starts.
-        self._rollout_awake: bool = False
-        self._rm_awake: bool = False
-        # Futures for wait_phase callers, keyed by the phase they are waiting for.
-        self._phase_waiters: dict[OrchestratorPhase, list[asyncio.Future]] = {p: [] for p in OrchestratorPhase}
-        # Serialize set_phase transitions to avoid overlapping sleep/wake waves.
-        self._transition_lock = asyncio.Lock()
+        self.reward_model_coordinators = dict(reward_model_coordinators)
+        self._current: tuple[OrchestratorPhase, str] | None = None
+        self._active: set[str] = set()
+        self._pending: deque = deque()
+        self._lock = asyncio.Lock()
+        self._failure: BaseException | None = None
         self._initialized = False
 
-    async def _sleep_rollout(self):
-        if not self._rollout_awake or self.rollout_coordinator is None:
-            return
-        result = await self.rollout_coordinator.sleep.remote("rollout")
-        if result is not True:
-            raise RuntimeError(f"Failed to sleep rollout instances: {result!r}")
-        self._rollout_awake = False
-
-    async def _wake_rollout(self):
-        if self._rollout_awake or self.rollout_coordinator is None:
-            return
-        result = await self.rollout_coordinator.wake_up.remote("rollout")
-        if result is not True:
-            raise RuntimeError(f"Failed to wake rollout instances: {result!r}")
-        self._rollout_awake = True
-
-    async def _sleep_reward(self):
-        if not self._rm_awake:
-            return
-        slept = []
-        for rm_name, coord in self.reward_model_coordinators.items():
-            result = await coord.sleep.remote()
-            if result is not True:
-                for _, slept_coord in reversed(slept):
-                    await slept_coord.wake_up.remote()
-                raise RuntimeError(f"Failed to sleep reward model {rm_name}: {result!r}")
-            slept.append((rm_name, coord))
-        self._rm_awake = False
-
-    async def _wake_reward(self):
-        if self._rm_awake:
-            return
-        woken = []
-        for rm_name, coord in self.reward_model_coordinators.items():
-            result = await coord.wake_up.remote()
-            if result is not True:
-                for _, woken_coord in reversed(woken):
-                    await woken_coord.sleep.remote()
-                raise RuntimeError(f"Failed to wake reward model {rm_name}: {result!r}")
-            woken.append((rm_name, coord))
-        self._rm_awake = True
-
-    async def _apply_phase(self, phase: OrchestratorPhase):
-        """
-        Issue sleep/wake commands to realize ``phase`` (diff-based, idempotent).
-
-        Ordering: always sleep the outgoing role before waking the incoming role
-        so that two roles never hold the shared pool's GPUs simultaneously.
-        """
-        if phase == OrchestratorPhase.ROLLOUT:
-            # Wake rollout, sleep rm: sleep rm first, then wake rollout.
-            await self._sleep_reward()
-            await self._wake_rollout()
-        elif phase == OrchestratorPhase.REWARD:
-            # Sleep rollout, wake rm: sleep rollout first, then wake rm.
-            await self._sleep_rollout()
-            await self._wake_reward()
-        elif phase == OrchestratorPhase.TRAIN:
-            # Mode 2 only: both rollout and rm sleep while the actor trains.
-            await self._sleep_rollout()
-            await self._sleep_reward()
-
-    def _set_phase_and_release(self, phase: OrchestratorPhase):
-        self._phase = phase
-        waiters = self._phase_waiters.get(phase, [])
-        self._phase_waiters[phase] = []
-        for fut in waiters:
-            if not fut.done():
-                fut.set_result(phase.value)
-
-    async def set_phase(self, phase: str) -> str:
-        """
-        Transition to ``phase`` and perform the corresponding sleep/wake.
-
-        Returns the previous phase value. No-op if already in ``phase``.
-        """
-        target = OrchestratorPhase(str(phase))
-        async with self._transition_lock:
-            if self._phase == target:
-                return self._phase.value
-            previous = self._phase
-            psrl_logger.info(
-                "SleepWakeOrchestrator: phase %s -> %s (mode=%s)",
-                previous.value,
-                target.value,
-                self.mode,
-            )
-            await self._apply_phase(target)
-            self._set_phase_and_release(target)
-            return previous.value
-
-    async def wait_phase(self, phase: str) -> str:
-        """
-        Block until the orchestrator reaches ``phase``, then return the phase.
-        """
-        target = OrchestratorPhase(str(phase))
-        if self._phase == target:
-            return self._phase.value
-        loop = asyncio.get_running_loop()
-        fut: asyncio.Future = loop.create_future()
-        self._phase_waiters[target].append(fut)
-        return await fut
-
-    async def get_phase(self) -> str:
-        return self._phase.value
-
-    async def notify_rollout_complete(self) -> None:
-        """
-        Signal that the current rollout cycle/buffer is fully generated.
-
-        Mode 3 (rollout_rm_colocated): auto-transition ROLLOUT -> REWARD so rm can
-        score the completed buffer. Mode 2 (colocated): the trainer driver owns
-        phase transitions, so this is a no-op here.
-        """
-        if self.mode == "rollout_rm_colocated":
-            await self.set_phase(OrchestratorPhase.REWARD.value)
-
-    async def notify_reward_complete(self) -> None:
-        """
-        Signal that reward scoring for the current buffer is done.
-
-        Mode 3: auto-transition REWARD -> ROLLOUT to start the next buffer.
-        """
-        if self.mode == "rollout_rm_colocated":
-            await self.set_phase(OrchestratorPhase.ROLLOUT.value)
-
     async def start(self) -> None:
-        """
-        Initialize the orchestrator to the ROLLOUT phase.
-
-        Assumes rollout/rm instances were already put to SLEEP by the trainer
-        driver during init (so ``_apply_phase(ROLLOUT)`` only needs to wake
-        rollout). We still sleep rm defensively (idempotent) then wake rollout.
-        """
-        async with self._transition_lock:
-            await self._apply_phase(OrchestratorPhase.ROLLOUT)
-            self._set_phase_and_release(OrchestratorPhase.ROLLOUT)
+        """Require every inference role to release storage before admitting work."""
+        async with self._lock:
+            await self.rollout_coordinator.sleep.remote("all")
+            for coordinator in self.reward_model_coordinators.values():
+                await coordinator.sleep.remote()
             self._initialized = True
-            psrl_logger.info("SleepWakeOrchestrator started at phase=rollout (mode=%s).", self.mode)
+
+    async def _apply(self, target: tuple[OrchestratorPhase, str]) -> None:
+        if self._current == target:
+            return
+        if self._current is not None:
+            phase, model = self._current
+            if phase == OrchestratorPhase.REWARD:
+                await self.reward_model_coordinators[model].sleep.remote()
+            elif phase != OrchestratorPhase.TRAIN:
+                await self.rollout_coordinator.sleep.remote(phase.value)
+        phase, model = target
+        if phase == OrchestratorPhase.REWARD:
+            await self.reward_model_coordinators[model].wake_up.remote()
+        elif phase != OrchestratorPhase.TRAIN:
+            await self.rollout_coordinator.wake_up.remote(phase.value)
+        self._current = target
+
+    async def _advance(self) -> None:
+        if self._active or not self._pending:
+            return
+        target = self._pending[0][1]
+        try:
+            await self._apply(target)
+        except BaseException as error:
+            self._failure = error
+            while self._pending:
+                _, _, future = self._pending.popleft()
+                if not future.done():
+                    future.set_exception(RuntimeError(f"Shared GPU transition failed: {error!r}."))
+            return
+        while self._pending and self._pending[0][1] == target:
+            lease_id, _, future = self._pending.popleft()
+            if not future.cancelled():
+                self._active.add(lease_id)
+                future.set_result(None)
+
+    async def acquire(self, lease_id: str, phase: str, model: str = "") -> None:
+        """Wait for conflicting users without admitting new work ahead of them."""
+        target = (OrchestratorPhase(phase), model)
+        if target[0] == OrchestratorPhase.REWARD and model not in self.reward_model_coordinators:
+            raise ValueError(f"Unknown reward model: {model!r}.")
+        async with self._lock:
+            if not self._initialized or self._failure is not None:
+                raise RuntimeError(f"Shared GPU admission is unavailable: {self._failure!r}.")
+            if lease_id in self._active or any(item[0] == lease_id for item in self._pending):
+                raise ValueError(f"GPU lease is already registered: {lease_id!r}.")
+            if self._current == target and not self._pending:
+                self._active.add(lease_id)
+                return
+            future = asyncio.get_running_loop().create_future()
+            self._pending.append((lease_id, target, future))
+            await self._advance()
+        await future
+
+    async def release(self, lease_id: str) -> None:
+        """Release an active or cancelled admission before handing storage onward."""
+        async with self._lock:
+            self._active.discard(lease_id)
+            remaining = deque()
+            for item in self._pending:
+                if item[0] == lease_id:
+                    if not item[2].done():
+                        item[2].cancel()
+                else:
+                    remaining.append(item)
+            self._pending = remaining
+            await self._advance()
+
+    async def get_phase(self) -> str | None:
+        return self._current[0].value if self._current else None

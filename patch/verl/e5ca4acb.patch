@@ -438,6 +438,751 @@ index 92f39710f034eae8573a8b374afea3e01f02f7de..1e55c94c94bd95833736aee400bc3cd8
          "CUDA_DEVICE_MAX_CONNECTIONS": "1",
          # TODO: disable compile cache due to cache corruption issue
          # https://github.com/vllm-project/vllm/issues/31199
+diff --git a/verl/trainer/distillation/fsdp/losses.py b/verl/trainer/distillation/fsdp/losses.py
+index 602d3875..ee179b78 100644
+--- a/verl/trainer/distillation/fsdp/losses.py
++++ b/verl/trainer/distillation/fsdp/losses.py
+@@ -16,6 +16,7 @@
+ import torch
+ import torch.nn.functional as F
+ 
++from verl.trainer.distillation.tail_kl import compute_tail_bucket_kl
+ from verl.utils.ulysses import (
+     get_ulysses_sequence_parallel_world_size,
+     slice_input_tensor,
+@@ -72,29 +73,86 @@ def kl_divergence(log_q: torch.Tensor, log_p: torch.Tensor) -> torch.Tensor:
+     return kld.sum(dim=-1)
+ 
+ 
++def tail_aware_kl_divergence(
++    log_q: torch.Tensor,
++    log_p: torch.Tensor,
++    tail_mass_eps: float,
++) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
++    """Compute forward KL after collapsing all non-top-k tokens into one tail bucket.
++
++    ``log_p`` and ``log_q`` contain probabilities on the teacher-selected top-k
++    support. The returned divergence is the exact KL between the two
++    ``K + 1``-class distributions ``[p_topk, 1 - p_topk.sum()]`` and
++    ``[q_topk, 1 - q_topk.sum()]``.
++
++    Related work:
++        - Decoupled Top-K Knowledge Distillation in the LFM2 Technical Report:
++          https://arxiv.org/abs/2511.23404v1
++          At temperature 1, its Bernoulli membership KL plus the teacher-mass-weighted
++          conditional Top-k KL are algebraically the same objective computed here.
++        - Ghost token in Sparse Logit Sampling: Accelerating Knowledge Distillation in LLMs:
++          https://aclanthology.org/2025.acl-long.885.pdf
++
++    Returns:
++        A tuple of per-token coarse-grained divergence, student top-k mass,
++        teacher top-k mass, and the tail-bucket contribution. The divergence
++        is ``topk_loss + tail_loss``.
++    """
++    log_p = log_p.float()
++    log_q = log_q.float()
++    p = log_p.exp()
++    q = log_q.exp()
++
++    teacher_mass = p.sum(dim=-1)
++    student_mass = q.sum(dim=-1)
++    topk_loss = (p * (log_p - log_q)).sum(dim=-1)
++    tail_loss = compute_tail_bucket_kl(
++        student_topk_mass=student_mass,
++        teacher_topk_mass=teacher_mass,
++        tail_mass_eps=tail_mass_eps,
++    )
++    return topk_loss + tail_loss, student_mass, teacher_mass, tail_loss
++
++
+ def compute_forward_kl_topk(
+     student_logits: torch.Tensor,
+     teacher_topk_log_probs: torch.Tensor,
+     teacher_topk_ids: torch.Tensor,
+     config: DistillationConfig,
+     data_format: str,
+-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+-    """Compute forward KL distillation loss using top-k log probabilities.
++    *,
++    include_tail: bool = False,
++) -> dict[str, torch.Tensor]:
++    """Compute truncated or tail-aware teacher-top-k KL with the FSDP backend.
+ 
+     Args:
+         student_logits: (bsz, seqlen/sp_size, vocab_size).
+         teacher_topk_log_probs: (bsz, seqlen, topk).
+         teacher_topk_ids: (bsz, seqlen, topk).
++        config: distillation config, providing ``log_prob_min_clamp`` and ``tail_mass_eps``.
+         data_format: "thd" or "bshd", models not support THD format, e.g GPT-OSS, Qwen3.5
++        include_tail: whether to collapse all non-top-k tokens into one aggregate
++            bucket, which turns the truncated objective into the exact forward KL
++            between the two coarse-grained ``K + 1``-class distributions.
++            Selected by ``loss_mode=forward_kl_topk_tail``.
+ 
+     Returns:
+     - distillation_losses: (bsz, seqlen/sp_size)
+     - student_mass: (bsz, seqlen/sp_size)
+     - teacher_mass: (bsz, seqlen/sp_size)
++    - tail_loss: (bsz, seqlen/sp_size), only when ``include_tail=True``
+     """
+     assert teacher_topk_log_probs.is_nested and teacher_topk_ids.is_nested
+-    teacher_topk_log_probs = teacher_topk_log_probs.values().unsqueeze(0)  # (1, total_nnz, topk)
+-    teacher_topk_ids = teacher_topk_ids.values().unsqueeze(0)  # (1, total_nnz, topk)
++    if data_format == "thd":
++        teacher_topk_log_probs = teacher_topk_log_probs.values().unsqueeze(0)
++        teacher_topk_ids = teacher_topk_ids.values().unsqueeze(0)
++    elif data_format == "bshd":
++        teacher_topk_log_probs = teacher_topk_log_probs.to_padded_tensor(0.0)
++        teacher_topk_ids = teacher_topk_ids.to_padded_tensor(0)
++    else:
++        raise ValueError(f"Unsupported distillation data format {data_format!r}.")
++    if (teacher_topk_ids < 0).any() or (teacher_topk_ids >= student_logits.shape[-1]).any():
++        raise ValueError("Teacher token IDs exceed the student vocabulary.")
+ 
+     # 1. split across sp groups (bsz, seqlen, topk) => (bsz, seqlen/sp_size, topk)
+     if get_ulysses_sequence_parallel_world_size() > 1:
+@@ -122,28 +180,40 @@ def compute_forward_kl_topk(
+         student_log_probs = F.log_softmax(student_logits, dim=-1)
+         student_topk_ids = torch.topk(student_log_probs, k=teacher_topk_ids.shape[-1], dim=-1).indices
+         student_topk_log_probs = torch.gather(student_log_probs, dim=-1, index=teacher_topk_ids)
+-    student_mass = student_topk_log_probs.exp().sum(dim=-1)
+-    teacher_mass = teacher_topk_log_probs.exp().sum(dim=-1)
+-    if loss_config.log_prob_min_clamp is not None:
+-        student_topk_log_probs = student_topk_log_probs.clamp_min(loss_config.log_prob_min_clamp)
+-        teacher_topk_log_probs = teacher_topk_log_probs.clamp_min(loss_config.log_prob_min_clamp)
+-    distillation_losses = kl_divergence(log_q=student_topk_log_probs, log_p=teacher_topk_log_probs)
++
++    tail_loss = None
++    if include_tail:
++        distillation_losses, student_mass, teacher_mass, tail_loss = tail_aware_kl_divergence(
++            log_q=student_topk_log_probs,
++            log_p=teacher_topk_log_probs,
++            tail_mass_eps=loss_config.tail_mass_eps,
++        )
++    else:
++        student_mass = student_topk_log_probs.exp().sum(dim=-1)
++        teacher_mass = teacher_topk_log_probs.exp().sum(dim=-1)
++        if loss_config.log_prob_min_clamp is not None:
++            student_topk_log_probs = student_topk_log_probs.clamp_min(loss_config.log_prob_min_clamp)
++            teacher_topk_log_probs = teacher_topk_log_probs.clamp_min(loss_config.log_prob_min_clamp)
++        distillation_losses = kl_divergence(log_q=student_topk_log_probs, log_p=teacher_topk_log_probs)
+ 
+     # Diagnostics for tracking teacher/student top-k overlap in OPD, following
+     # "Rethinking On-Policy Distillation of Large Language Models" (arXiv:2604.13016).
+     overlap_mask = (teacher_topk_ids.unsqueeze(-1) == student_topk_ids.unsqueeze(-2)).any(dim=-1)
+     overlap_count = overlap_mask.sum(dim=-1)
+-    token_kl = teacher_topk_log_probs.exp() * (teacher_topk_log_probs - student_topk_log_probs)
++    token_kl = teacher_topk_log_probs.float().exp() * (teacher_topk_log_probs.float() - student_topk_log_probs.float())
+     overlap_token_advantage_sum = (-token_kl * overlap_mask).sum(dim=-1)
+     overlap_token_advantage = overlap_token_advantage_sum / overlap_count.clamp_min(1)
+     overlap_token_advantage = torch.where(
+         overlap_count > 0, overlap_token_advantage, torch.zeros_like(overlap_token_advantage)
+     )
+ 
+-    return {
++    outputs = {
+         "distillation_losses": distillation_losses,
+         "student_mass": student_mass,
+         "teacher_mass": teacher_mass,
+         "overlap_count": overlap_count,
+         "overlap_token_advantage": overlap_token_advantage,
+     }
++    if tail_loss is not None:
++        outputs["tail_loss"] = tail_loss
++    return outputs
+diff --git a/verl/trainer/distillation/losses.py b/verl/trainer/distillation/losses.py
+index 07df0850..832f3bef 100644
+--- a/verl/trainer/distillation/losses.py
++++ b/verl/trainer/distillation/losses.py
+@@ -13,12 +13,14 @@
+ # limitations under the License.
+ 
+ from dataclasses import dataclass, field
++from functools import partial
+ from typing import Any, Callable, Optional
+ 
+ import torch
+ from tensordict import TensorDict
+ 
+ from verl.base_config import BaseConfig
++from verl.trainer.distillation.tail_kl import compute_tail_bucket_kl
+ from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
+ from verl.utils.metric import AggregationType, Metric
+ from verl.workers.config import ActorConfig, DistillationConfig, DistillationLossConfig
+@@ -114,6 +116,8 @@ def compute_distillation_loss_range(
+         distillation_losses_response = distillation_losses[response_mask.bool().to_padded_tensor(False)]
+     else:
+         distillation_losses_response = distillation_losses[response_mask.bool()]
++    if distillation_losses_response.numel() == 0:
++        distillation_losses_response = distillation_losses.new_zeros(1)
+     return {
+         "distillation/loss_min": Metric(AggregationType.MIN, distillation_losses_response.min()),
+         "distillation/loss_max": Metric(AggregationType.MAX, distillation_losses_response.max()),
+@@ -126,26 +130,44 @@ def compute_topk_loss(
+     data: TensorDict,
+     student_logits: torch.Tensor,
+     data_format: str,
++    use_fp8_padding: bool = False,
++    local_cp_size: Optional[int] = None,
+ ) -> torch.Tensor:
+     """Compute the topk loss in logit processor.
+ 
++    Teacher targets use the same FP8 padding and context parallel group as student inputs.
++
+     Returns:
+     - distillation_losses: (bsz, seqlen/cp_size)
+     - student_mass: (bsz, seqlen/cp_size)
+     - teacher_mass: (bsz, seqlen/cp_size)
+     """
++    loss_mode = distillation_config.distillation_loss.loss_mode
+     match config.strategy:
+         # VeOmni uses FSDP2 internally, so its loss computation is identical to FSDP.
+-        case "fsdp" | "veomni":
++        case "fsdp" | "veomni" | "fsdp2":
+             import verl.trainer.distillation.fsdp.losses as fsdp_losses
+ 
+-            distillation_loss_fn = fsdp_losses.compute_forward_kl_topk
++            loss_functions = {
++                "forward_kl_topk": fsdp_losses.compute_forward_kl_topk,
++                "forward_kl_topk_tail": partial(fsdp_losses.compute_forward_kl_topk, include_tail=True),
++            }
+         case "megatron":
+             import verl.trainer.distillation.megatron.losses as megatron_losses
+ 
+-            distillation_loss_fn = megatron_losses.compute_forward_kl_topk
++            loss_functions = {
++                "forward_kl_topk": megatron_losses.compute_forward_kl_topk,
++                "forward_kl_topk_tail": partial(megatron_losses.compute_forward_kl_topk, include_tail=True),
++            }
+         case _:
+             raise NotImplementedError(f"Unsupported strategy: {config.strategy=}")
++    backend_kwargs = {}
++    if config.strategy == "megatron":
++        backend_kwargs = {"use_fp8_padding": use_fp8_padding, "local_cp_size": local_cp_size}
++
++    if loss_mode not in loss_functions:
++        raise NotImplementedError(f"Unsupported top-k distillation loss mode: {loss_mode}")
++    distillation_loss_fn = loss_functions[loss_mode]
+ 
+     outputs = distillation_loss_fn(
+         student_logits=student_logits,
+@@ -153,6 +175,7 @@ def compute_topk_loss(
+         teacher_topk_ids=data["teacher_ids"],
+         config=distillation_config,
+         data_format=data_format,
++        **backend_kwargs,
+     )
+ 
+     expected_shape = student_logits.shape[:2]
+@@ -170,6 +193,8 @@ def distillation_ppo_loss(
+     dp_group=None,
+     student_logits: torch.Tensor = None,
+     data_format: str = "thd",
++    use_fp8_padding: bool = False,
++    local_cp_size: Optional[int] = None,
+ ):
+     """Loss function used both for logit processor and final policy loss.
+     - student_logits is not None, compute the topk loss in logit processor.
+@@ -194,6 +219,8 @@ def distillation_ppo_loss(
+           - teacher_ids: (bsz, seqlen, topk)
+         student_logits: (bsz, seqlen/cp_size, vocab_size/tp_size).
+         data_format: "thd" or "bshd", models not support THD format, e.g GPT-OSS, Qwen3.5
++        use_fp8_padding: Whether the student inputs use FP8 alignment.
++        local_cp_size: Context parallel group size used to pack student inputs.
+ 
+     Returns:
+     - student_logits is not None, return the topk loss tensor (bsz, seqlen/cp_size).
+@@ -202,14 +229,27 @@ def distillation_ppo_loss(
+ 
+     # Called as logits processor
+     if student_logits is not None:
+-        return compute_topk_loss(config, distillation_config, data, student_logits, data_format)
++        return compute_topk_loss(
++            config,
++            distillation_config,
++            data,
++            student_logits,
++            data_format,
++            use_fp8_padding=use_fp8_padding,
++            local_cp_size=local_cp_size,
++        )
+ 
+     # Called as final policy loss
+     distillation_loss_config = distillation_config.distillation_loss
++    if data is not None and "dp_size" in data:
++        for field_name in ("dp_size", "batch_num_tokens", "global_batch_size"):
++            config.global_batch_info[field_name] = data[field_name]
++        config.global_batch_info["loss_scale_factor"] = config.loss_scale_factor
+     distill_loss, distill_metrics = distillation_loss(config, distillation_config, model_output, data)
+-    policy_loss, policy_metrics = ppo_loss(config, model_output, data, dp_group)
+-    if not distillation_loss_config.use_task_rewards:
+-        policy_loss = 0.0
++    if distillation_loss_config.use_task_rewards:
++        policy_loss, policy_metrics = ppo_loss(config, model_output, data, dp_group)
++    else:
++        policy_loss, policy_metrics = 0.0, {}
+ 
+     # Combine distillation with policy loss
+     policy_metrics.update(distill_metrics)
+@@ -254,6 +294,13 @@ def distillation_loss(
+         # clamping min is for k1 loss which can be negative
+         distillation_losses = distillation_losses.clamp(min=-loss_config.loss_max_clamp, max=loss_config.loss_max_clamp)
+ 
++    weights = data.get("teacher_weight")
++    if weights is not None:
++        weights = weights.to(device=distillation_losses.device, dtype=distillation_losses.dtype)
++        if weights.ndim != 1 or len(weights) != len(data) or not torch.isfinite(weights).all() or (weights < 0).any():
++            raise ValueError("Teacher weights must contain one finite nonnegative value per trajectory.")
++        distillation_losses = distillation_losses * weights.unsqueeze(-1)
++
+     if loss_config.use_policy_gradient:
+         # Use negative distillation loss as reward, as done by https://thinkingmachines.ai/blog/on-policy-distillation/.
+         policy_loss_fn = get_policy_loss_fn(loss_config.policy_loss_mode)
+@@ -266,6 +313,8 @@ def distillation_loss(
+         if response_mask.is_nested:
+             response_mask = response_mask.to_padded_tensor(False)
+         rollout_is_weights = data.get("rollout_is_weights", None)
++        if rollout_is_weights is not None and rollout_is_weights.is_nested:
++            rollout_is_weights = rollout_is_weights.to_padded_tensor(0.0)
+         distillation_loss, pg_metrics = policy_loss_fn(
+             old_log_prob=old_log_prob,
+             log_prob=log_prob,
+@@ -291,7 +340,7 @@ def distillation_loss(
+     return distillation_loss, distillation_metrics
+ 
+ 
+-@register_distillation_loss(DistillationLossSettings(names=["forward_kl_topk"], use_topk=True))  # type: ignore[arg-type]
++@register_distillation_loss(DistillationLossSettings(names=["forward_kl_topk", "forward_kl_topk_tail"], use_topk=True))  # type: ignore[arg-type]
+ def compute_forward_kl_topk(
+     config: ActorConfig,
+     distillation_config: DistillationConfig,
+@@ -310,9 +359,31 @@ def compute_forward_kl_topk(
+     teacher_mass = no_padding_2_padding(model_output["teacher_mass"], data)
+     overlap_count = model_output.get("overlap_count")
+     overlap_token_advantage = model_output.get("overlap_token_advantage")
++    tail_loss = model_output.get("tail_loss")
++    loss_mode = distillation_config.distillation_loss.loss_mode
+     if overlap_count is not None and overlap_token_advantage is not None:
+         overlap_count = no_padding_2_padding(overlap_count, data)
+         overlap_token_advantage = no_padding_2_padding(overlap_token_advantage, data)
++    if tail_loss is not None:
++        tail_loss = no_padding_2_padding(tail_loss, data)
++    elif loss_mode == "forward_kl_topk_tail":
++        # Non-fused FSDP/Megatron paths return tail_loss and take the branch above.
++        # A fused top-k engine may return only the truncated loss and probability
++        # masses, so this fallback adds the missing tail term without changing the
++        # teacher payload or materializing full logits. Its student_mass must be
++        # differentiable; metric-only masses (e.g. VeOmni's chunk_topk_distill)
++        # cannot carry the tail gradient and are rejected by the guard below.
++        if torch.is_grad_enabled() and distillation_losses.requires_grad and not student_mass.requires_grad:
++            raise RuntimeError(
++                "forward_kl_topk_tail requires differentiable student_mass from the fused engine; "
++                "disable fused kernels or update the fused top-k kernel to preserve its mass gradient."
++            )
++        tail_loss = compute_tail_bucket_kl(
++            student_topk_mass=student_mass,
++            teacher_topk_mass=teacher_mass,
++            tail_mass_eps=distillation_config.distillation_loss.tail_mass_eps,
++        )
++        distillation_losses = distillation_losses + tail_loss
+     if data["response_mask"].is_nested:
+         response_mask_bool = data["response_mask"].bool().to_padded_tensor(False)
+     else:
+@@ -328,7 +399,9 @@ def compute_forward_kl_topk(
+         # Diagnostics for tracking teacher/student top-k overlap in OPD, following
+         # "Rethinking On-Policy Distillation of Large Language Models" (arXiv:2604.13016):
+         # overlap ratio and average teacher-token KL contribution on overlapped tokens.
+-        overlap_metrics["distillation/overlap_ratio"] = (valid_overlap_count.float().mean() / k).item()
++        overlap_metrics["distillation/overlap_ratio"] = (
++            valid_overlap_count.float().sum() / max(valid_overlap_count.numel(), 1) / k
++        ).item()
+         overlap_position_mask = response_mask_bool & (overlap_count > 0)
+         if overlap_position_mask.any():
+             overlap_metrics["distillation/overlap_token_advantage"] = (
+@@ -340,6 +413,9 @@ def compute_forward_kl_topk(
+     # Log amount of mass in the top-k log probabilities for both student and teacher.
+     student_mass = student_mass[response_mask_bool]
+     teacher_mass = teacher_mass[response_mask_bool]
++    if student_mass.numel() == 0:
++        student_mass = distillation_losses.new_zeros(1)
++        teacher_mass = distillation_losses.new_zeros(1)
+     distillation_metrics = {
+         "distillation/student_mass": student_mass.mean().item(),
+         "distillation/student_mass_min": Metric(AggregationType.MIN, student_mass.min()),
+@@ -350,8 +426,25 @@ def compute_forward_kl_topk(
+         **overlap_metrics,
+     }
+ 
+-    # Due to use of top-k, student and teacher distributions don't sum to 1 -> divergences can be negative.
+-    distillation_losses = distillation_losses.clamp_min(0.0)
++    if tail_loss is not None:
++        valid_tail_loss = tail_loss[response_mask_bool]
++        valid_topk_loss = (distillation_losses - tail_loss)[response_mask_bool]
++        if valid_tail_loss.numel() == 0:
++            valid_tail_loss = distillation_losses.new_zeros(1)
++            valid_topk_loss = distillation_losses.new_zeros(1)
++        distillation_metrics.update(
++            {
++                "distillation/topk_loss": valid_topk_loss.mean().item(),
++                "distillation/tail_loss": valid_tail_loss.mean().item(),
++                "distillation/teacher_tail_mass": (1.0 - teacher_mass).clamp_min(0.0).mean().item(),
++                "distillation/student_tail_mass": (1.0 - student_mass).clamp_min(0.0).mean().item(),
++            }
++        )
++
++    # The existing truncated objective can be negative because its top-k masses
++    # are not normalized. Tail-aware KL is already a valid coarse-grained KL.
++    if loss_mode == "forward_kl_topk":
++        distillation_losses = distillation_losses.clamp_min(0.0)
+ 
+     return distillation_losses, distillation_metrics
+ 
+@@ -389,6 +482,9 @@ def compute_distillation_loss_reverse_kl_estimator(
+     )
+     # Since k1 can be negative, log the mean absolute loss.
+     metrics = {
+-        "distillation/abs_loss": Metric(AggregationType.MEAN, distillation_losses[response_mask_bool].abs().mean()),
++        "distillation/abs_loss": Metric(
++            AggregationType.MEAN,
++            distillation_losses[response_mask_bool].abs().sum() / response_mask_bool.sum().clamp_min(1),
++        ),
+     }
+     return distillation_losses, metrics
+diff --git a/verl/trainer/distillation/megatron/losses.py b/verl/trainer/distillation/megatron/losses.py
+index 56168a34..59d9dff9 100644
+--- a/verl/trainer/distillation/megatron/losses.py
++++ b/verl/trainer/distillation/megatron/losses.py
+@@ -21,6 +21,7 @@ from verl.models.mcore.util import (
+     preprocess_bshd_engine,
+     preprocess_thd_engine,
+ )
++from verl.trainer.distillation.tail_kl import compute_tail_aware_logit_gradient, compute_tail_bucket_kl
+ from verl.workers.config import DistillationConfig, DistillationLossConfig
+ 
+ 
+@@ -68,6 +69,8 @@ class _VocabParallelKLDivergence(torch.autograd.Function):
+         target_topk_logps: torch.Tensor,
+         target_topk_indices: torch.Tensor,
+         log_prob_min_clamp: Optional[float],
++        include_tail: bool,
++        tail_mass_eps: float,
+     ):
+         """
+         NOTE:
+@@ -109,13 +112,13 @@ class _VocabParallelKLDivergence(torch.autograd.Function):
+         target_topk_indices[~topk_indices_in_vocab_mask] = 0
+ 
+         # Target probs/logps (teacher distribution restricted to top-k), masked to this shard.
+-        # Note: `target_topk_mass` is computed *before* masking-out-of-shard entries, so it represents
+-        # the mass of the provided top-k distribution (global), independent of TP sharding.
++        # Compute the logging metric before clamping and masking so it represents the original
++        # mass of the provided top-k distribution (global), independent of TP sharding.
++        target_topk_mass = torch.sum(torch.exp(target_topk_logps.float()), dim=-1)
+         if log_prob_min_clamp is not None:
+             target_topk_logps = target_topk_logps.clamp_min(log_prob_min_clamp)
+         target_topk_logps = target_topk_logps.float()
+         target_topk_probs = torch.exp(target_topk_logps)
+-        target_topk_mass = torch.sum(target_topk_probs, dim=-1)
+         target_topk_probs[~topk_indices_in_vocab_mask] = 0
+         target_topk_logps[~topk_indices_in_vocab_mask] = 0
+ 
+@@ -128,6 +131,22 @@ class _VocabParallelKLDivergence(torch.autograd.Function):
+         ]  # (b*s, topk)
+         vp_source_topk_logps = vp_source_topk_logps_2d.view(target_topk_indices.shape)  # (b, s, topk)
+ 
++        if include_tail and log_prob_min_clamp is not None:
++            raise ValueError(
++                "Tail-aware top-k KL requires log_prob_min_clamp=None because per-entry clamping "
++                "breaks the coarse-grained probability distribution."
++            )
++
++        # For logging: mass of student probs that lands on the teacher's top-k indices.
++        # Compute it before clamping; entries outside this TP shard contribute zero.
++        vp_source_topk_probs = vp_source_topk_logps.exp() * topk_indices_in_vocab_mask  # (b, s, topk)
++        per_token_topk_mass = torch.sum(vp_source_topk_probs, dim=-1)  # (b, s)
++        torch.distributed.all_reduce(
++            per_token_topk_mass,
++            op=torch.distributed.ReduceOp.SUM,
++            group=get_tensor_model_parallel_group(),
++        )
++
+         # `active_mask` tracks entries that should receive gradient.
+         # If clamping is enabled, entries with log p_i <= clamp have zero gradient w.r.t. logits.
+         active_mask = topk_indices_in_vocab_mask
+@@ -162,15 +181,25 @@ class _VocabParallelKLDivergence(torch.autograd.Function):
+             group=get_tensor_model_parallel_group(),
+         )
+ 
+-        ctx.save_for_backward(vp_source_probs, target_topk_probs, target_topk_indices, active_mask, target_active_mass)
+-
+-        # For logging: mass of student probs that lands on the teacher's top-k indices.
+-        vp_source_topk_probs = vp_source_topk_logps.exp() * topk_indices_in_vocab_mask  # (b, s, topk)
+-        per_token_topk_mass = torch.sum(vp_source_topk_probs, dim=-1)  # (b, s)
+-        torch.distributed.all_reduce(
++        tail_loss = torch.zeros_like(per_token_kl_loss)
++        if include_tail:
++            tail_loss = compute_tail_bucket_kl(
++                student_topk_mass=per_token_topk_mass,
++                teacher_topk_mass=target_topk_mass,
++                tail_mass_eps=tail_mass_eps,
++            )
++            per_token_kl_loss = per_token_kl_loss + tail_loss
++
++        ctx.include_tail = include_tail
++        ctx.tail_mass_eps = tail_mass_eps
++        ctx.save_for_backward(
++            vp_source_probs,
++            target_topk_probs,
++            target_topk_indices,
++            active_mask,
++            target_active_mass,
+             per_token_topk_mass,
+-            op=torch.distributed.ReduceOp.SUM,
+-            group=get_tensor_model_parallel_group(),
++            target_topk_mass,
+         )
+ 
+         # Compute the student's global top-k ids from per-rank vocab-shard candidates.
+@@ -211,9 +240,19 @@ class _VocabParallelKLDivergence(torch.autograd.Function):
+         target_topk_mass = target_topk_mass.detach()
+         overlap_count = overlap_count.detach()
+         overlap_token_advantage = overlap_token_advantage.detach()
+-        ctx.mark_non_differentiable(per_token_topk_mass, target_topk_mass, overlap_count, overlap_token_advantage)
++        tail_loss = tail_loss.detach()
++        ctx.mark_non_differentiable(
++            per_token_topk_mass, target_topk_mass, overlap_count, overlap_token_advantage, tail_loss
++        )
+ 
+-        return per_token_kl_loss, per_token_topk_mass, target_topk_mass, overlap_count, overlap_token_advantage
++        return (
++            per_token_kl_loss,
++            per_token_topk_mass,
++            target_topk_mass,
++            overlap_count,
++            overlap_token_advantage,
++            tail_loss,
++        )
+ 
+     @staticmethod
+     def backward(
+@@ -223,6 +262,7 @@ class _VocabParallelKLDivergence(torch.autograd.Function):
+         grad_target_mass: torch.Tensor,
+         grad_overlap_count: torch.Tensor,
+         grad_overlap_token_advantage: torch.Tensor,
++        grad_tail_loss: torch.Tensor,
+     ):
+         """
+         Backprop for the per-token loss:
+@@ -241,24 +281,44 @@ class _VocabParallelKLDivergence(torch.autograd.Function):
+         Then for any vocab index j on this shard (with p = softmax(logits)):
+             dL/dz_j = m_A * p_j - q_j * 1[j in A]
+         """
+-        vp_source_probs, target_topk_probs, target_topk_indices, active_mask, target_active_mass = ctx.saved_tensors
+-
+-        # Scale by m_A: grad starts as m_A * p_j for all j on this shard.
+-        grad_input = vp_source_probs * target_active_mass.unsqueeze(-1)  # [b, s, vocab_shard]
++        (
++            vp_source_probs,
++            target_topk_probs,
++            target_topk_indices,
++            active_mask,
++            target_active_mass,
++            student_topk_mass,
++            teacher_topk_mass,
++        ) = ctx.saved_tensors
++
++        if ctx.include_tail:
++            grad_input = compute_tail_aware_logit_gradient(
++                student_probs=vp_source_probs,
++                teacher_topk_probs=target_topk_probs,
++                teacher_topk_indices=target_topk_indices,
++                teacher_topk_mask=active_mask,
++                student_topk_mass=student_topk_mass,
++                teacher_topk_mass=teacher_topk_mass,
++                tail_mass_eps=ctx.tail_mass_eps,
++            )
++        else:
++            # Scale by m_A: grad starts as m_A * p_j for all j on this shard.
++            outside_scale = target_active_mass
++            grad_input = vp_source_probs * outside_scale.unsqueeze(-1)  # [b, s, vocab_shard]
+ 
+         topk = target_topk_indices.size(-1)
+         grad_input_2d = grad_input.view(-1, grad_input.size(-1))
+-        target_topk_probs_flat = target_topk_probs.view(-1, topk)  # (b*s, topk)
+         target_topk_indices_flat = target_topk_indices.view(-1, topk)  # (b*s, topk)
+ 
+         # Subtract q_j for active entries (i.e., j in A), accumulating repeats via scatter_add_.
+         # Index 0 is used as a dummy for top-k entries not on this shard (their q is zeroed by mask),
+         # but index 0 may also be a real token index; scatter_add_ correctly accumulates duplicates.
+-        sub = target_topk_probs_flat * active_mask.view(-1, topk).to(grad_input_2d.dtype)  # (b*s, topk)
+-        grad_input_2d.scatter_add_(dim=1, index=target_topk_indices_flat, src=-sub)
++        if not ctx.include_tail:
++            correction = -target_topk_probs * active_mask.to(vp_source_probs.dtype)
++            grad_input_2d.scatter_add_(dim=1, index=target_topk_indices_flat, src=correction.view(-1, topk))
+ 
+         grad_input.mul_(grad_loss.unsqueeze(dim=-1))
+-        return grad_input, None, None, None
++        return grad_input, None, None, None, None, None
+ 
+ 
+ def compute_forward_kl_topk(
+@@ -267,46 +327,72 @@ def compute_forward_kl_topk(
+     teacher_topk_ids: torch.Tensor,
+     config: DistillationConfig,
+     data_format: str,
+-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+-    """Compute forward KL distillation loss using top-k log probabilities.
++    *,
++    include_tail: bool = False,
++    use_fp8_padding: bool = False,
++    local_cp_size: Optional[int] = None,
++) -> dict[str, torch.Tensor]:
++    """Compute truncated or tail-aware teacher-top-k KL with the Megatron backend.
+ 
+     Args:
+         student_logits: (bsz, seqlen/cp_size, vocab_size/tp_size).
+         teacher_topk_log_probs: (bsz, seqlen, topk).
+         teacher_topk_ids: (bsz, seqlen, topk).
++        config: distillation config, providing ``log_prob_min_clamp`` and ``tail_mass_eps``.
+         data_format: "thd" or "bshd", models not support THD format, e.g GPT-OSS, Qwen3.5
++        include_tail: whether to collapse all non-top-k tokens into one aggregate
++            bucket, which turns the truncated objective into the exact forward KL
++            between the two coarse-grained ``K + 1``-class distributions.
++            Selected by ``loss_mode=forward_kl_topk_tail``.
++        use_fp8_padding: Whether the student inputs use FP8 alignment.
++        local_cp_size: Context parallel group size used to pack student inputs.
+ 
+     Returns:
+     - distillation_losses: (bsz, seqlen/cp_size)
+     - student_mass: (bsz, seqlen/cp_size)
+     - teacher_mass: (bsz, seqlen/cp_size)
++    - tail_loss: (bsz, seqlen/cp_size), only when ``include_tail=True``
+     """
+     assert teacher_topk_log_probs.is_nested and teacher_topk_ids.is_nested
+ 
+     # 1. split across cp groups (bsz, seqlen, topk) => (bsz, seqlen/cp_size, topk)
+     if data_format == "thd":
+-        teacher_topk_log_probs_cp_split, *_ = preprocess_thd_engine(teacher_topk_log_probs, pre_process=True)
+-        teacher_topk_ids_cp_split, *_ = preprocess_thd_engine(teacher_topk_ids, pre_process=True)
++        # packed exactly like the student's inputs in the model forward
++        thd_kwargs = dict(use_fp8_padding=use_fp8_padding, local_cp_size=local_cp_size)
++        teacher_topk_log_probs_cp_split, *_ = preprocess_thd_engine(
++            teacher_topk_log_probs, pre_process=True, **thd_kwargs
++        )
++        teacher_topk_ids_cp_split, *_ = preprocess_thd_engine(teacher_topk_ids, pre_process=True, **thd_kwargs)
+     else:
+-        teacher_topk_log_probs_cp_split, *_ = preprocess_bshd_engine(teacher_topk_log_probs, pre_process=True)
+-        teacher_topk_ids_cp_split, *_ = preprocess_bshd_engine(teacher_topk_ids, pre_process=True)
++        # BSHD inputs are padded as one batch; preprocess_bshd_engine only needs to know that padding is on
++        teacher_topk_log_probs_cp_split, *_ = preprocess_bshd_engine(
++            teacher_topk_log_probs, pre_process=True, use_fp8_padding=use_fp8_padding
++        )
++        teacher_topk_ids_cp_split, *_ = preprocess_bshd_engine(
++            teacher_topk_ids, pre_process=True, use_fp8_padding=use_fp8_padding
++        )
+     assert teacher_topk_log_probs_cp_split.shape[:2] == teacher_topk_ids_cp_split.shape[:2] == student_logits.shape[:2]
+ 
+     # 2. compute token-wise KL divergence across tp groups
+     distillation_loss_config: DistillationLossConfig = config.distillation_loss
+-    distillation_losses, student_mass, teacher_mass, overlap_count, overlap_token_advantage = (
++    distillation_losses, student_mass, teacher_mass, overlap_count, overlap_token_advantage, tail_loss = (
+         _VocabParallelKLDivergence.apply(
+             student_logits,
+             teacher_topk_log_probs_cp_split,
+             teacher_topk_ids_cp_split,
+             distillation_loss_config.log_prob_min_clamp,
++            include_tail,
++            distillation_loss_config.tail_mass_eps,
+         )
+     )
+ 
+-    return {
++    outputs = {
+         "distillation_losses": distillation_losses,
+         "student_mass": student_mass,
+         "teacher_mass": teacher_mass,
+         "overlap_count": overlap_count,
+         "overlap_token_advantage": overlap_token_advantage,
+     }
++    if include_tail:
++        outputs["tail_loss"] = tail_loss
++    return outputs
+diff --git a/verl/trainer/distillation/tail_kl.py b/verl/trainer/distillation/tail_kl.py
+new file mode 100644
+index 00000000..12be58de
+--- /dev/null
++++ b/verl/trainer/distillation/tail_kl.py
+@@ -0,0 +1,70 @@
++# Copyright 2026 Bytedance Ltd. and/or its affiliates
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++import torch
++
++
++def compute_tail_bucket_kl(
++    student_topk_mass: torch.Tensor,
++    teacher_topk_mass: torch.Tensor,
++    tail_mass_eps: float,
++) -> torch.Tensor:
++    """Return the KL contribution of one aggregate non-top-k bucket.
++
++    The teacher top-k IDs define a shared coarse-graining of the vocabulary:
++    each selected token is its own category and every remaining token belongs
++    to one tail category. ``tail_mass_eps`` only guards the student tail's
++    logarithm; a zero teacher tail contributes zero by continuity.
++    """
++    # The epsilon guard is deliberately one-sided. The student tail appears inside
++    # a logarithm, so q_tail == 0 would send the loss and its gradient to infinity;
++    # clamping it to ``tail_mass_eps`` bounds both. The teacher tail is only a
++    # multiplicative weight: p_tail -> 0 makes the whole term vanish by continuity
++    # (x log x -> 0), so it is left unclamped -- only the input of its logarithm is
++    # floored at the dtype minimum, which avoids 0 * (-inf) = nan.
++    teacher_tail = (1.0 - teacher_topk_mass.float()).clamp(min=0.0, max=1.0)
++    student_tail = (1.0 - student_topk_mass.float()).clamp(min=tail_mass_eps, max=1.0)
++    teacher_tail_for_log = teacher_tail.clamp_min(torch.finfo(teacher_tail.dtype).tiny)
++    return teacher_tail * (torch.log(teacher_tail_for_log) - torch.log(student_tail))
++
++
++def compute_tail_aware_logit_gradient(
++    student_probs: torch.Tensor,
++    teacher_topk_probs: torch.Tensor,
++    teacher_topk_indices: torch.Tensor,
++    teacher_topk_mask: torch.Tensor,
++    student_topk_mass: torch.Tensor,
++    teacher_topk_mass: torch.Tensor,
++    tail_mass_eps: float,
++) -> torch.Tensor:
++    """Return the analytic gradient of coarse-grained KL with respect to logits.
++
++    ``student_probs`` may be one vocabulary shard. Teacher entries outside that
++    shard use dummy indices and must be false in ``teacher_topk_mask``.
++    """
++    teacher_tail = (1.0 - teacher_topk_mass).clamp(min=0.0, max=1.0)
++    raw_student_tail = 1.0 - student_topk_mass
++    student_tail = raw_student_tail.clamp(min=tail_mass_eps, max=1.0)
++    tail_is_active = raw_student_tail > tail_mass_eps
++    active_outside_scale = teacher_topk_mass - teacher_tail * student_topk_mass / student_tail
++    outside_scale = torch.where(tail_is_active, active_outside_scale, teacher_topk_mass)
++    grad_input = student_probs * outside_scale.unsqueeze(-1)
++
++    source_topk_probs = torch.gather(student_probs, dim=-1, index=teacher_topk_indices)
++    topk_scale = teacher_topk_mass + torch.where(tail_is_active, teacher_tail, 0.0)
++    correction = (
++        (topk_scale - outside_scale).unsqueeze(-1) * source_topk_probs - teacher_topk_probs
++    ) * teacher_topk_mask.to(student_probs.dtype)
++    grad_input.scatter_add_(dim=-1, index=teacher_topk_indices, src=correction)
++    return grad_input
 diff --git a/verl/trainer/ppo/core_algos.py b/verl/trainer/ppo/core_algos.py
 index 5e6a19a15d1643139901d94689a37167937f4689..3d7cfbce2e3d8f0ada6fb376e61e1f18fd42ad64 100644
 --- a/verl/trainer/ppo/core_algos.py
@@ -525,7 +1270,7 @@ index 946f76110de9af8acea75c30c4c85d5c91c30338..b0dbb4d519efa43c9f1811147bf55ee4
  
                  # compute mean and std
 diff --git a/verl/trainer/ppo/padding_utils.py b/verl/trainer/ppo/padding_utils.py
-index 436e17bc6023e35bde291abb6f8b2e75658a64dd..a5de3c3b41a84077ffa469402aa99e035e53eebc 100644
+index 436e17bc..608ddd6d 100644
 --- a/verl/trainer/ppo/padding_utils.py
 +++ b/verl/trainer/ppo/padding_utils.py
 @@ -71,6 +71,7 @@ def construct_minimal_padding_template(
@@ -569,10 +1314,26 @@ index 436e17bc6023e35bde291abb6f8b2e75658a64dd..a5de3c3b41a84077ffa469402aa99e03
          prompts=prompts,
          responses=prompts.clone(),
          input_ids=input_ids,
-@@ -112,6 +114,38 @@ def construct_minimal_padding_template(
+@@ -112,6 +114,54 @@ def construct_minimal_padding_template(
          rm_scores=torch.zeros_like(response_mask, dtype=torch.float32),
          rollout_log_probs=torch.zeros_like(response_mask, dtype=torch.float32),
      )
++
++    for field_name in ("teacher_logprobs", "teacher_ids"):
++        value = template_sample.get(field_name)
++        if isinstance(value, torch.Tensor):
++            # Match response targets and full sequence prediction targets to their respective token axes.
++            source_response_length = source_td["responses"].shape[0]
++            source_sequence_length = source_td["prompts"].shape[0] + source_response_length
++            if value.shape[0] == source_response_length:
++                target_length = prompts.size(0)
++            elif value.shape[0] == source_sequence_length:
++                target_length = input_ids.size(0)
++            else:
++                raise ValueError(f"Teacher target length does not match response or sequence length: {value.shape!r}.")
++            template_sample[field_name] = value.new_zeros((target_length, *value.shape[1:]))
++    if "teacher_weight" in template_sample:
++        template_sample["teacher_weight"] = torch.zeros_like(template_sample["teacher_weight"])
 +
 +    # One entry per response token, so they must shrink with response_mask. This function runs at
 +    # two points in the step and the later one, per-schedule-step DP padding, only exists when
@@ -608,7 +1369,7 @@ index 436e17bc6023e35bde291abb6f8b2e75658a64dd..a5de3c3b41a84077ffa469402aa99e03
      if "multi_modal_inputs" in template_sample:
          template_sample["multi_modal_inputs"] = {}
      if routed_experts is not None:
-@@ -120,7 +154,27 @@ def construct_minimal_padding_template(
+@@ -120,7 +170,27 @@ def construct_minimal_padding_template(
          template_sample.pop("routed_experts", None)
  
      # Padding flag is deployed to protect metrics calculation (e.g. response length, score, reward).
@@ -626,7 +1387,7 @@ index 436e17bc6023e35bde291abb6f8b2e75658a64dd..a5de3c3b41a84077ffa469402aa99e03
 +        unshrunk = {
 +            key: tuple(value.shape)
 +            for key, value in template_sample.items()
-+            if isinstance(value, torch.Tensor) and source_response_len in value.shape
++            if isinstance(value, torch.Tensor) and value.ndim > 0 and value.shape[0] == source_response_len
 +        }
 +        if unshrunk:
 +            raise AssertionError(
@@ -637,7 +1398,7 @@ index 436e17bc6023e35bde291abb6f8b2e75658a64dd..a5de3c3b41a84077ffa469402aa99e03
      return template_sample, template_tag
  
  
-@@ -154,26 +208,18 @@ def upsample_batch_to_divisible_size(
+@@ -154,26 +224,18 @@ def upsample_batch_to_divisible_size(
      source_key = batch.keys[source_idx]
      source_td = tq.kv_batch_get(keys=[source_key], partition_id=batch.partition_id)[0]
  
@@ -1351,6 +2112,79 @@ index 0fdede9793cce5bcb0cb83625af021e4e3b14ea2..b439e2eccb6be458d4ad1f030a839b06
              entity = os.environ.get("WANDB_ENTITY", None)
              wandb.init(project=project_name, name=experiment_name, entity=entity, config=config, settings=settings)
              self.logger["wandb"] = wandb
+diff --git a/verl/workers/config/distillation.py b/verl/workers/config/distillation.py
+index b58f8bcc..bad3b589 100644
+--- a/verl/workers/config/distillation.py
++++ b/verl/workers/config/distillation.py
+@@ -63,14 +63,15 @@ class DistillationLossConfig(BaseConfig):
+     """
+ 
+     loss_mode: str = "k3"
+-    topk: Optional[int] = 128
++    topk: Optional[int] = 32
+     use_task_rewards: bool = True
+     distillation_loss_coef: float = 1.0
+-    loss_max_clamp: Optional[float] = 10.0
+-    log_prob_min_clamp: Optional[float] = -10.0
++    loss_max_clamp: Optional[float] = None
++    log_prob_min_clamp: Optional[float] = None
++    tail_mass_eps: float = 1e-6
+ 
+     # Chunked top-K log-probs (opt-in, avoids [B, T, V] log_softmax buffer
+-    # at long context). Only consumed by ``loss_mode='forward_kl_topk'``.
++    # at long context). Consumed by teacher top-k KL loss modes.
+     # Default ``False`` to preserve short-context performance (chunked path
+     # has ~6x time overhead at N=14K, V=152K). Set ``True`` when hitting OOM
+     # at long context (>=64K tokens, V=152K) where the baseline path OOMs.
+@@ -81,7 +82,7 @@ class DistillationLossConfig(BaseConfig):
+     # overhead (saved-tensor total stays constant either way).
+     chunked_topk_chunk_size: int = 4096
+ 
+-    use_policy_gradient: bool = True
++    use_policy_gradient: bool = False
+     policy_loss_mode: str = "vanilla"
+     clip_ratio: float = 0.2
+     clip_ratio_low: float = 0.2
+@@ -102,6 +103,10 @@ class DistillationLossConfig(BaseConfig):
+         from verl.trainer.distillation.losses import DistillationLossSettings, get_distillation_loss_settings
+ 
+         self.loss_settings: DistillationLossSettings = get_distillation_loss_settings(self.loss_mode)
++        if self.loss_settings.use_topk and (
++            isinstance(self.topk, bool) or not isinstance(self.topk, int) or self.topk < 1
++        ):
++            raise ValueError("distillation_loss.topk must be a positive integer for top-k losses.")
+ 
+         if self.policy_loss_mode != "vanilla":
+             raise NotImplementedError(
+@@ -109,7 +114,7 @@ class DistillationLossConfig(BaseConfig):
+                 f"but got {self.policy_loss_mode}."
+             )
+ 
+-        if self.use_policy_gradient and self.loss_mode == "forward_kl_topk":
++        if self.use_policy_gradient and self.loss_settings.use_topk:
+             print(
+                 "WARNING: forward_kl_topk is most effective as a supervised distillation loss "
+                 "(use_policy_gradient=False). With policy gradient, the update uses only the sampled"
+@@ -117,12 +122,18 @@ class DistillationLossConfig(BaseConfig):
+                 "should move) is largely unused."
+             )
+ 
+-        if not self.use_policy_gradient and self.loss_mode == "k1":
++        if not self.use_policy_gradient and self.loss_mode in ("k1", "kl"):
+             raise ValueError(
+                 "Directly backpropagating k1 loss is incorrect since gradient of k1 loss"
+                 " wrt model weights does not depend on teacher log probabilities."
+             )
+ 
++        if self.loss_mode == "forward_kl_topk_tail":
++            if self.log_prob_min_clamp is not None:
++                raise ValueError("Tail KL requires log_prob_min_clamp=None to preserve probability mass.")
++            if not 0.0 < self.tail_mass_eps < 1.0:
++                raise ValueError("tail_mass_eps must be between zero and one.")
++
+ 
+ @dataclass
+ class DistillationTeacherModelConfig(BaseConfig):
 diff --git a/verl/workers/config/engine.py b/verl/workers/config/engine.py
 index 0bcf14a26c0a45dd0d46bc5308479c80cbd2c414..5a47a4da6a740bcde9e9430b7cece1f01b8191e7 100644
 --- a/verl/workers/config/engine.py
@@ -1540,7 +2374,7 @@ index 991ccdb2ba806f1e3272f2e1c76f100712972054..ad5258f22ea2c5b11b054d8ab9b70f90
                  loss, meta_info = self.forward_step(micro_batch, loss_function=loss_function, forward_only=forward_only)
  
 diff --git a/verl/workers/engine/megatron/transformer_impl.py b/verl/workers/engine/megatron/transformer_impl.py
-index 918d85ef0b6ef9f62a5c7b849c9827b9d3bccc4c..b05d3db7c0445a0f9acc1904d4e0e6dcae17b60c 100644
+index 918d85ef..b79f5d28 100644
 --- a/verl/workers/engine/megatron/transformer_impl.py
 +++ b/verl/workers/engine/megatron/transformer_impl.py
 @@ -15,6 +15,7 @@
@@ -1559,8 +2393,22 @@ index 918d85ef0b6ef9f62a5c7b849c9827b9d3bccc4c..b05d3db7c0445a0f9acc1904d4e0e6dc
  
  import verl.utils.torch_functional as verl_F
  from verl.models.mcore import get_mcore_weight_converter
-@@ -69,6 +71,13 @@ from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
+@@ -63,12 +65,27 @@ from verl.utils.megatron_utils import (
+ )
+ from verl.utils.model import extract_multi_modal_inputs, load_mcore_dist_weights
+ from verl.utils.seqlen_balancing import restore_dynamic_batch
++from verl.utils.training_diagnostics import (
++    install_compile_observer,
++    log_training_event,
++    trace_micro_batch_forward,
++    trace_training_call,
++    training_phase,
++)
+ from verl.workers.config import HFModelConfig, McoreEngineConfig, McoreOptimizerConfig
+ 
+ from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
  from ..utils import postprocess_batch_func, prepare_micro_batches
++from .dynamic_cp import collect_dynamic_cp_results, prepare_dynamic_cp_micro_batches
  from .utils import set_random_seed
  
 +USE_TMS = False
@@ -1573,7 +2421,25 @@ index 918d85ef0b6ef9f62a5c7b849c9827b9d3bccc4c..b05d3db7c0445a0f9acc1904d4e0e6dc
  logger = logging.getLogger(__file__)
  logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
  
-@@ -293,20 +302,21 @@ class MegatronEngine(BaseEngine):
+@@ -174,13 +191,11 @@ class MegatronEngine(BaseEngine):
+ 
+         override_transformer_config = mapping_string_to_attn_backend({**self.engine_config.override_transformer_config})
+         if self.engine_config.dynamic_context_parallel:
++            if not self.engine_config.use_remove_padding:
++                raise ValueError("Dynamic CP requires use_remove_padding=True.")
+             override_transformer_config["max_seqlen_per_dp_cp_rank"] = self.engine_config.max_seqlen_per_dp_cp_rank
+-            # note(baiyan): we must set the transformer_config.dynamic_context_parallel to False
+-            # because of the bad coupling design in Megatron-LM
+-            # https://github.com/xiaoyao0115/Megatron-LM/blob/88733ab6614e3e91b9d095172f41e7d8b5d8e9d4/megatron/core/pipeline_parallel/dynamic_cp_schedule.py#L552-L553
+-            # but it does not affect the functionality of dynamic CP, so we can use it to avoid the coupling.
+-            override_transformer_config["dynamic_context_parallel"] = False
+-            override_transformer_config["context_parallel_size"] = mpu.get_data_parallel_world_size()
++            override_transformer_config["dynamic_context_parallel"] = True
++            override_transformer_config["sequence_packing_scheduler"] = "default_dynamic_cp"
+         self.provider = None
+         self.vanilla_bridge = self.engine_config.vanilla_mbridge
+ 
+@@ -293,20 +308,21 @@ class MegatronEngine(BaseEngine):
          self.tf_config = updated_tf_config
          print(f"module: {len(module)}")
  
@@ -1608,8 +2474,21 @@ index 918d85ef0b6ef9f62a5c7b849c9827b9d3bccc4c..b05d3db7c0445a0f9acc1904d4e0e6dc
  
          if torch.distributed.get_rank() == 0:
              print_model_size(module[0])
-@@ -370,83 +380,89 @@ class MegatronEngine(BaseEngine):
+@@ -367,86 +383,102 @@ class MegatronEngine(BaseEngine):
+             and mpu.get_context_parallel_rank() == 0
+         )
+ 
++    def is_dispatch_collect_rank(self) -> bool:
++        """
++        Return one result source per logical data replica.
++        """
++        # Dynamic CP merges the full batch onto every physical DP rank.
++        return self.is_mp_src_rank_with_outputs() and (
++            not self.engine_config.dynamic_context_parallel or mpu.get_data_parallel_rank() == 0
++        )
++
      def initialize(self):
++        install_compile_observer()
          self._build_tf_config()
  
 -        self.module = self._build_megatron_module()
@@ -1772,7 +2651,111 @@ index 918d85ef0b6ef9f62a5c7b849c9827b9d3bccc4c..b05d3db7c0445a0f9acc1904d4e0e6dc
  
      def train_mode(self, **kwargs):
          """
-@@ -669,17 +685,43 @@ class MegatronEngine(BaseEngine):
+@@ -604,16 +636,20 @@ class MegatronEngine(BaseEngine):
+         if self._is_offload_optimizer:
+             offload_megatron_optimizer(self.optimizer)
+ 
++    @trace_training_call("megatron_batch")
+     def forward_backward_batch(self, data: TensorDict, loss_function: Callable, forward_only=False) -> Any:
+         tu.assign_non_tensor(data, sp_size=self.engine_config.context_parallel_size)
+ 
+-        # compute num_tokens in global batch for loss normalization
++        # Dynamic CP receives one replicated minibatch, so its normalizer must count it once.
+         batch_num_tokens = data["loss_mask"].sum().to(get_device_id())
+-        torch.distributed.all_reduce(
+-            batch_num_tokens, op=torch.distributed.ReduceOp.SUM, group=self.get_data_parallel_group()
+-        )
+-        tu.assign_non_tensor(data, batch_num_tokens=batch_num_tokens.item())
+-        tu.assign_non_tensor(data, dp_size=self.get_data_parallel_size())
++        if self.engine_config.dynamic_context_parallel:
++            dp_size = mpu.get_data_parallel_world_size()
++        else:
++            torch.distributed.all_reduce(
++                batch_num_tokens, op=torch.distributed.ReduceOp.SUM, group=self.get_data_parallel_group()
++            )
++            dp_size = self.get_data_parallel_size()
++        tu.assign_non_tensor(data, batch_num_tokens=batch_num_tokens.item(), dp_size=dp_size)
+ 
+         vpp_size = mpu.get_virtual_pipeline_model_parallel_world_size()
+         if vpp_size is not None and vpp_size > 1:
+@@ -621,13 +657,44 @@ class MegatronEngine(BaseEngine):
+         else:
+             num_batches_divided_by = None
+ 
+-        micro_batches, indices = prepare_micro_batches(
+-            data=data,
+-            dp_group=self.get_data_parallel_group(),
+-            num_batches_divided_by=num_batches_divided_by,
+-            same_micro_num_in_dp=True,
+-            min_num_micro_batch=None,
+-        )
++        with training_phase(
++            "packing",
++            forward_only=forward_only,
++            dynamic_cp=self.engine_config.dynamic_context_parallel,
++            dp_rank=mpu.get_data_parallel_rank(),
++            cp_rank=mpu.get_context_parallel_rank(),
++            tp_rank=mpu.get_tensor_model_parallel_rank(),
++            dp_size=mpu.get_data_parallel_world_size(),
++            cp_size=mpu.get_context_parallel_world_size(),
++            tp_size=mpu.get_tensor_model_parallel_world_size(),
++        ) as diagnostic_context:
++            dynamic_cp_plan = None
++            if self.engine_config.dynamic_context_parallel:
++                if torch.distributed.get_rank() == 0:
++                    diagnostic_context["pool_global_ranks"] = torch.distributed.get_process_group_ranks(
++                        mpu.get_data_parallel_group(with_context_parallel=True)
++                    )
++                    diagnostic_context["pp_rank"] = mpu.get_pipeline_model_parallel_rank()
++                    diagnostic_context["pp_size"] = mpu.get_pipeline_model_parallel_world_size()
++                micro_batches, dynamic_cp_plan = prepare_dynamic_cp_micro_batches(
++                    data=data,
++                    max_tokens_per_rank=self.engine_config.max_seqlen_per_dp_cp_rank,
++                    tp_size=mpu.get_tensor_model_parallel_world_size(),
++                    dp_size=mpu.get_data_parallel_world_size(),
++                    cp_size=mpu.get_context_parallel_world_size(),
++                    rank=torch.distributed.get_rank(mpu.get_data_parallel_group(with_context_parallel=True)),
++                    microbatch_group_size=num_batches_divided_by,
++                    use_fp8_padding=self.tf_config.fp8 is not None,
++                )
++                indices = dynamic_cp_plan.row_ids
++            else:
++                micro_batches, indices = prepare_micro_batches(
++                    data=data,
++                    dp_group=self.get_data_parallel_group(),
++                    num_batches_divided_by=num_batches_divided_by,
++                    same_micro_num_in_dp=True,
++                    min_num_micro_batch=None,
++                )
+ 
+         if num_batches_divided_by is not None:
+             assert len(micro_batches) % num_batches_divided_by == 0, (
+@@ -638,8 +705,22 @@ class MegatronEngine(BaseEngine):
+         # compute input shapes for pp stages
+         n_micro_batch = len(micro_batches)
+ 
+-        for micro_batch in micro_batches:
+-            tu.assign_non_tensor(micro_batch, num_micro_batch=n_micro_batch)
++        log_training_event(
++            "parallel_plan",
++            forward_only=forward_only,
++            dp_rank=mpu.get_data_parallel_rank(),
++            cp_rank=mpu.get_context_parallel_rank(),
++            tp_rank=mpu.get_tensor_model_parallel_rank(),
++            dp_size=mpu.get_data_parallel_world_size(),
++            cp_size=mpu.get_context_parallel_world_size(),
++            tp_size=mpu.get_tensor_model_parallel_world_size(),
++            num_micro_batches=n_micro_batch,
++            local_cp_sizes=[tu.get(micro_batch, "local_cp_size", default=None) for micro_batch in micro_batches],
++        )
++        for micro_batch_index, micro_batch in enumerate(micro_batches):
++            tu.assign_non_tensor(
++                micro_batch, num_micro_batch=n_micro_batch, training_micro_batch_index=micro_batch_index
++            )
+ 
+         forward_backward_func = get_forward_backward_func()
+ 
+@@ -669,27 +750,48 @@ class MegatronEngine(BaseEngine):
          # batch should be a list of batches inside micro-batches
          batch_generator = make_batch_generator(micro_batches, vpp_size=len(self.module))
  
@@ -1823,8 +2806,152 @@ index 918d85ef0b6ef9f62a5c7b849c9827b9d3bccc4c..b05d3db7c0445a0f9acc1904d4e0e6dc
 +            if progress_bar is not None:
 +                progress_bar.close()
  
++        mtp_metrics = None
          if self.model_config.mtp.enable and mpu.is_pipeline_last_stage(ignore_virtual=True):
-             # All CP ranks must participate in the all_reduce inside get_megatron_mtp_loss,
+-            # All CP ranks must participate in the all_reduce inside get_megatron_mtp_loss,
+-            # because save_loss_to_tracker uses avg_group=DP+CP group.
+-            # Only collect metrics on the src rank afterward.
+-            metrics = get_megatron_mtp_loss(n_micro_batch)
+-            if self.is_mp_src_rank_with_outputs():
+-                if "metrics" not in losses_reduced[0]:
+-                    losses_reduced[0]["metrics"] = {}
+-                losses_reduced[0]["metrics"].update(metrics)
++            # All CP ranks participate in the MTP metric reduction.
++            mtp_metrics = get_megatron_mtp_loss(n_micro_batch)
+ 
+         if RouterReplayHelper.is_r2_record_action(self.tf_config):
+             if self.tf_config.virtual_pipeline_model_parallel_size is not None:
+@@ -707,14 +809,29 @@ class MegatronEngine(BaseEngine):
+ 
+             layers_topk_idx = pp_gather(topk_idx_td.to(torch.uint8), self.tf_config)
+             use_dynamic_bsz = tu.get_non_tensor_data(data=data, key="use_dynamic_bsz", default=True)
+-            if use_dynamic_bsz and indices is not None:
++            if dynamic_cp_plan is None and use_dynamic_bsz and indices is not None:
+                 layers_topk_idx = restore_dynamic_batch(layers_topk_idx, indices)
+ 
+         output = {}
+         if mpu.is_pipeline_last_stage(ignore_virtual=True):
+-            output = postprocess_batch_func(output_lst=losses_reduced, indices=indices, data=data)
+-            if RouterReplayHelper.is_r2_record_action(self.tf_config):
+-                output["model_output"]["routed_experts"] = layers_topk_idx
++            if dynamic_cp_plan is not None:
++                if RouterReplayHelper.is_r2_record_action(self.tf_config):
++                    offset = 0
++                    for reduced, rows in zip(losses_reduced, indices, strict=True):
++                        reduced["model_output"]["routed_experts"] = layers_topk_idx[offset : offset + len(rows)]
++                        offset += len(rows)
++                output = collect_dynamic_cp_results(
++                    losses_reduced,
++                    dynamic_cp_plan,
++                    data,
++                    mpu.get_data_parallel_group(with_context_parallel=True),
++                )
++            else:
++                output = postprocess_batch_func(output_lst=losses_reduced, indices=indices, data=data)
++                if RouterReplayHelper.is_r2_record_action(self.tf_config):
++                    output["model_output"]["routed_experts"] = layers_topk_idx
++        if mtp_metrics is not None and self.is_mp_src_rank_with_outputs():
++            output["metrics"].update({key: [value] for key, value in mtp_metrics.items()})
+         if enable_routing_replay:
+             RouterReplay.clear_global_indices()
+             RouterReplay.clear_global_router_replay_action()
+@@ -814,22 +931,12 @@ class MegatronEngineWithLMHead(MegatronEngine):
+     def prepare_model_outputs(self, output: dict, data: TensorDict):
+         return output
+ 
++    @trace_micro_batch_forward
+     def forward_step(
+         self, batch_iter: Iterator[TensorDict], model, logits_processor_func, postprocess_micro_batch_func
+     ):
+         batch: TensorDict = next(batch_iter)
+ 
+-        if self.engine_config.dynamic_context_parallel:
+-            # split the batch and give the sub-batches to each dp-cp group
+-            from verl.utils.megatron_utils import dynamic_cp_split_batch
+-
+-            batch = dynamic_cp_split_batch(
+-                batch=batch,
+-                engine_config=self.engine_config,
+-                dp_size=mpu.get_data_parallel_world_size(),
+-                dp_rank=mpu.get_data_parallel_rank(),
+-            )
+-
+         batch = batch.to(get_device_id())
+         use_fused_kernels = tu.get_non_tensor_data(batch, key="use_fused_kernels", default=False)
+         calculate_entropy = tu.get_non_tensor_data(batch, key="calculate_entropy", default=False)
+@@ -899,6 +1006,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
+                 temperature=temperature_value,
+                 calculate_entropy=calculate_entropy,
+                 pad_token_id=self.model_config.tokenizer.pad_token_id,
++                local_cp_size=local_cp_size,
+             )
+         else:
+             if not isinstance(temperature, torch.Tensor):
+@@ -938,7 +1046,15 @@ class MegatronEngineWithLMHead(MegatronEngine):
+ 
+                 # logits_processor_func return tensors with shape (1, total_nnz/cp_size)
+                 if distillation_use_topk:
+-                    ret.update(logits_processor_func(student_logits=logits_bak, data=batch, data_format=data_format))
++                    ret.update(
++                        logits_processor_func(
++                            student_logits=logits_bak,
++                            data=batch,
++                            data_format=data_format,
++                            use_fp8_padding=self.tf_config.fp8 in ("e4m3", "hybrid"),
++                            local_cp_size=local_cp_size,
++                        )
++                    )
+                 log_probs = vocab_parallel_log_probs_from_logits(logits_bak, label)
+                 ret["log_probs"] = log_probs
+                 return ret
+@@ -976,19 +1092,15 @@ class MegatronEngineWithLMHead(MegatronEngine):
+             for router in router_instance_list:
+                 router.set_router_replay_action(RouterReplayAction.REPLAY_BACKWARD)
+ 
+-        return output, partial(postprocess_micro_batch_func, data=batch, local_cp_size=local_cp_size)
++        return output, partial(postprocess_micro_batch_func, data=batch)
+ 
+-    def postprocess_micro_batch_func(
+-        self, output, data: TensorDict, forward_only: bool, loss_function, local_cp_size=None
+-    ):
++    def postprocess_micro_batch_func(self, output, data: TensorDict, forward_only: bool, loss_function):
+         # For memory efficiency
+         # We move calculation of entropy to compute_log_probs, forward_only == True
+         device = data["input_ids"].device
+         model_output = self.prepare_model_outputs(output, data)
+ 
+         if loss_function is not None:
+-            # TODO(baiyan): How to support hybrid context parallel with dp_group,
+-            # now the dp_group is not used, so just leave it as is, but what if we need to use it?
+             loss, metrics = loss_function(model_output=model_output, data=data, dp_group=self.get_data_parallel_group())
+             # scale loss by num_micro_batch because megatron will scale loss
+             # by n_micro_batch inside pp schedule
+@@ -998,17 +1110,6 @@ class MegatronEngineWithLMHead(MegatronEngine):
+             loss = torch.tensor(1.0, device=device)
+             scaled_loss = loss
+             metrics = {}
+-        if local_cp_size is not None:
+-            # aggregate model_output by DP-CP groups
+-            from verl.utils.megatron_utils import dynamic_cp_merge_output
+-
+-            model_output = dynamic_cp_merge_output(
+-                model_output,
+-                dp_size=mpu.get_data_parallel_world_size(),
+-                dp_rank=mpu.get_data_parallel_rank(),
+-                local_cp_size=local_cp_size,
+-            )
+-
+         output = {
+             "model_output": model_output,
+             "loss": loss.detach().item(),
+@@ -1041,6 +1142,7 @@ class MegatronEngineWithValueHead(MegatronEngineWithLMHead):
+             vision_model=hasattr(self.model_config.hf_config, "vision_config"),
+             pad_token_id=self.model_config.tokenizer.pad_token_id,
+             data_format="thd" if self.engine_config.use_remove_padding else "bshd",
++            local_cp_size=tu.get_non_tensor_data(batch, "local_cp_size", default=None),
+         )
+ 
+         return output, partial(postprocess_micro_batch_func, data=batch)
 diff --git a/verl/workers/engine_workers.py b/verl/workers/engine_workers.py
 index bf379b49c3dc21ef702d49be1467318692a471f7..882e9f0bacd08fa095bcd5c03983627b7731b51e 100644
 --- a/verl/workers/engine_workers.py

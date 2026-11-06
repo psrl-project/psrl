@@ -40,8 +40,8 @@ shift || true
 
 # Mode 4 drives fixed idle replicas through coordinator commands. Elastic policy settings do not apply.
 export PSRL_DEPLOY_EXTRA="\
-+psrl.deployment.trainer_pool_idle_rollout_instances=${IDLE_ROLLOUT_INSTANCES} \
-+psrl.deployment.trainer_pool_idle_rm_instances=${IDLE_RM_INSTANCES} \
+psrl.deployment.trainer_pool_idle_rollout_instances=${IDLE_ROLLOUT_INSTANCES} \
+psrl.deployment.trainer_pool_idle_rm_instances=${IDLE_RM_INSTANCES} \
 "
 
 launch_deployment_mode "$@"

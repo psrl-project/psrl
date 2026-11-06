@@ -6,10 +6,10 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
-import numpy as np
 import ray
+import torch
 import transfer_queue as tq
-from omegaconf import DictConfig, ListConfig
+from omegaconf import DictConfig
 from tensordict import TensorDict
 from verl.utils import hf_tokenizer
 from verl.utils import tensordict_utils as tu
@@ -17,9 +17,11 @@ from verl.utils.fs import copy_to_local
 
 from psrl.utils.dataset.utils import normalize_reward_model_dicts
 from psrl.utils.logger import DualOutputHandler
+from psrl.workers.elastic.sleep_wake_orchestrator import inference_lease
 from psrl.workers.reward.client import RewardManagerClient
 from psrl.workers.reward.reward_loop import load_reward_loop
 from psrl.workers.reward.reward_loop.base import RewardLoopBase
+from psrl.workers.reward.reward_protocol import resolve_reward_function_name
 from psrl.workers.reward.utils import ensure_reward_attention_mask
 
 psrl_logger = logging.getLogger(__name__)
@@ -72,6 +74,7 @@ class RewardLoopWorker:
         self.worker_id = worker_id
         self.worker_num = worker_num
         self.is_validate = is_validate
+        self.inference_orchestrator = None
 
         tq.init()
 
@@ -106,6 +109,10 @@ class RewardLoopWorker:
 
     def set_reward_manager(self, reward_manager_handle: ray.actor.ActorHandle):
         self.reward_manager_client = RewardManagerClient(reward_manager_handle, self.max_concurrency)
+
+    def set_inference_orchestrator(self, orchestrator):
+        """Install model scoped GPU admission for generative reward calls."""
+        self.inference_orchestrator = orchestrator
 
     async def add_reward_requests(self, requests: list[TensorDict]):
         if any(bool(tu.get(request, "validate", False)) != self.is_validate for request in requests):
@@ -241,7 +248,7 @@ class RewardLoopWorker:
             reward_manager_cfg = reward_model_config.reward_manager
             reward_manager_type = reward_model_config.reward_loop_type
             reward_fn_configs = reward_model_config.reward_fn
-            reward_model_name = reward_model_config.get("reward_model_name", "null")
+            reward_model_name = reward_model_config.get("reward_model_name", None)
             reward_kwargs = reward_model_config.get("reward_kwargs", {})
 
             for reward_fn_config in reward_fn_configs:
@@ -252,7 +259,7 @@ class RewardLoopWorker:
                     reward_model_name=reward_model_name,
                 )
                 if reward_spec in self.reward_spec_to_manager:
-                    continue
+                    raise ValueError(f"Duplicate reward manager spec {reward_spec.key()!r}.")
 
                 if reward_manager_type in ("gen", "opd") and (
                     reward_model_name is None or reward_model_name not in self.reward_model_to_manager
@@ -275,17 +282,15 @@ class RewardLoopWorker:
     ) -> tuple[list[str], list[RewardLoopBase], list[float]]:
         reward_spec_keys, reward_managers, coefs = [], [], []
         for reward_model_dict in normalize_reward_model_dicts(reward_model_dicts):
-            raw_reward_fn = reward_model_dict.get("reward_fn", "default")
-            if isinstance(raw_reward_fn, (list, ListConfig)) and len(raw_reward_fn) > 0:
-                reward_fn_name = (
-                    raw_reward_fn[0].get("name", "default")
-                    if isinstance(raw_reward_fn[0], (dict, DictConfig))
-                    else str(raw_reward_fn[0])
-                )
-            elif isinstance(raw_reward_fn, (dict, DictConfig)):
-                reward_fn_name = raw_reward_fn.get("name", "default")
-            else:
-                reward_fn_name = str(raw_reward_fn)
+            reward_fn_name = resolve_reward_function_name(reward_model_dict.get("reward_fn", "default"))
+
+            if reward_fn_name == "default" and reward_model_dict.get("reward_loop_type", "naive") in (
+                "naive",
+                "dapo",
+                "prime",
+                "gdpo",
+            ):
+                reward_fn_name = "compute_score"
 
             raw_model_name = reward_model_dict.get("reward_model_name", None)
             if raw_model_name == "null":
@@ -297,25 +302,6 @@ class RewardLoopWorker:
                 reward_model_name=raw_model_name,
             )
             manager = self.reward_spec_to_manager.get(reward_spec, None)
-            if manager is None:
-                candidates = [
-                    (spec, mgr)
-                    for spec, mgr in self.reward_spec_to_manager.items()
-                    if spec.reward_manager_type == reward_spec.reward_manager_type
-                ]
-                if len(candidates) == 0:
-                    all_managers = list(self.reward_spec_to_manager.items())
-                    if len(all_managers) == 1:
-                        candidates = all_managers
-                    elif len(all_managers) > 1:
-                        psrl_logger.warning(
-                            "No reward spec match for %s among %s. Using first registered manager as fallback.",
-                            reward_spec,
-                            [s for s, _ in all_managers],
-                        )
-                        candidates = [all_managers[0]]
-                if candidates:
-                    reward_spec, manager = candidates[0]
 
             if manager is None:
                 raise ValueError(f"No reward manager registered for spec {reward_spec.key()!r}.")
@@ -329,20 +315,63 @@ class RewardLoopWorker:
         return ensure_reward_attention_mask(inputs)
 
     async def _compute_score(self, reward_data: TensorDict) -> dict[str, Any]:
-        """Run reward loops on pre-processed TensorDict."""
-        assert len(reward_data) == 1, "Reward input for _compute_score should contain exactly one sample"
-
-        reward_model_dicts = tu.get(reward_data, "reward_model_dicts")[0]
-        reward_spec_keys, reward_managers, reward_coefs = self._resolve_reward_manager(reward_model_dicts)
-        futures = [asyncio.create_task(reward_manager.run_single(reward_data)) for reward_manager in reward_managers]
-        results = await asyncio.gather(*futures)
-
-        reward_score = np.sum([r["reward_score"] * c for r, c in zip(results, reward_coefs)])
-        reward_extra_info_dict = {key: r["reward_extra_info"] for key, r in zip(reward_spec_keys, results)}
-        reward_metrics_dict = {key: r.get("reward_metrics", {}) for key, r in zip(reward_spec_keys, results)}
-
-        return {
-            "reward_score": reward_score,
-            "reward_extra_info": reward_extra_info_dict,
-            "reward_metrics": reward_metrics_dict,
+        """Aggregate scalar rewards and score each trajectory with its selected teacher."""
+        if len(reward_data) != 1:
+            raise ValueError("Reward scoring requires exactly one request.")
+        specs = normalize_reward_model_dicts(tu.get(reward_data, "reward_model_dicts")[0])
+        keys, managers, coefs = self._resolve_reward_manager(specs)
+        teachers = [i for i, spec in enumerate(specs) if spec.get("reward_loop_type") == "opd"]
+        enabled = getattr(getattr(self.config, "distillation", None), "enabled", False)
+        required = enabled and not self.is_validate
+        if len(teachers) > 1 or (required and len(teachers) != 1):
+            raise ValueError("Each OPD training request must select exactly one teacher reward model.")
+        scalar_indices = [i for i in range(len(managers)) if i not in teachers]
+        results = await asyncio.gather(
+            *(self._run_scoring_manager(managers[i], specs[i], reward_data) for i in scalar_indices)
+        )
+        reward = {
+            "reward_score": float(sum(r["reward_score"] * coefs[i] for i, r in zip(scalar_indices, results))),
+            "reward_extra_info": {keys[i]: r["reward_extra_info"] for i, r in zip(scalar_indices, results)},
+            "reward_metrics": {keys[i]: r.get("reward_metrics", {}) for i, r in zip(scalar_indices, results)},
         }
+        if teachers:
+            index = teachers[0]
+            request_keys = tu.get(reward_data, "request_keys")[0]
+            trajectories = tu.get(reward_data, "reward_trajectories", [None])[0]
+            if trajectories is None:
+                if len(request_keys) != 1:
+                    raise ValueError("OPD requires the tokens of every training trajectory.")
+                trajectory_data = [reward_data]
+            else:
+                if len(trajectories) != len(request_keys):
+                    raise ValueError("OPD trajectory count does not match request_keys.")
+                trajectory_data = []
+                for trajectory in trajectories:
+                    row = tu.get_tensordict(
+                        tensor_dict={
+                            "prompts": torch.tensor([trajectory["prompts"]], dtype=torch.int64),
+                            "responses": torch.tensor([trajectory["responses"]], dtype=torch.int64),
+                        },
+                    )
+                    if trajectory["multi_modal_data"]:
+                        tu.assign_non_tensor_stack(row, "multi_modal_data", [trajectory["multi_modal_data"]])
+                    trajectory_data.append(self.pre_process(row))
+            outputs = await asyncio.gather(
+                *(self._run_scoring_manager(managers[index], specs[index], row) for row in trajectory_data)
+            )
+            reward["teacher_outputs"] = {
+                key: {
+                    **{field: output[field] for field in ("teacher_logprobs", "teacher_ids") if field in output},
+                    "teacher_weight": float(specs[index]["teacher_weight"]),
+                    "reward_extra_info": {keys[index]: output.get("reward_extra_info", {})},
+                    "reward_metrics": {keys[index]: output.get("reward_metrics", {})},
+                }
+                for key, output in zip(request_keys, outputs)
+            }
+        return reward
+
+    async def _run_scoring_manager(self, manager, specification: dict, data: TensorDict):
+        """Serialize shared model storage while allowing independent CPU scoring."""
+        orchestrator = self.inference_orchestrator if specification.get("reward_loop_type") in ("gen", "opd") else None
+        async with inference_lease(orchestrator, "reward", specification.get("reward_model_name", "")):
+            return await manager.run_single(data)

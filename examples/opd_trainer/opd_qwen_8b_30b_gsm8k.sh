@@ -4,11 +4,10 @@ set -xeuo pipefail
 ############################ Quick Config ############################
 
 # Activate PSRL conda env.
-source ./env/env_311.sh
+source env/psrl.sh
 
 PSRL_PATH=$(python -c "import psrl; import os; print(os.path.dirname(os.path.dirname(psrl.__file__)))")
 PSRL_WORKSPACE=${PSRL_WORKSPACE:-$PSRL_PATH}
-HOME=${PSRL_WORKSPACE}
 
 ROLLOUT_NAME="vllm"
 DATA_PATH="${PSRL_WORKSPACE}/data"
@@ -79,7 +78,7 @@ mkdir -p "${LOG_DIR}"
 ############################ Reward model (OPD teacher) ############################
 
 _DS_DAPO='reward_fn_key:data_source,reward_loop_type:dapo,reward_fn:default,reward_model_name:null,reward_coef:1.0'
-_DS_OPD="reward_fn_key:data_source,reward_loop_type:opd,reward_fn:default,reward_model_name:${TEACHER_MODEL_NAME},reward_coef:1.0"
+_DS_OPD="reward_fn_key:data_source,reward_loop_type:opd,reward_fn:default,reward_model_name:${TEACHER_MODEL_NAME},teacher_weight:1.0"
 _ROW_TRAIN_DAPO="{file:${DAPO_TRAIN},data_source_name:dapo/dapo-math-17k,prompt_key:prompt,reward_model_dicts:[{${_DS_DAPO}},{${_DS_OPD}}]}"
 _ROW_VAL_AIME="{file:${DAPO_VAL},prompt_key:prompt,reward_model_dicts:[{${_DS_DAPO}}]}"
 TRAIN_DATAS="[${_ROW_TRAIN_DAPO}]"
@@ -104,8 +103,6 @@ REWARD_MODELS=(
     reward.managers.gen_qwen3_8b.rollout_ngpus_per_instance_per_node=${TEACHER_ROLLOUT_NGPUS_PER_NODE}
     reward.managers.gen_qwen3_8b.rollout_nnodes_per_instance=1
     reward.managers.gen_qwen3_8b.max_concurrent_requests_per_instance=128
-    +reward.managers.gen_qwen3_8b.reward_kwargs.topk=64
-    +reward.managers.gen_qwen3_8b.reward_kwargs.teacher_key=default
     reward.managers.gen_qwen3_8b.model.path="${TEACHER_MODEL_PATH}"
     reward.managers.gen_qwen3_8b.model.trust_remote_code=False
     reward.managers.gen_qwen3_8b.rollout._target_=psrl.workers.config.RolloutConfig
@@ -120,15 +117,15 @@ REWARD_MODELS=(
     reward.managers.gen_qwen3_8b.rollout.expert_parallel_size=${TEACHER_EP}
     reward.managers.gen_qwen3_8b.rollout.tensor_model_parallel_size=${TEACHER_TP}
     reward.managers.gen_qwen3_8b.rollout.pipeline_model_parallel_size=${TEACHER_PP}
-    reward.managers.gen_qwen3_8b.rollout.max_num_batched_tokens=${MAX_NUM_TOKENS}
+    reward.managers.gen_qwen3_8b.rollout.max_num_batched_tokens=$((MAX_NUM_TOKENS + 1))
     reward.managers.gen_qwen3_8b.rollout.max_num_seqs=1024
     reward.managers.gen_qwen3_8b.rollout.enable_chunked_prefill=false
     reward.managers.gen_qwen3_8b.rollout.enable_prefix_caching=false
     reward.managers.gen_qwen3_8b.rollout.disable_log_stats=false
     reward.managers.gen_qwen3_8b.rollout.skip_tokenizer_init=false
-    reward.managers.gen_qwen3_8b.rollout.prompt_length=${MAX_PROMPT}
-    reward.managers.gen_qwen3_8b.rollout.response_length=${MAX_RESPONSE_LENGTH}
-    reward.managers.gen_qwen3_8b.rollout.max_model_len=${MAX_MODEL_LEN}
+    reward.managers.gen_qwen3_8b.rollout.prompt_length=${MAX_MODEL_LEN}
+    reward.managers.gen_qwen3_8b.rollout.response_length=1
+    reward.managers.gen_qwen3_8b.rollout.max_model_len=$((MAX_MODEL_LEN + 1))
     reward.managers.gen_qwen3_8b.rollout.runner=generate
     reward.managers.gen_qwen3_8b.rollout.task=generate
     reward.managers.gen_qwen3_8b.sampling_config.temperature=1.0
@@ -204,7 +201,6 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path="${PSRL_PATH}/p
     train_actor_rollout_ref.rollout.pipeline_model_parallel_size=${VAL_PP} \
     \
     distillation.enabled=True \
-    distillation.teacher_key=default \
     distillation.distillation_loss.loss_mode=${DISTILLATION_LOSS_MODE} \
     distillation.distillation_loss.topk=64 \
     distillation.distillation_loss.use_task_rewards=False \

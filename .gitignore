@@ -297,3 +297,5 @@ examples/bench/rollout/exp/
 analysis/
 
 *.tar
+
+docker_images/

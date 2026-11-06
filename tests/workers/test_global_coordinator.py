@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from omegaconf import OmegaConf
 from psrl.utils.server.command import Command, CommandType
+from psrl.workers.elastic.cluster_topology import InstanceStatus
 from psrl.workers.elastic.sleep_wake_orchestrator import SleepWakeOrchestrator
 from psrl.workers.gen.stats_collector import EngineStats
 from psrl.workers.global_coordination import coordinator as global_module
@@ -52,6 +53,7 @@ def config(tmp_path, monkeypatch):
         {
             "psrl": {
                 "logging_path": str(tmp_path),
+                "ps_mode": "nixl_cpu",
                 "status_collection": {
                     "enable": True,
                     "coordinator_sync_interval_in_ms": 10,
@@ -137,9 +139,9 @@ def test_validation_pulls_policy_weights_while_rewards_keep_static_weights(confi
             validation = await _add(coordinator, ROLLOUT_SCOPE, "validation", is_validate=True)
             reward = await _add(coordinator, ("reward", "judge-a"), "worker-0")
             await _call(coordinator, ROLLOUT_SCOPE, "set_ps_model_version", 3)
-            policy.replicas["validation"].sleeping = True
+            policy.replicas["validation"].status = InstanceStatus.ASLEEP
             reward_model = coordinator.models[("reward", "judge-a")]
-            reward_model.replicas["worker-0"].sleeping = True
+            reward_model.replicas["worker-0"].status = InstanceStatus.ASLEEP
             for scope in (ROLLOUT_SCOPE, ("reward", "judge-a")):
                 await _call(coordinator, scope, "start_busy_loop")
             for scope, worker in ((ROLLOUT_SCOPE, "validation"), (("reward", "judge-a"), "worker-0")):
@@ -375,7 +377,14 @@ def test_failed_weight_pull_keeps_replica_quarantined(config):
             await _call(coordinator, ROLLOUT_SCOPE, "sync_with_ps", [("worker-0", 0)], wait_model_sync=True)
         server.fail_sync.remote.assert_awaited_once_with()
         server.resume_after_sync.remote.assert_not_awaited()
-        coordinator.gateway.eligibility.assert_awaited_with(coordinator.models[ROLLOUT_SCOPE], ["worker-0"], False)
+        model = coordinator.models[ROLLOUT_SCOPE]
+        coordinator.gateway.eligibility.assert_awaited_with(model, ["worker-0"], False)
+        assert model.replicas["worker-0"].status is InstanceStatus.UNKNOWN, (
+            "Failed weight transfers must mark the replica unknown."
+        )
+        assert await coordinator.lifecycle.awake(model, [("worker-0", 0)]) == [], (
+            "Unknown replicas must not participate in later synchronization or routing."
+        )
         with pytest.raises(RuntimeError, match="Global coordinator shutdown failed"):
             await coordinator.stop_busy_loop()
         assert coordinator.gateway.session.closed, "Failed sync must still allow global cleanup."
@@ -431,14 +440,18 @@ def test_failed_wake_is_retried_before_gateway_eligibility_is_restored(config):
             server.wake_up.remote.side_effect = RuntimeError("Restore failed.")
             with pytest.raises(RuntimeError, match="Wake failed"):
                 await coordinator.lifecycle.wake(model, [("worker-0", 0)])
-            assert model.replicas["worker-0"].sleeping, "A failed wake must retain its restoration requirement."
+            assert model.replicas["worker-0"].status is InstanceStatus.UNKNOWN, (
+                "A failed wake must retain its restoration requirement."
+            )
             coordinator.gateway.eligibility.assert_awaited_with(model, [], True)
             server.is_sleeping.remote.return_value = False
             server.wake_up.remote.side_effect = None
             await coordinator.lifecycle.wake(model, [("worker-0", 0)])
             assert server.wake_up.remote.await_count == 2, "A partial restore must retry even when memory is awake."
             coordinator.gateway.eligibility.assert_awaited_with(model, ["worker-0"], True)
-            assert not model.replicas["worker-0"].sleeping, "Only successful restoration may clear the sleeping state."
+            assert model.replicas["worker-0"].status is InstanceStatus.AWAKEN, (
+                "Only successful restoration may clear the sleeping state."
+            )
         finally:
             await coordinator.stop_busy_loop()
 
@@ -530,12 +543,16 @@ async def test_validation_cycles_restore_weights_before_routing(config, dp_size)
             await _call(coordinator, ROLLOUT_SCOPE, "set_ps_model_version", version)
             await _call(coordinator, ROLLOUT_SCOPE, "wake_up", "validate")
             assert state["routing"], "Restored validation must accept requests."
-            assert not model.replicas["validation"].sleeping, "Successful wake must clear the recorded sleep state."
+            assert model.replicas["validation"].status is InstanceStatus.AWAKEN, (
+                "Successful wake must clear the recorded sleep state."
+            )
             assert all(model.versions[("validation", rank)] == version for rank in range(dp_size)), (
                 "Every validation DP rank must advertise restored weights."
             )
             await _call(coordinator, ROLLOUT_SCOPE, "sleep", "validate")
-            assert model.replicas["validation"].sleeping, "Every completed sleep must update model state."
+            assert model.replicas["validation"].status is InstanceStatus.ASLEEP, (
+                "Every completed sleep must update model state."
+            )
         rollout.nixl_sleep.remote.assert_not_awaited()
         rollout.nixl_wake_up.remote.assert_not_awaited()
     finally:
@@ -557,7 +574,7 @@ async def test_sleep_deduplicates_dp_ranks_and_skips_released_memory(config, sco
         getattr(awake, method).remote.assert_awaited_once_with(level=2)
         getattr(asleep, method).remote.assert_not_awaited()
         getattr(other, method).remote.assert_not_awaited()
-        assert model.replicas["awake"].sleeping and model.replicas["asleep"].sleeping, (
+        assert all(model.replicas[rid].status is InstanceStatus.ASLEEP for rid in ("awake", "asleep")), (
             "Sleep must record both previously and newly released replicas."
         )
     finally:
@@ -582,7 +599,9 @@ async def test_failed_lifecycle_keeps_failed_replica_unavailable(config, operati
             coordinator.gateway.eligibility.assert_not_awaited()
         else:
             coordinator.gateway.eligibility.assert_awaited_once_with(model, ["sibling"], True)
-            assert model.replicas["failed"].sleeping, "Failed restoration must retain its quarantine."
+            assert model.replicas["failed"].status is InstanceStatus.UNKNOWN, (
+                "Failed restoration must retain its quarantine."
+            )
     finally:
         await coordinator.stop_busy_loop()
 
@@ -609,7 +628,7 @@ async def test_sync_rechecks_logical_sleep_after_acquiring_replica_lock(config):
         await lock.acquire()
         transition = asyncio.create_task(_call(coordinator, ROLLOUT_SCOPE, "sync_with_ps", [("worker", 0)]))
         await asyncio.sleep(0.01)
-        model.replicas["worker"].sleeping = True
+        model.replicas["worker"].status = InstanceStatus.ASLEEP
         lock.release()
         await asyncio.wait_for(transition, timeout=1)
         server.pause_for_sync.remote.assert_not_awaited()
@@ -672,7 +691,7 @@ async def test_background_sync_only_considers_awake_rollout_replicas(config, str
         await _add(coordinator, ROLLOUT_SCOPE, "awake")
         asleep = await _add(coordinator, ROLLOUT_SCOPE, "asleep", rank=1)
         validation = await _add(coordinator, ROLLOUT_SCOPE, "validation", rank=2, is_validate=True)
-        model.replicas["asleep"].sleeping = True
+        model.replicas["asleep"].status = InstanceStatus.ASLEEP
         model.ps_version = 4
         config.psrl.rollout_coordination.sync_and_mig_strategy.method = strategy
         config.psrl.rollout_coordination.partial_rollout.enable = partial
@@ -708,9 +727,11 @@ async def test_runtime_snapshot_preserves_model_sleep_and_refreshes_idle_stats(c
                 )
             )
         model.ps_version = 7
-        model.replicas["asleep"].sleeping = True
+        model.replicas["asleep"].status = InstanceStatus.ASLEEP
         snapshot = await _call(coordinator, ROLLOUT_SCOPE, "get_instance_runtime_snapshot")
-        assert snapshot[("asleep", 0)]["is_sleeping"], "Shared engine wake state must not wake a sleeping model."
+        assert snapshot[("asleep", 0)]["status"] is InstanceStatus.ASLEEP, (
+            "Shared engine wake state must not wake a sleeping model."
+        )
         assert snapshot[("asleep", 0)]["model_version"] == 7, "Sleeping candidates must use committed PS weights."
         assert snapshot[("awake", 0)]["engine_stats"]["generation_throughput"] == 0, (
             "Idle engine probes must clear stale throughput."
@@ -748,7 +769,35 @@ async def test_runtime_probes_run_concurrently_and_preserve_all_dp_ranks(config)
         assert set(snapshot) == {("a", 0), ("a", 1), ("b", 0), ("b", 1)}, (
             "Concurrent probes must preserve every registered DP rank."
         )
-        assert snapshot[("a", 1)]["is_sleeping"], "Each DP observation must retain its sleep state."
+        assert snapshot[("a", 1)]["status"] is InstanceStatus.ASLEEP, (
+            "Each DP observation must retain its sleep state."
+        )
+    finally:
+        await coordinator.stop_busy_loop()
+
+
+@pytest.mark.parametrize("engine_sleeping", [False, True])
+@pytest.mark.parametrize("scope", [ROLLOUT_SCOPE, ("reward", "judge-a")])
+async def test_runtime_snapshot_preserves_unknown_replica_status(config, scope, engine_sleeping):
+    coordinator = await _make(config)
+    try:
+        model = coordinator.models[scope]
+        server = await _add(coordinator, scope, "worker")
+        model.replicas["worker"].status = InstanceStatus.UNKNOWN
+        model.ps_version = 4
+        server.get_engine_runtime_snapshots = SimpleNamespace(
+            remote=AsyncMock(return_value={0: {"is_sleeping": engine_sleeping}})
+        )
+        snapshot = await _call(coordinator, scope, "get_instance_runtime_snapshot")
+        runtime = cloudpickle.loads(cloudpickle.dumps(snapshot))[("worker", 0)]
+        assert runtime["status"] is InstanceStatus.UNKNOWN, (
+            "Engine observations and serialization must preserve the authoritative unknown status."
+        )
+        assert runtime["model_version"] == 0, "Unknown replicas must retain the last confirmed weight version."
+        assert runtime["wake_model_version"] == 4, "Recovery must still target the committed PS version."
+        assert runtime["engine_stats"] == EngineStats.get_default_snapshot(), (
+            "Unknown replicas must not advertise usable inference capacity."
+        )
     finally:
         await coordinator.stop_busy_loop()
 
@@ -893,23 +942,121 @@ async def test_colocated_phases_use_scoped_clients_and_preserve_validation(confi
         reward_scope = ("reward", "judge-a")
         reward = await _add(coordinator, reward_scope, "reward")
         for scope, rid in ((ROLLOUT_SCOPE, "rollout"), (reward_scope, "reward")):
-            coordinator.models[scope].replicas[rid].sleeping = True
+            coordinator.models[scope].replicas[rid].status = InstanceStatus.ASLEEP
         owner = SimpleNamespace(invoke=SimpleNamespace(remote=coordinator.invoke))
         orchestrator = SleepWakeOrchestrator.__ray_metadata__.modified_class(
             "rollout_rm_colocated",
             CoordinatorClient(owner),
             {"judge-a": CoordinatorClient(owner, reward_scope)},
-            "policy",
         )
         await orchestrator.start()
+        validation.nixl_sleep.remote.reset_mock()
+        policy.nixl_sleep.remote.reset_mock()
+        reward.sleep.remote.reset_mock()
+        await orchestrator.acquire("rollout-a", "rollout")
         policy.nixl_wake_up.remote.assert_awaited_once_with()
-        await orchestrator.notify_rollout_complete()
+        await orchestrator.release("rollout-a")
+        await orchestrator.acquire("reward-a", "reward", "judge-a")
         policy.nixl_sleep.remote.assert_awaited_once_with(level=2)
         reward.wake_up.remote.assert_awaited_once_with()
-        await orchestrator.notify_reward_complete()
+        await orchestrator.release("reward-a")
+        await orchestrator.acquire("rollout-b", "rollout")
         reward.sleep.remote.assert_awaited_once_with(level=2)
         assert policy.nixl_wake_up.remote.await_count == 2, "The next rollout phase must restore policy weights."
         validation.nixl_sleep.remote.assert_not_awaited()
         validation.nixl_wake_up.remote.assert_not_awaited()
+    finally:
+        await coordinator.stop_busy_loop()
+
+
+@pytest.mark.parametrize("scope", [ROLLOUT_SCOPE, ("reward", "judge-a")])
+async def test_failed_wake_cleanup_releases_resident_memory_even_when_logically_unavailable(config, scope):
+    coordinator = await _make(config)
+    try:
+        model = coordinator.models[scope]
+        server = await _add(coordinator, scope, "worker")
+        model.replicas["worker"].status = InstanceStatus.ASLEEP
+        resident = False
+
+        async def restore():
+            nonlocal resident
+            resident = True
+            if not model.dynamic_weights:
+                raise RuntimeError("Reward checkpoint restore failed.")
+
+        server.is_sleeping.remote.side_effect = lambda: not resident
+        method = server.nixl_wake_up if model.dynamic_weights else server.wake_up
+        method.remote.side_effect = restore
+        server.pull_model_for_sync.remote.side_effect = RuntimeError("Policy transfer failed.")
+        with pytest.raises(RuntimeError, match="Wake failed"):
+            await coordinator.lifecycle.wake(model, [("worker", 0)])
+        assert resident, "A failed restore may already own GPU memory."
+        assert model.replicas["worker"].status is InstanceStatus.UNKNOWN, (
+            "Failed restoration must retain an unknown replica status."
+        )
+        await coordinator.lifecycle.sleep(model, [("worker", 0)])
+        release = server.nixl_sleep if model.dynamic_weights else server.sleep
+        release.remote.assert_awaited_once_with(level=2, force=True)
+        assert model.replicas["worker"].status is InstanceStatus.ASLEEP, (
+            "Cleanup may commit sleep only after the server releases its memory."
+        )
+    finally:
+        await coordinator.stop_busy_loop()
+
+
+async def test_failed_sleep_retries_all_remaining_memory_even_if_executor_reports_sleeping(config):
+    coordinator = await _make(config)
+    try:
+        model = coordinator.models[ROLLOUT_SCOPE]
+        server = await _add(coordinator, ROLLOUT_SCOPE, "worker")
+        server.nixl_sleep.remote.side_effect = [RuntimeError("Partial unmap failed."), None]
+        with pytest.raises(RuntimeError, match="Sleep failed"):
+            await coordinator.lifecycle.sleep(model, [("worker", 0)])
+        server.is_sleeping.remote.return_value = True
+        await coordinator.lifecycle.sleep(model, [("worker", 0)])
+        server.nixl_sleep.remote.assert_awaited_with(level=2, force=True)
+        assert model.replicas["worker"].status is InstanceStatus.ASLEEP, (
+            "A partial sleep must be released before another role can own its GPUs."
+        )
+    finally:
+        await coordinator.stop_busy_loop()
+
+
+async def test_wake_after_partial_sleep_releases_remaining_allocations_before_remapping(config):
+    coordinator = await _make(config)
+    try:
+        model = coordinator.models[ROLLOUT_SCOPE]
+        server = await _add(coordinator, ROLLOUT_SCOPE, "worker")
+        server.nixl_sleep.remote.side_effect = RuntimeError("Partial release failed.")
+        with pytest.raises(RuntimeError, match="Sleep failed"):
+            await coordinator.lifecycle.sleep(model, [("worker", 0)])
+        events = []
+        server.nixl_sleep.remote.side_effect = lambda **kwargs: events.append(("release", kwargs))
+        server.nixl_wake_up.remote.side_effect = lambda: events.append(("wake", {}))
+        await coordinator.lifecycle.wake(model, [("worker", 0)])
+        assert events == [("release", {"level": 2, "force": True}), ("wake", {})], (
+            "Unknown mappings must settle to asleep before wake can restore every memory tag."
+        )
+        assert model.replicas["worker"].status is InstanceStatus.AWAKEN, (
+            "Routing can resume only after recovery and weight restoration complete."
+        )
+    finally:
+        await coordinator.stop_busy_loop()
+
+
+@pytest.mark.parametrize("ps_mode", ["cpu", "cpu_ref"])
+async def test_cpu_policy_lifecycle_restores_weights_without_a_nixl_client(config, ps_mode):
+    config.psrl.ps_mode = ps_mode
+    coordinator = await _make(config)
+    try:
+        model = coordinator.models[ROLLOUT_SCOPE]
+        server = await _add(coordinator, ROLLOUT_SCOPE, "validation", is_validate=True)
+        await coordinator.lifecycle.sleep(model, [("validation", 0)])
+        await coordinator.lifecycle.wake(model, [("validation", 0)])
+        server.sleep.remote.assert_awaited_once_with(level=2)
+        server.wake_up.remote.assert_awaited_once_with()
+        server.pull_model_for_sync.remote.assert_awaited_once_with(0)
+        server.nixl_sleep.remote.assert_not_awaited()
+        server.nixl_wake_up.remote.assert_not_awaited()
     finally:
         await coordinator.stop_busy_loop()

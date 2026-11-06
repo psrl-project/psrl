@@ -21,3 +21,4 @@ class AgentLoopContext:
     processor: AutoProcessor | None
     dataset_cls: type[RLHFDataset]
     data_config: DictConfig
+    inference_orchestrator: ray.actor.ActorHandle | None = None

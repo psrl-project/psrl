@@ -48,6 +48,7 @@ def test_reward_servers_register_with_request_model_name(monkeypatch):
 def test_manager_and_gateway_use_same_tokenizer_source(monkeypatch, tokenizer_path):
     rm_config = OmegaConf.create(
         {
+            "reward_loop_type": "gen",
             "model": {"path": "models/TestRM", "tokenizer_path": tokenizer_path, "use_shm": False},
             "rollout": {},
         }
@@ -68,7 +69,7 @@ def test_manager_and_gateway_use_same_tokenizer_source(monkeypatch, tokenizer_pa
 
 
 def test_manager_uses_injected_coordinator_without_creating_an_actor(monkeypatch):
-    config = OmegaConf.create({"model": {"path": "models/judge"}, "rollout": {}})
+    config = OmegaConf.create({"reward_loop_type": "gen", "model": {"path": "models/judge"}, "rollout": {}})
     monkeypatch.setattr(_manager_mod, "copy_to_local", MagicMock(return_value="local_tokenizer"))
     monkeypatch.setattr(_manager_mod, "hf_tokenizer", MagicMock())
     monkeypatch.setattr(RewardModelManager, "_initialize_reward_replicas", lambda self: None)
@@ -83,3 +84,29 @@ def test_manager_uses_injected_coordinator_without_creating_an_actor(monkeypatch
     remote.assert_not_called()
     assert manager.reward_model_coordinator is coordinator, "The manager must retain the injected controller."
     coordinator.start_busy_loop.remote.assert_called_once_with()
+
+
+@pytest.mark.parametrize("mode", ["k1", "forward_kl_topk", "forward_kl_topk_tail"])
+def test_teacher_capacity_matches_registered_loss_targets(monkeypatch, mode):
+    config = OmegaConf.create({"distillation": {"distillation_loss": {"loss_mode": mode, "topk": 3}}})
+    teacher = OmegaConf.create(
+        {
+            "reward_loop_type": "opd",
+            "model": {"path": "models/teacher"},
+            "rollout": {
+                "_target_": "psrl.workers.config.RolloutConfig",
+                "name": "vllm",
+                "engine_kwargs": {"vllm": {"max_logprobs": 2}},
+            },
+        }
+    )
+    monkeypatch.setattr(_manager_mod, "copy_to_local", MagicMock(return_value="local_tokenizer"))
+    monkeypatch.setattr(_manager_mod, "hf_tokenizer", MagicMock())
+    monkeypatch.setattr(RewardModelManager, "_initialize_reward_replicas", lambda self: None)
+    monkeypatch.setattr(RewardModelManager, "_register_reward_servers", lambda self, replicas: None)
+    monkeypatch.setattr(_manager_mod.ray, "get", MagicMock())
+    RewardModelManager("teacher", config, teacher, [], "http://reward", coordinator=MagicMock())
+    expected = 2 if mode == "k1" else 3
+    assert teacher.rollout.engine_kwargs.vllm.max_logprobs == expected, (
+        "Every Top-k mode must reserve its target width."
+    )
