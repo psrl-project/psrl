@@ -53,4 +53,10 @@ class CommandHarness(Harness):
     def build_env(self, runtime: HarnessRuntime) -> Mapping[str, str]:
         env = dict(self.config.env)
         env.update(self.inherited_proxy_env())
+        if self.config.codex_config:
+            # The script's Codex runs against the task-scoped session endpoint, so it
+            # needs the same session identity the Codex harness hands its own CLI.
+            env["HOME"] = self.config.home_dir
+            env["CODEX_HOME"] = str(self.config_dir())
+            env["OPENAI_API_KEY"] = runtime.session_id
         return self.callback_no_proxy(runtime, env)

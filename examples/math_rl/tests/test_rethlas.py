@@ -119,5 +119,6 @@ async def test_the_rethlas_harness_writes_the_mcp_section_and_runner():
     runner = session.files["/root/.psrl-harness/run_rethlas.sh"].decode()
     assert "tests/run_example.sh" in runner
     assert "VERIFY_PROOF_URL" in runner
+    assert "{{" not in runner
     env = harness.build_env(_runtime())
     assert env["PSRL_RETHLAS_MODEL"] == "/models/test"

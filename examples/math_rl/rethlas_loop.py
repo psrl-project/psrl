@@ -52,6 +52,9 @@ class RethlasSettings:
     max_calls_per_episode: int = 4
     max_tokens_per_episode: int = 0
     problem_name: str = "problem"
+    # Outbound proxy for package installs inside the sandbox. Separate from the
+    # verifier proxy: the verifier may be reachable without one, while PyPI is not.
+    sandbox_proxy: str = ""
 
     @classmethod
     def from_mapping(cls, mapping: Any = None) -> RethlasSettings:
@@ -67,6 +70,7 @@ class RethlasSettings:
             max_calls_per_episode=int(values.get("max_calls_per_episode", 4)),
             max_tokens_per_episode=int(values.get("max_tokens_per_episode", 0)),
             problem_name=str(values.get("problem_name") or "problem"),
+            sandbox_proxy=str(values.get("sandbox_proxy") or ""),
         )
 
 
@@ -201,8 +205,8 @@ class RethlasHarnessAgentLoop(MathHarnessAgentLoop):
         host = urlsplit(url).hostname or ""
         if host:
             await session.write_bytes(f"{state_dir}/gateway_host", host.encode("utf-8"))
-        if self.verifier_config.proxy:
-            await session.write_bytes(f"{state_dir}/proxy", self.verifier_config.proxy.encode("utf-8"))
+        if self.rethlas.sandbox_proxy:
+            await session.write_bytes(f"{state_dir}/proxy", self.rethlas.sandbox_proxy.encode("utf-8"))
 
         await patch_mcp_verifier_url(session, repo, url)
         await patch_web_search(session, repo)

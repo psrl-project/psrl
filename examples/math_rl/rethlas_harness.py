@@ -32,8 +32,8 @@ tool_timeout_sec = 3600
 _RUNNER = """#!/bin/bash
 set -euo pipefail
 
-REPO="${{PSRL_RETHLAS_REPO:?PSRL_RETHLAS_REPO is not set}}"
-STATE="${{PSRL_RETHLAS_STATE:?PSRL_RETHLAS_STATE is not set}}"
+REPO="${PSRL_RETHLAS_REPO:?PSRL_RETHLAS_REPO is not set}"
+STATE="${PSRL_RETHLAS_STATE:?PSRL_RETHLAS_STATE is not set}"
 
 if [ -s "$STATE/proxy" ]; then
     PROXY="$(cat "$STATE/proxy")"
@@ -41,31 +41,41 @@ if [ -s "$STATE/proxy" ]; then
 fi
 if [ -s "$STATE/gateway_host" ]; then
     GATEWAY_HOST="$(cat "$STATE/gateway_host")"
-    export NO_PROXY="${{NO_PROXY:+$NO_PROXY,}}$GATEWAY_HOST" no_proxy="${{no_proxy:+$no_proxy,}}$GATEWAY_HOST"
+    export NO_PROXY="${NO_PROXY:+$NO_PROXY,}$GATEWAY_HOST" no_proxy="${no_proxy:+$no_proxy,}$GATEWAY_HOST"
 fi
 export VERIFY_PROOF_URL="$(cat "$STATE/verifier_url")"
 export VERIFIER_EPISODE_ID="$(cat "$STATE/episode_id")"
 export PROBLEM_FILE="data/psrl/problem.md"
-export MAX_ITERATIONS="${{PSRL_RETHLAS_MAX_ITERATIONS:-3}}"
-export LLM_MODEL="${{PSRL_RETHLAS_MODEL:?PSRL_RETHLAS_MODEL is not set}}"
-export LLM_REASONING_EFFORT="${{PSRL_RETHLAS_EFFORT:-max}}"
+export MAX_ITERATIONS="${PSRL_RETHLAS_MAX_ITERATIONS:-3}"
+export LLM_MODEL="${PSRL_RETHLAS_MODEL:?PSRL_RETHLAS_MODEL is not set}"
+export LLM_REASONING_EFFORT="${PSRL_RETHLAS_EFFORT:-max}"
 export LOG_ROOT="$REPO/.logs"
 export SCRATCH_ROOT="$REPO/.scratch"
 export MEMORY_ROOT="$REPO/.memory"
-export HOME="${{HOME:-/root}}"
-export CODEX_HOME="${{CODEX_HOME:-$HOME/.codex}}"
+export HOME="${HOME:-/root}"
+export CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 
 mkdir -p "$REPO/results/psrl/problem" "$LOG_ROOT" "$SCRATCH_ROOT" "$MEMORY_ROOT"
 
 cd "$REPO/agents/generation"
 if [ ! -x .venv/bin/python ]; then
-    uv venv --python "${{PSRL_RETHLAS_PYTHON:-3.11}}" .venv
+    uv venv --python "${PSRL_RETHLAS_PYTHON:-3.11}" .venv
     uv pip install --python .venv/bin/python -r mcp/requirements.txt
 fi
 # shellcheck disable=SC1091
 source .venv/bin/activate
 
-exec bash tests/run_example.sh
+bash tests/run_example.sh
+rc=$?
+if [ "$rc" -ne 0 ]; then
+    echo "run_example.sh exited $rc"
+    for log in "$LOG_ROOT/psrl/problem/iter"/*.md; do
+        [ -f "$log" ] || continue
+        echo "===== $log"
+        tail -n 120 "$log"
+    done
+fi
+exit "$rc"
 """
 
 

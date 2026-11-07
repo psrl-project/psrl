@@ -72,6 +72,7 @@
     max_iterations: ${oc.decode:${oc.env:MATH_RL_RETHLAS_MAX_ITERATIONS,3}}
     venv_python: ${oc.env:MATH_RL_RETHLAS_VENV_PYTHON,3.11}
     max_calls_per_episode: ${oc.decode:${oc.env:MATH_RL_RETHLAS_MAX_CALLS,4}}
+    sandbox_proxy: ${oc.env:MATH_RL_RETHLAS_PROXY,''}
   sandbox_config:
     backend: p3b
     sandbox_cpu_count: 2

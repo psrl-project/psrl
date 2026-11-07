@@ -83,3 +83,14 @@ def test_the_callback_host_stays_out_of_the_proxy():
     env = harness.build_env(_runtime())
     assert env["A"] == "1"
     assert "worker" in env["no_proxy"]
+
+
+def test_a_codex_backed_command_gets_the_session_identity():
+    harness = CommandHarness(
+        HarnessConfig(kind="command", executable="bash", codex_config=True, home_dir="/root"),
+        FakeSession(),
+    )
+    env = harness.build_env(_runtime())
+    assert env["OPENAI_API_KEY"] == "sid"
+    assert env["CODEX_HOME"] == "/root/.codex"
+    assert env["HOME"] == "/root"
