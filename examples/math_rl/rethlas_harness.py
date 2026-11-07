@@ -65,9 +65,15 @@ fi
 # shellcheck disable=SC1091
 source .venv/bin/activate
 
-bash tests/run_example.sh
-rc=$?
-if [ "$rc" -ne 0 ]; then
+# The package proxy is only for the install above. Codex talks to the in-cluster
+# session endpoint and the agent's MCP tool talks to the in-cluster gateway, and a
+# public proxy in the environment would send those calls to the wrong host.
+unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
+
+if bash tests/run_example.sh; then
+    rc=0
+else
+    rc=$?
     echo "run_example.sh exited $rc"
     for log in "$LOG_ROOT/psrl/problem/iter"/*.md; do
         [ -f "$log" ] || continue
