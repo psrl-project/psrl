@@ -81,7 +81,9 @@ class HarnessCompactionConfig:
             raise ValueError("Harness compaction context window must be greater than zero.")
         if not 0 < self.compact_percent <= 100:
             raise ValueError(f"Harness compaction compact_percent must be in (0, 100], got {self.compact_percent!r}.")
-        trigger = max(1, (window * self.compact_percent) // 100)
+        # Codex rejects a float for the integer config key, and the TOML is written
+        # verbatim, so resolve the trigger to an int here.
+        trigger = max(1, int((window * float(self.compact_percent)) // 100))
         return window, trigger
 
 
