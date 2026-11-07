@@ -105,3 +105,26 @@ export PSRL_P3B_ENDPOINT=<sandbox fleet endpoint>
 export TOTAL_TRAINING_STEPS=2 TRAIN_BSZ=4 ROLLOUT_N=2 TRAIN_MINI_BSZ=4
 bash examples/math_rl/run_qwen3.8-27b_math_codex_megatron.sh
 ```
+
+## Rethlas harness smoke
+
+Configuration: the `math_rethlas` loop with one training prompt, two rollouts, one
+training step, `MAX_ITERATIONS=1`, the mock verifier, and the group filter disabled so
+a single degenerate group still completes the step. The loop staged the Rethlas checkout
+into each sandbox, ran its generation loop through the PSRL session, collected the
+blueprint tree, and graded the final artifact.
+
+| Metric | Value |
+|---|---:|
+| Training steps completed | 1 |
+| Wall time for the step | 11 minutes 25 seconds |
+| Validation reward mean@1 | 0.0 |
+| Validation accuracy mean@1 | 0.0 |
+| Gold ceiling mean@1 | 1.0 |
+| Grading failures | 0.0 |
+
+The reward is zero because a one-iteration episode of an untrained model did not write
+`blueprint.md`, so the finalizer graded the missing artifact as a measured failure. The
+grading failure count stays at zero and the gold ceiling stays at 1.0, so the artifact,
+finalizer and verdict mapping all ran. The generation loop itself is visible in the TITO
+trajectory dumps under the run's trajectory directory.
