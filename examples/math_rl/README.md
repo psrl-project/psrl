@@ -74,6 +74,13 @@ For a smoke run without a deployment, start the mock verifier with
 `MATH_RL_VERIFIER_MODE=mock`. The launcher then serves the same four field contract
 from the driver.
 
+The default loop is `math_codex`, one Codex run per episode. The Rethlas loop is
+selected with `MATH_RL_LOOP=math_rethlas` and `MATH_RL_RETHLAS_REPO=<checkout>`.
+It stages the checkout into the sandbox, starts the episode verifier gateway, runs
+the generation loop for `MATH_RL_RETHLAS_MAX_ITERATIONS` rounds, and grades the
+final blueprint. The generation agent reaches the gateway through its MCP tool, so
+the sandbox never calls the external endpoint directly.
+
 **4. Train.**
 
 ```bash

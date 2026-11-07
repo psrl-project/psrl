@@ -323,6 +323,35 @@ def project(
     return rows, manifest
 
 
+def write_problem_files(rows: Sequence[dict[str, Any]], root: Path) -> int:
+    """Materialize one problem.md per row and bind its path and digest into extra_info.
+
+    The Rethlas loop stages a problem file with `PROBLEM_FILE`, so the projection has to
+    produce the same bytes the dataset row carries. The digest lets a later run check that
+    the staged file and the row still describe the same problem.
+
+    Args:
+        rows (Sequence[dict[str, Any]]): Projected rows.
+        root (Path): Destination directory, one subdirectory per uid.
+
+    Returns:
+        int: Number of files written.
+    """
+    root = Path(root)
+    for row in rows:
+        info = row["extra_info"]
+        uid = str(info.get("uid") or "")
+        if not UID_PATTERN.fullmatch(uid):
+            raise ValueError(f"Row uid {uid!r} is not path safe, so its problem cannot be materialized.")
+        directory = root / uid
+        directory.mkdir(parents=True, exist_ok=True)
+        data = str(info.get("problem") or "").encode("utf-8")
+        (directory / "problem.md").write_bytes(data)
+        info["problem_path"] = str(directory / "problem.md")
+        info["problem_sha256"] = hashlib.sha256(data).hexdigest()
+    return len(rows)
+
+
 def _token_summary(values: Sequence[int]) -> dict[str, float | int] | None:
     if not values:
         return None
@@ -453,6 +482,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--train-fraction", type=float, default=0.8)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--strict", action="store_true", help="Fail when a source record is invalid.")
+    parser.add_argument(
+        "--problems-root",
+        type=Path,
+        default=None,
+        help="Write data/<uid>/problem.md here and record the path and digest in extra_info.",
+    )
     return parser
 
 
@@ -488,6 +523,9 @@ def main(argv: Iterable[str] | None = None) -> int:
     )
     try:
         rows, manifest = project(records, filters, token_counter=token_counter)
+        if args.problems_root is not None:
+            manifest["problems_root"] = str(args.problems_root)
+            manifest["problem_files"] = write_problem_files(rows, args.problems_root)
         split = write_parquet(rows, args.output_dir, seed=args.seed, train_fraction=args.train_fraction)
     except ValueError as error:
         print(f"Projection failed: {error}", file=sys.stderr)

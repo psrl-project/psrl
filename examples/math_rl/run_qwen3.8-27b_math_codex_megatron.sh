@@ -50,9 +50,15 @@ MATH_RL_VERIFIER_MAX_RETRIES=${MATH_RL_VERIFIER_MAX_RETRIES:-1}
 MATH_RL_VERIFIER_MAX_CONCURRENCY=${MATH_RL_VERIFIER_MAX_CONCURRENCY:-16}
 MATH_RL_REWARD_MODE=${MATH_RL_REWARD_MODE:-graded}
 GRADING_TIMEOUT=${GRADING_TIMEOUT:-2900}
+MATH_RL_LOOP=${MATH_RL_LOOP:-math_codex}
+MATH_RL_RETHLAS_REPO=${MATH_RL_RETHLAS_REPO:-}
+MATH_RL_RETHLAS_MAX_ITERATIONS=${MATH_RL_RETHLAS_MAX_ITERATIONS:-3}
+MATH_RL_RETHLAS_VENV_PYTHON=${MATH_RL_RETHLAS_VENV_PYTHON:-3.11}
+MATH_RL_RETHLAS_MAX_CALLS=${MATH_RL_RETHLAS_MAX_CALLS:-4}
 export MATH_RL_SANDBOX_IMAGE MATH_RL_RUNTIME_IN_IMAGE MATH_RL_HARNESS_RUNTIME_MOUNT
 export MATH_RL_VERIFIER_MODE MATH_RL_VERIFIER_VERSION MATH_RL_VERIFIER_MODEL MATH_RL_VERIFIER_EFFORT
 export MATH_RL_VERIFIER_PROXY MATH_RL_VERIFIER_TRANSPORT MATH_RL_VERIFIER_STAGE_TIMEOUT_S MATH_RL_VERIFIER_MAX_RETRIES
+export MATH_RL_LOOP MATH_RL_RETHLAS_REPO MATH_RL_RETHLAS_MAX_ITERATIONS MATH_RL_RETHLAS_VENV_PYTHON MATH_RL_RETHLAS_MAX_CALLS
 export MATH_RL_VERIFIER_MAX_CONCURRENCY
 export MATH_RL_REWARD_MODE
 export PYTHONDONTWRITEBYTECODE=1
@@ -258,7 +264,7 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo \
     psrl.group_post_process.enable=True \
     psrl.group_post_process.name=dynamic_sampling_filter \
     \
-    gen_actor_rollout_ref.rollout.agent.default_agent_loop=math_codex \
+    gen_actor_rollout_ref.rollout.agent.default_agent_loop="${MATH_RL_LOOP}" \
     gen_actor_rollout_ref.rollout.agent.traj_reward_mode=traj \
     gen_actor_rollout_ref.rollout.agent.agent_loop_config_path="${AGENT_CONFIG}" \
     gen_actor_rollout_ref.rollout.agent.sandbox.default_backend=p3b \
@@ -299,7 +305,7 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo \
     train_actor_rollout_ref.rollout.multi_turn.max_turns="${max_turns}" \
     train_actor_rollout_ref.rollout.agent.trajectory_timeout="${trajectory_timeout}" \
     train_actor_rollout_ref.rollout.agent.trajectory_timeout_action=keep \
-    train_actor_rollout_ref.rollout.agent.default_agent_loop=math_codex \
+    train_actor_rollout_ref.rollout.agent.default_agent_loop="${MATH_RL_LOOP}" \
     train_actor_rollout_ref.rollout.agent.agent_loop_config_path="${AGENT_CONFIG}" \
     train_actor_rollout_ref.rollout.agent.sandbox.default_backend=p3b \
     train_actor_rollout_ref.rollout.agent.sandbox.backends.p3b.endpoint="${PSRL_P3B_ENDPOINT}" \

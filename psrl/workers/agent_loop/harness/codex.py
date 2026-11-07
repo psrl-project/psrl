@@ -94,6 +94,10 @@ class CodexHarness(Harness):
             # expose the tools; this feature flag is Codex's older fallback for the
             # same surface and is harmless when the catalog already names a version.
             config_lines.extend(("", "[features]", "multi_agent = true"))
+        else:
+            # A project-level Rethlas config enables subagents; state the choice here so
+            # the workspace cannot turn on threads the recipe did not budget for.
+            config_lines.extend(("", "[features]", "multi_agent = false"))
         config_lines.extend(
             (
                 "",

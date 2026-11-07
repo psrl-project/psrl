@@ -570,7 +570,20 @@ class HarnessAgentLoop(SessionAgentLoop):
             self._stamp_reward_info(outputs, training_data, reward_info)
             self.attach_tito_tree_metadata(training_data, outputs)
             output_value: TokenOutput | list[TokenOutput] = outputs[0] if len(outputs) == 1 else outputs
-            scored_output = await self.compute_reward_score(output_value, **request)
+            primary_index = next(
+                (index for index, item in enumerate(training_data) if item.get("session_primary")),
+                None,
+            )
+            if primary_index is None and len(outputs) > 1:
+                psrl_logger.warning(
+                    "No trajectory is marked primary for session %s; grading the last row.",
+                    session_id,
+                )
+            scored_output = await self.compute_reward_score(
+                output_value,
+                primary_index=primary_index,
+                **request,
+            )
             if scored_output is None:
                 return None, TerminateReason.ABORTED
             return scored_output, self.get_harness_terminate_reason(training_data)

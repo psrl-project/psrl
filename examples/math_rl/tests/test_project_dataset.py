@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 
 import pandas as pd
@@ -15,6 +16,7 @@ from examples.math_rl.project_dataset import (
     normalize_record,
     project,
     write_parquet,
+    write_problem_files,
 )
 
 
@@ -116,3 +118,24 @@ def test_difficulty_range_keeps_low_and_medium(combined_record):
     rows, manifest = project([low, medium, invalid], Filters())
     assert {row["extra_info"]["difficulty"] for row in rows} == {"1", "2"}
     assert manifest["dropped"]["difficulty_out_of_range"] == 1
+
+
+def test_problem_files_are_materialized_and_hashed(tmp_path):
+    rows = [
+        {"extra_info": {"uid": "alpha_1", "problem": "Prove A."}},
+        {"extra_info": {"uid": "beta_2", "problem": "Prove B."}},
+    ]
+    count = write_problem_files(rows, tmp_path)
+
+    assert count == 2
+    path = tmp_path / "alpha_1" / "problem.md"
+    data = b"Prove A."
+    assert path.read_bytes() == data
+    assert rows[0]["extra_info"]["problem_path"] == str(path)
+    assert rows[0]["extra_info"]["problem_sha256"] == hashlib.sha256(data).hexdigest()
+
+
+def test_an_unsafe_uid_cannot_be_materialized(tmp_path):
+    rows = [{"extra_info": {"uid": "../escape", "problem": "Prove A."}}]
+    with pytest.raises(ValueError, match="not path safe"):
+        write_problem_files(rows, tmp_path)

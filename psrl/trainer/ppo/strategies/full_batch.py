@@ -7,9 +7,11 @@ step body.
 """
 
 import ray
+from verl.utils import tensordict_utils as tu
 from verl.utils.debug import marked_timer
 
 from psrl.trainer.ppo.strategies.base import StepStrategy, psrl_logger
+from psrl.trainer.ppo.utils import graded_ratio
 from psrl.utils.logger import EventType, log_dual_events
 
 
@@ -90,6 +92,22 @@ class FullBatchStepStrategy(StepStrategy):
                 event_type=EventType.OTHER,
             ):
                 batch = ray.get(t.reward_manager.normalize_reward.remote(batch))
+
+        min_graded_ratio = float(t.config.algorithm.get("min_graded_ratio", 0.0) or 0.0)
+        if min_graded_ratio > 0:
+            reasons = [str(value) for value in tu.get(batch, "terminate_reason")]
+            ratio = graded_ratio(reasons)
+            metrics["episode/graded_ratio"] = ratio
+            if ratio < min_graded_ratio:
+                metrics["episode/skipped_low_graded_ratio"] = 1.0
+                psrl_logger.warning(
+                    "Skipping the actor update at step %s: graded ratio %.3f is below the %.3f gate.",
+                    t.global_steps,
+                    ratio,
+                    min_graded_ratio,
+                )
+                t._run_ckpt_and_validate(batch, metrics, timing_raw, actor_updated=False)
+                return batch
 
         with marked_timer("adv", timing_raw, color="brown"):
             with log_dual_events(

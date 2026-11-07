@@ -122,6 +122,9 @@ class HarnessConfig:
     agent_workspace_root: str = "/workspace/agents"
     compaction: HarnessCompactionConfig = field(default_factory=HarnessCompactionConfig)
     trajectory_format: str = "auto"
+    # A command harness that drives a CLI through a workspace script still needs the
+    # Codex config (provider, session URL, catalog) written before the script runs.
+    codex_config: bool = False
 
     def __post_init__(self) -> None:
         if not self.kind or not self.executable:

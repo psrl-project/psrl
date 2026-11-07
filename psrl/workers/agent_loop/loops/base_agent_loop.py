@@ -46,6 +46,31 @@ psrl_logger = logging.getLogger(__name__)
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
 
 
+def reward_source_index(total: int, primary_index: int | None) -> int:
+    """Return the row an episode's reward is read from.
+
+    The session's trajectory selection marks one trainable row as primary. Callers that
+    predate the selection pass no index and keep the historical last-row behavior.
+
+    Args:
+        total (int): Number of trajectories in the episode.
+        primary_index (int | None): The selected row, or None for the legacy behavior.
+
+    Returns:
+        int: The row to read the reward from.
+
+    Raises:
+        ValueError: If the episode has no rows or the index is out of range.
+    """
+    if total <= 0:
+        raise ValueError("An episode reward needs at least one trajectory.")
+    if primary_index is None:
+        return total - 1
+    if not 0 <= primary_index < total:
+        raise ValueError(f"primary_index {primary_index} is out of range for {total} trajectories.")
+    return primary_index
+
+
 class AgentLoopBase(ABC):
     """Base class for one rollout episode.
 
@@ -242,6 +267,7 @@ class AgentLoopBase(ABC):
     async def compute_reward_score(
         self,
         outputs: TokenOutput | list[TokenOutput],
+        primary_index: int | None = None,
         **kwargs,
     ) -> TokenOutput | list[TokenOutput] | None:
         """Compute reward score for the generated response and merge it into the output.
@@ -251,14 +277,17 @@ class AgentLoopBase(ABC):
         output. If the request is aborted during reward computation, it returns ``None``.
 
         Args:
-            data (TokenOutput): The output data structure containing the generated response and associated metadata.
+            outputs (TokenOutput | list[TokenOutput]): The episode's trainable trajectories.
+            primary_index (int | None): The row the episode's reward is read from. The
+                session's trajectory selection marks one row primary; callers that do not
+                select pass None and the last row keeps the historical behavior.
+            **kwargs: Rollout request fields forwarded to the reward manager.
         Returns:
-            TokenOutput | None: The output with reward score, or None if the request was aborted.
+            TokenOutput | list[TokenOutput] | None: The scored output, or None if aborted.
         """
         if not isinstance(outputs, list):
             outputs = [outputs]
-        # NOTE(linsh): Only compute reward for the last trajectory.
-        final_output = outputs[-1]
+        final_output = outputs[reward_source_index(len(outputs), primary_index)]
 
         # Build TensorDict: tensors in batch, metadata in non_tensor_batch/meta_info
         tensor_dict = {

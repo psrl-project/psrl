@@ -42,3 +42,57 @@
     compaction:
       enabled: true
       compact_percent: 75
+
+- name: math_rethlas
+  _target_: examples.math_rl.rethlas_loop.RethlasHarnessAgentLoop
+  runtime_in_image: ${oc.decode:${oc.env:MATH_RL_RUNTIME_IN_IMAGE,true}}
+  verifier:
+    endpoint: ${oc.env:MATH_RL_VERIFIER_URL}
+    verifier_harness_version: ${oc.env:MATH_RL_VERIFIER_VERSION}
+    model: ${oc.env:MATH_RL_VERIFIER_MODEL,''}
+    profile: ${oc.env:MATH_RL_VERIFIER_PROFILE,''}
+    reasoning_effort: ${oc.env:MATH_RL_VERIFIER_EFFORT,''}
+    proxy: ${oc.env:MATH_RL_VERIFIER_PROXY,''}
+    transport: ${oc.env:MATH_RL_VERIFIER_TRANSPORT,stream}
+    stage_timeout_s: ${oc.decode:${oc.env:MATH_RL_VERIFIER_STAGE_TIMEOUT_S,600}}
+    max_retries: ${oc.decode:${oc.env:MATH_RL_VERIFIER_MAX_RETRIES,2}}
+    max_concurrency: ${oc.decode:${oc.env:MATH_RL_VERIFIER_MAX_CONCURRENCY,64}}
+    max_solution_bytes: 8388608
+    max_request_bytes: 16769024
+    cache_size: 256
+    reward_mode: ${oc.env:MATH_RL_REWARD_MODE,graded}
+    graded_mapping:
+      "7": 1.0
+      "6": 0.8
+      "1": 0.3
+      "0": 0.0
+  rethlas:
+    repo_path: ${oc.env:MATH_RL_RETHLAS_REPO,''}
+    sandbox_repo: ${oc.env:PSRL_RETHLAS_SANDBOX_REPO,/workspace/rethlas}
+    max_iterations: ${oc.decode:${oc.env:MATH_RL_RETHLAS_MAX_ITERATIONS,3}}
+    venv_python: ${oc.env:MATH_RL_RETHLAS_VENV_PYTHON,3.11}
+    max_calls_per_episode: ${oc.decode:${oc.env:MATH_RL_RETHLAS_MAX_CALLS,4}}
+  sandbox_config:
+    backend: p3b
+    sandbox_cpu_count: 2
+    snapshot_verifier: false
+    environment:
+      image: ${oc.env:MATH_RL_SANDBOX_IMAGE,math-rl-codex:local}
+      cwd: /workspace
+      container_timeout: "2h"
+      memory: "8g"
+      resource_class: rollout
+  harness:
+    kind: rethlas_command
+    executable: bash
+    codex_config: true
+    trajectory_format: plain_text
+    reasoning_effort: medium
+    home_dir: /root
+    subagents_enabled: false
+    args: ["/root/.psrl-harness/run_rethlas.sh"]
+    env:
+      PSRL_RETHLAS_REPO: ${oc.env:PSRL_RETHLAS_SANDBOX_REPO,/workspace/rethlas}
+      PSRL_RETHLAS_STATE: /root/.psrl-harness
+      PSRL_RETHLAS_MAX_ITERATIONS: ${oc.env:MATH_RL_RETHLAS_MAX_ITERATIONS,3}
+      PSRL_RETHLAS_PYTHON: ${oc.env:MATH_RL_RETHLAS_VENV_PYTHON,3.11}

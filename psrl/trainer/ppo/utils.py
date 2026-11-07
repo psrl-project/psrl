@@ -3,7 +3,7 @@ import json
 import logging
 import os
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -20,11 +20,41 @@ from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import AdvantageEstimator
 
 from psrl.trainer.ppo.resource_pool import PSRL_RayResourcePool
+from psrl.workers.agent_loop.loops.utils import TerminateReason
 
 psrl_logger = logging.getLogger(__file__)
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
 
 # from verl.trainer.ppo.ray_trainer import compute_response_mask
+
+
+def graded_ratio(terminate_reasons: Sequence[str]) -> float:
+    """Return the share of rows whose reward is a measurement rather than a fault.
+
+    An ungraded episode keeps its trajectory but carries no verifier score. A step that
+    is mostly ungraded trains on infrastructure noise, so the caller can skip it instead
+    of updating on the absence of measurements.
+
+    Args:
+        terminate_reasons (Sequence[str]): Per-row `TerminateReason` values.
+
+    Returns:
+        float: Graded rows divided by all rows, or zero for an empty batch.
+    """
+    total = len(terminate_reasons)
+    if total == 0:
+        return 0.0
+    graded = 0
+    for reason in terminate_reasons:
+        try:
+            parsed = TerminateReason(str(reason))
+        except ValueError:
+            graded += 1
+            continue
+        if not parsed.is_ungraded:
+            graded += 1
+    return graded / total
+
 
 
 def _compute_termination_metrics(

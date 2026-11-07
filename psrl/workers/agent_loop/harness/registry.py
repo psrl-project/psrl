@@ -6,12 +6,14 @@ from psrl.sandbox import SandboxSession
 from psrl.workers.agent_loop.harness.base import Harness, HarnessConfig
 from psrl.workers.agent_loop.harness.claude_code import ClaudeCodeHarness
 from psrl.workers.agent_loop.harness.codex import CodexHarness
+from psrl.workers.agent_loop.harness.command import CommandHarness
 
 HarnessFactory = Callable[[HarnessConfig, SandboxSession], Harness]
 
 _HARNESS_FACTORIES: dict[str, HarnessFactory] = {
     "claude_code": ClaudeCodeHarness,
     "codex": CodexHarness,
+    "command": CommandHarness,
 }
 
 
