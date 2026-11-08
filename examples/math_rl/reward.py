@@ -41,6 +41,8 @@ def compute_score(
             "verifier_verdict": "error" if verifier_error else verdict,
             "verifier_reason": "",
             "verifier_error": str(verifier_error or "ungraded"),
+            "grading_failed": 1.0,
+            "gold_ceiling": 1.0,
         }
     score = float(info.get("reward_score", 0.0))
     score = min(1.0, max(0.0, score))
@@ -52,4 +54,6 @@ def compute_score(
         "verifier_run_id": str(info.get("verifier_run_id") or ""),
         "proof_sha256": str(info.get("proof_sha256") or ""),
         "verifier_error": "",
+        "grading_failed": 0.0,
+        "gold_ceiling": 1.0,
     }

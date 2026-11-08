@@ -18,6 +18,7 @@ from psrl.workers.agent_loop.harness.registry import register_harness
 
 RETHLAS_REPO_ENV = "PSRL_RETHLAS_REPO"
 RETHLAS_STATE_ENV = "PSRL_RETHLAS_STATE"
+RETHLAS_TOOL_TIMEOUT_ENV = "PSRL_RETHLAS_TOOL_TIMEOUT"
 
 _RUNNER_NAME = "run_rethlas.sh"
 
@@ -26,7 +27,7 @@ _MCP_SECTION = """
 command = {python}
 args = [{server}]
 cwd = {cwd}
-tool_timeout_sec = 3600
+tool_timeout_sec = {tool_timeout}
 """
 
 _RUNNER = """#!/bin/bash
@@ -112,10 +113,12 @@ class RethlasCommandHarness(CommandHarness):
             existing = (await self.sandbox.read_bytes(str(config_path))).decode("utf-8")
         except SandboxPathNotFoundError:
             existing = ""
+        timeout = str(self.config.env.get(RETHLAS_TOOL_TIMEOUT_ENV) or "3600")
         section = _MCP_SECTION.format(
             python=_toml_string(f"{self.repo}/agents/generation/.venv/bin/python"),
             server=_toml_string(f"{self.repo}/agents/generation/mcp/server.py"),
             cwd=_toml_string(f"{self.repo}/agents/generation"),
+            tool_timeout=timeout,
         )
         if "[mcp_servers.reasoning_agent]" in existing:
             return

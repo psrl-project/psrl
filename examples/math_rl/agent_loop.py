@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import time
 from collections.abc import Mapping
@@ -34,7 +35,8 @@ from psrl.workers.agent_loop.harness import (
 from psrl.workers.agent_loop.loops.harness_agent_loop import HarnessAgentLoop
 from psrl.workers.agent_loop.loops.utils import register
 
-psrl_logger = logging.getLogger(__name__)
+psrl_logger = logging.getLogger("psrl.math_rl.agent_loop")
+psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
 
 _PROBLEM_PATH = "/workspace/problem.md"
 _DEFAULT_SOLUTION_CAP = 200_000
@@ -360,6 +362,10 @@ class MathHarnessAgentLoop(HarnessAgentLoop):
         }
         if not artifact.solution:
             timing["grading_s"] = time.perf_counter() - started
+            psrl_logger.info(
+                f"No solution for task {task.state.uid!r} (source {artifact.source}); "
+                "recording a graded zero."
+            )
             return {
                 **common,
                 "reward_score": 0.0,
@@ -391,6 +397,11 @@ class MathHarnessAgentLoop(HarnessAgentLoop):
                 "verifier_error": str(error),
             }
         timing["grading_s"] = time.perf_counter() - started
+        psrl_logger.info(
+            f"Graded task {task.state.uid!r}: verdict {verdict.verdict}, "
+            f"score {verdict.score(self.verifier_config):.2f}, "
+            f"run {verdict.run_id or 'unknown'}, latency {verdict.duration_s}s."
+        )
         return {
             **common,
             "reward_score": verdict.score(self.verifier_config),

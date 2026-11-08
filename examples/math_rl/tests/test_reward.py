@@ -16,6 +16,8 @@ def test_a_graded_verdict_carries_its_mapped_score():
     assert result["acc"] == 0.8
     assert result["verifier_verdict"] == "6"
     assert result["verifier_error"] == ""
+    assert result["grading_failed"] == 0.0
+    assert result["gold_ceiling"] == 1.0
 
 
 def test_a_full_verdict_is_one():
@@ -38,6 +40,7 @@ def test_a_verifier_error_is_reported_without_a_fake_zero():
     assert result["score"] == 0.0
     assert result["verifier_verdict"] == "error"
     assert result["verifier_error"] == "timeout"
+    assert result["grading_failed"] == 1.0
 
 
 def test_an_ungraded_episode_does_not_train_its_mapped_score():

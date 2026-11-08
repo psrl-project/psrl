@@ -90,10 +90,11 @@
     trajectory_format: plain_text
     reasoning_effort: medium
     home_dir: /root
-    subagents_enabled: false
+    subagents_enabled: true
     args: ["/root/.psrl-harness/run_rethlas.sh"]
     env:
       PSRL_RETHLAS_REPO: ${oc.env:PSRL_RETHLAS_SANDBOX_REPO,/workspace/rethlas}
       PSRL_RETHLAS_STATE: /root/.psrl-harness
       PSRL_RETHLAS_MAX_ITERATIONS: ${oc.env:MATH_RL_RETHLAS_MAX_ITERATIONS,3}
       PSRL_RETHLAS_PYTHON: ${oc.env:MATH_RL_RETHLAS_VENV_PYTHON,3.11}
+      PSRL_RETHLAS_TOOL_TIMEOUT: ${oc.env:MATH_RL_RETHLAS_TOOL_TIMEOUT,3600}

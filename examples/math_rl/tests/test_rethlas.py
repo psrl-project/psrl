@@ -116,9 +116,29 @@ async def test_the_rethlas_harness_writes_the_mcp_section_and_runner():
     assert 'model_provider = "psrl"' in config_toml
     assert "[mcp_servers.reasoning_agent]" in config_toml
     assert "/workspace/rethlas/agents/generation/mcp/server.py" in config_toml
+    assert "tool_timeout_sec = 3600" in config_toml
     runner = session.files["/root/.psrl-harness/run_rethlas.sh"].decode()
     assert "tests/run_example.sh" in runner
     assert "VERIFY_PROOF_URL" in runner
     assert "{{" not in runner
     env = harness.build_env(_runtime())
     assert env["PSRL_RETHLAS_MODEL"] == "/models/test"
+
+
+async def test_the_verification_tool_timeout_follows_the_episode_budget():
+    config = HarnessConfig(
+        kind="rethlas_command",
+        executable="bash",
+        codex_config=True,
+        home_dir="/root",
+        env={
+            "PSRL_RETHLAS_REPO": "/workspace/rethlas",
+            "PSRL_RETHLAS_STATE": "/root/.psrl-harness",
+            "PSRL_RETHLAS_TOOL_TIMEOUT": "11100",
+        },
+    )
+    session = FakeSession()
+    harness = RethlasCommandHarness(config, session)
+    await harness.prepare(_runtime())
+    config_toml = session.files["/root/.codex/config.toml"].decode()
+    assert "tool_timeout_sec = 11100" in config_toml

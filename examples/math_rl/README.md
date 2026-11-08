@@ -81,6 +81,12 @@ the generation loop for `MATH_RL_RETHLAS_MAX_ITERATIONS` rounds, and grades the
 final blueprint. The generation agent reaches the gateway through its MCP tool, so
 the sandbox never calls the external endpoint directly.
 
+The Rethlas harness enables Codex subagents. The subagent policy is main only:
+the main agent trajectory is trainable and subagent trajectories are captured as
+context tokens. The launcher passes
+`psrl.agentic_rl.subagent_training.mode=main_only` with the matching `val_mode`,
+`reward=session`, and `shared_prefix=owner`.
+
 **4. Train.**
 
 ```bash
@@ -115,6 +121,10 @@ group is dropped and refilled rather than trained.
 | `agent_loop.py` | `MathHarnessAgentLoop`: sandbox, proof collection, verifier call |
 | `verifier.py` | External verifier client, receipt parsing, verdict mapping, process cache |
 | `mock_verifier_server.py` | Local verifier for tests and smoke runs |
+| `verify_probe.py` | Deployment preflight: health, served model, graded round trips |
+| `verifier_gateway.py` | Per-worker gateway that adapts the Rethlas tool to the four field contract |
+| `rethlas_harness.py` | `rethlas_command` harness: Codex config, MCP server entry, runner script |
+| `rethlas_loop.py` | `math_rethlas` loop: checkout staging, episode gateway, artifact collection |
 | `reward.py` | Projects the verdict metadata into the PSRL reward loop |
 | `config/math_harness_config.yaml` | Codex, sandbox, and verifier settings |
 | `prepare/` | Sandbox image and runtime checks |
@@ -128,8 +138,9 @@ group is dropped and refilled rather than trained.
   (`score_centering`, `bypass_mode`, `loss_type=reinforce`) and TIS at 2.0.
 - **Zero-variance groups.** `dynamic_sampling_filter` drops and refills groups with no
   reward variance.
-- **Harness.** Codex runs with `subagents_enabled: false` and web search disabled by the
-  adapter. Compaction triggers at 75% of the context window.
+- **Harness.** Web search is disabled by the adapter and compaction triggers at 75% of
+  the context window. `math_codex` runs without subagents. `math_rethlas` enables
+  Codex subagents and trains only the main agent trajectory.
 - **Verifier.** Exactly four request fields. The problem comes from the dataset row,
   never from the agent. Receipts are parsed from response headers.
 - **Ungraded.** A timeout, a 5xx, a rejected request, a malformed body, or a proof over
@@ -138,8 +149,14 @@ group is dropped and refilled rather than trained.
 
 ## Gotchas
 
-- **The verifier is slow.** A call can run for many minutes. `GRADING_TIMEOUT` is
-  separate from the episode timeout and defaults to `3 x stage timeout + 180`.
+- **The verifier is slow.** A call runs three stages and each one can take many
+  minutes. `GRADING_TIMEOUT` defaults to `3 x stage timeout + 300`, and
+  `MATH_RL_RETHLAS_TOOL_TIMEOUT` follows the same formula so the MCP tool outlives
+  the gateway call.
+- **Subagent turns are context, not targets.** With `mode=main_only` the subagent
+  messages are captured as tokens for the main trajectory and carry no loss. Set
+  `TRAJECTORY_TIMEOUT` to cover at least one verification call plus drafting time,
+  and raise `MATH_RL_RETHLAS_MAX_CALLS` only when the episode budget allows several.
 - **The version must match.** The service serves one harness version per process and
   rejects a request that names another. Pin both sides to the same value.
 - **The image is node local.** Building it on the driver does not distribute it. Build

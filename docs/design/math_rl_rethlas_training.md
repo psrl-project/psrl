@@ -132,6 +132,24 @@ reward normalization. When it is below `algorithm.min_graded_ratio`, the step sk
 advantage computation and the actor update, records the metric, and logs the decision.
 The default is zero, so existing recipes are unchanged.
 
+### 3.8 Subagent training semantics
+
+The Rethlas harness enables Codex subagents, because the generation agent
+delegates proof work to subagents. Only the main agent trajectory is trained.
+The policy is `main_only`:
+
+- `subagent_training.mode=main_only` marks subagent turns non-trainable and captures
+  them as tokens, so their tool calls and reasoning stay in the main agent context
+  without contributing a loss term.
+- `val_mode=main_only` applies the same rule during validation.
+- `reward=session` gives the episode one reward, taken from the main trajectory.
+- `shared_prefix=owner` attributes the shared prompt prefix to the main agent.
+
+The harness loop resolves the primary row and passes its index to
+`compute_reward_score`, so a group with several captured trajectories still uses one
+graded outcome. The recipe sets these four values explicitly in the launcher rather
+than relying on the config defaults.
+
 ## 4. Configuration
 
 ```yaml
@@ -148,6 +166,7 @@ The default is zero, so existing recipes are unchanged.
     executable: bash
     codex_config: true
     trajectory_format: plain_text
+    subagents_enabled: true
     args: ["<state dir>/run_rethlas.sh"]
 ```
 
@@ -169,8 +188,11 @@ Integration:
 
 - one episode with the mock verifier through the gateway: the MCP call is cached and the
   finalizer returns the same verdict,
-- a two-step smoke with train batch 4 and two rollouts, `subagents_enabled=false`,
-  `max_iterations=2`.
+- a two-step smoke with train batch 4 and two rollouts, `max_iterations=2`,
+- a real-verifier preflight with the served model and one graded synthetic proof,
+- a subagent episode in which the subagent turns are captured but only the main
+  trajectory is trainable.
 
 Acceptance: the final validation reward equals the verifier's correctness rate, no
-verifier call appears in the training samples, and the graded ratio metric is recorded.
+verifier call appears in the training samples, the graded ratio metric is recorded,
+and the subagent rows carry no loss.

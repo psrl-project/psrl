@@ -49,19 +49,23 @@ MATH_RL_VERIFIER_STAGE_TIMEOUT_S=${MATH_RL_VERIFIER_STAGE_TIMEOUT_S:-900}
 MATH_RL_VERIFIER_MAX_RETRIES=${MATH_RL_VERIFIER_MAX_RETRIES:-1}
 MATH_RL_VERIFIER_MAX_CONCURRENCY=${MATH_RL_VERIFIER_MAX_CONCURRENCY:-16}
 MATH_RL_REWARD_MODE=${MATH_RL_REWARD_MODE:-graded}
-GRADING_TIMEOUT=${GRADING_TIMEOUT:-2900}
+GROUP_POST_PROCESS_ENABLE=${GROUP_POST_PROCESS_ENABLE:-true}
+MATH_RL_GATEWAY_TIMEOUT_S=$(awk "BEGIN {printf \"%d\", 3 * ${MATH_RL_VERIFIER_STAGE_TIMEOUT_S} + 300}")
+GRADING_TIMEOUT=${GRADING_TIMEOUT:-${MATH_RL_GATEWAY_TIMEOUT_S}}
 MATH_RL_LOOP=${MATH_RL_LOOP:-math_codex}
 MATH_RL_RETHLAS_REPO=${MATH_RL_RETHLAS_REPO:-}
 MATH_RL_RETHLAS_MAX_ITERATIONS=${MATH_RL_RETHLAS_MAX_ITERATIONS:-3}
 MATH_RL_RETHLAS_VENV_PYTHON=${MATH_RL_RETHLAS_VENV_PYTHON:-3.11}
 MATH_RL_RETHLAS_MAX_CALLS=${MATH_RL_RETHLAS_MAX_CALLS:-4}
 MATH_RL_RETHLAS_PROXY=${MATH_RL_RETHLAS_PROXY:-}
+MATH_RL_RETHLAS_TOOL_TIMEOUT=${MATH_RL_RETHLAS_TOOL_TIMEOUT:-${MATH_RL_GATEWAY_TIMEOUT_S}}
 export MATH_RL_SANDBOX_IMAGE MATH_RL_RUNTIME_IN_IMAGE MATH_RL_HARNESS_RUNTIME_MOUNT
 export MATH_RL_VERIFIER_MODE MATH_RL_VERIFIER_VERSION MATH_RL_VERIFIER_MODEL MATH_RL_VERIFIER_EFFORT
 export MATH_RL_VERIFIER_PROXY MATH_RL_VERIFIER_TRANSPORT MATH_RL_VERIFIER_STAGE_TIMEOUT_S MATH_RL_VERIFIER_MAX_RETRIES
 export MATH_RL_LOOP MATH_RL_RETHLAS_REPO MATH_RL_RETHLAS_MAX_ITERATIONS MATH_RL_RETHLAS_VENV_PYTHON MATH_RL_RETHLAS_MAX_CALLS MATH_RL_RETHLAS_PROXY
+export MATH_RL_RETHLAS_TOOL_TIMEOUT
 export MATH_RL_VERIFIER_MAX_CONCURRENCY
-export MATH_RL_REWARD_MODE
+export MATH_RL_REWARD_MODE GROUP_POST_PROCESS_ENABLE
 export PYTHONDONTWRITEBYTECODE=1
 
 TRAIN_FILE=${MATH_RL_DATA_DIR}/train.parquet
@@ -197,7 +201,7 @@ max_prompt_length=4096
 max_response_length=16384
 packing_length=$((max_prompt_length + max_response_length))
 max_turns=60
-trajectory_timeout=3600
+trajectory_timeout=${TRAJECTORY_TIMEOUT:-3600}
 
 # --- Algorithm ---
 adv_estimator=grpo
@@ -262,7 +266,11 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo \
     psrl.rollout_gateway.tito_tool_normalization=codex \
     psrl.rollout_gateway.tito_debug=false \
     psrl.rollout_gateway.tool_call_parser=qwen_xml \
-    psrl.group_post_process.enable=True \
+    psrl.agentic_rl.subagent_training.mode=main_only \
+    psrl.agentic_rl.subagent_training.val_mode=main_only \
+    psrl.agentic_rl.subagent_training.reward=session \
+    psrl.agentic_rl.subagent_training.shared_prefix=owner \
+    psrl.group_post_process.enable=${GROUP_POST_PROCESS_ENABLE} \
     psrl.group_post_process.name=dynamic_sampling_filter \
     \
     gen_actor_rollout_ref.rollout.agent.default_agent_loop="${MATH_RL_LOOP}" \
