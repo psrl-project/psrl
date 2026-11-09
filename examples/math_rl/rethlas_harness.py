@@ -59,9 +59,18 @@ export CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 mkdir -p "$REPO/results/psrl/problem" "$LOG_ROOT" "$SCRATCH_ROOT" "$MEMORY_ROOT"
 
 cd "$REPO/agents/generation"
+WHEELHOUSE="$REPO/agents/generation/.psrl-wheelhouse"
 if [ ! -x .venv/bin/python ]; then
     uv venv --python "${PSRL_RETHLAS_PYTHON:-3.11}" .venv
-    uv pip install --python .venv/bin/python -r mcp/requirements.txt
+    if [ -d "$WHEELHOUSE" ]; then
+        if ! uv pip install --python .venv/bin/python --no-index \
+            --find-links "$WHEELHOUSE" -r mcp/requirements.txt; then
+            echo "the staged wheelhouse did not satisfy mcp/requirements.txt; using the package proxy" >&2
+            uv pip install --python .venv/bin/python -r mcp/requirements.txt
+        fi
+    else
+        uv pip install --python .venv/bin/python -r mcp/requirements.txt
+    fi
 fi
 # shellcheck disable=SC1091
 source .venv/bin/activate

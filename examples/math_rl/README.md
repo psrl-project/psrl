@@ -81,6 +81,13 @@ the generation loop for `MATH_RL_RETHLAS_MAX_ITERATIONS` rounds, and grades the
 final blueprint. The generation agent reaches the gateway through its MCP tool, so
 the sandbox never calls the external endpoint directly.
 
+The staging links `/workspace/results`, `/workspace/.scratch`, and `/workspace/.memory`
+to the same directories inside the staged checkout, because the Rethlas skills name
+workspace-root paths. It also stages a wheelhouse for the generation agent's MCP
+runtime, built once per worker from the requirement file. The runner installs from
+that wheelhouse without the package index and falls back to the proxy only when a
+wheel is missing.
+
 The Rethlas harness enables Codex subagents. The subagent policy is main only:
 the main agent trajectory is trainable and subagent trajectories are captured as
 context tokens. The launcher passes
@@ -157,6 +164,10 @@ group is dropped and refilled rather than trained.
   messages are captured as tokens for the main trajectory and carry no loss. Set
   `TRAJECTORY_TIMEOUT` to cover at least one verification call plus drafting time,
   and raise `MATH_RL_RETHLAS_MAX_CALLS` only when the episode budget allows several.
+- **The first Rethlas episode builds the runtime wheelhouse.** It downloads the MCP
+  requirements once per worker and caches them by requirements hash. Set
+  `PSRL_RETHLAS_WHEELHOUSE_CACHE` to move the cache. Later episodes stage the
+  cached wheels and install without the network.
 - **The zero-variance filter stalls a cold model.** `dynamic_sampling_filter` drops a
   group when every rollout scores the same. An untrained model on a hard problem makes
   every group all zero, so the step refills forever. Set

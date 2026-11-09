@@ -87,6 +87,11 @@ contract.
 - Extends `MathHarnessAgentLoop`.
 - `prepare_harness_sandbox`:
   - packs the host Rethlas checkout (without `.git`) and extracts it at `/workspace/rethlas`,
+  - links `/workspace/results`, `/workspace/.scratch`, and `/workspace/.memory` to the
+    staged checkout, because the skills name workspace-root paths,
+  - stages a wheelhouse for the generation agent's MCP runtime under
+    `agents/generation/.psrl-wheelhouse`, built once per worker and cached by the
+    requirements hash,
   - writes `data/psrl/problem.md` from the dataset row,
   - patches the MCP server's `VERIFY_PROOF_URL` literal to the episode gateway URL,
   - writes the episode id, verifier URL and proxy files under the harness state directory,

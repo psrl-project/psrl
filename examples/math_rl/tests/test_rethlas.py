@@ -3,12 +3,22 @@
 from __future__ import annotations
 
 import io
+import sys
 import tarfile
 from pathlib import Path
 
 import pytest
 from examples.math_rl.rethlas_harness import RethlasCommandHarness
-from examples.math_rl.rethlas_loop import episode_id_for, pack_rethlas, patch_mcp_verifier_url, patch_web_search
+from examples.math_rl.rethlas_loop import (
+    _wheelhouse_download_command,
+    _wheelhouse_key,
+    build_rethlas_wheelhouse,
+    episode_id_for,
+    link_workspace_paths,
+    pack_rethlas,
+    patch_mcp_verifier_url,
+    patch_web_search,
+)
 from psrl.sandbox import SandboxPathNotFoundError
 from psrl.workers.agent_loop.harness.base import HarnessConfig, HarnessRuntime
 
@@ -59,11 +69,16 @@ def test_pack_rethlas_skips_vcs_and_run_state(tmp_path: Path):
     (repo / "results" / "psrl").mkdir(parents=True)
     (repo / "results" / "psrl" / "old.md").write_text("stale\n")
 
-    archive = pack_rethlas(str(repo))
+    wheelhouse = tmp_path / "wheelhouse"
+    wheelhouse.mkdir()
+    (wheelhouse / "fastmcp-2.0.0-py3-none-any.whl").write_bytes(b"wheel")
+
+    archive = pack_rethlas(str(repo), wheelhouse=wheelhouse)
     names = tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz").getnames()
 
     assert "agents/generation/tests/run_example.sh" in names
     assert "agents/generation/mcp/server.py" in names
+    assert "agents/generation/.psrl-wheelhouse/fastmcp-2.0.0-py3-none-any.whl" in names
     assert not any(name.startswith(".git") for name in names)
     assert not any(name.startswith("results") for name in names)
 
@@ -100,6 +115,57 @@ async def test_a_missing_default_url_fails_loudly():
         )
 
 
+async def test_the_workspace_paths_resolve_into_the_staged_checkout():
+    session = FakeSession()
+    await link_workspace_paths(session, "/workspace/rethlas")
+    assert len(session.commands) == 1
+    command = session.commands[0]
+    assert 'link="/workspace/$name"' in command
+    assert 'target="/workspace/rethlas/$name"' in command
+    assert "ln -sfn" in command
+    assert 'mv "$link" "$link.psrl-image"' in command
+    for name in ("results", ".scratch", ".memory"):
+        assert name in command
+
+
+async def test_a_workspace_link_failure_is_reported():
+    class FailingSession(FakeSession):
+        async def exec(self, command: str, timeout_s: float | None = None):
+            class Result:
+                exit_code = 1
+                stdout = ""
+                stderr = "ln: cannot create symbolic link"
+
+            return Result()
+
+    with pytest.raises(RuntimeError, match="Linking the workspace paths"):
+        await link_workspace_paths(FailingSession(), "/workspace/rethlas")
+
+
+def test_the_wheelhouse_command_targets_the_sandbox_interpreter(tmp_path: Path):
+    command = _wheelhouse_download_command(tmp_path / "requirements.txt", tmp_path / "wheels", "3.11")
+    assert command[:3] == [sys.executable, "-m", "pip"]
+    assert "--only-binary=:all:" in command
+    assert command[command.index("--python-version") + 1] == "3.11"
+    assert command[command.index("--abi") + 1] == "cp311"
+    assert command[command.index("--platform") + 1] == "manylinux2014_x86_64"
+
+
+def test_the_wheelhouse_key_tracks_requirements_and_python():
+    base = _wheelhouse_key(b"fastmcp>=2.0.0\n", "3.11")
+    assert base == _wheelhouse_key(b"fastmcp>=2.0.0\n", "3.11")
+    assert base != _wheelhouse_key(b"fastmcp>=3.0.0\n", "3.11")
+    assert base != _wheelhouse_key(b"fastmcp>=2.0.0\n", "3.12")
+
+
+def test_a_missing_requirements_file_skips_the_wheelhouse(tmp_path: Path):
+    repo = tmp_path / "Rethlas"
+    repo.mkdir()
+    cache = tmp_path / "cache"
+    assert build_rethlas_wheelhouse(str(repo), "3.11", cache_root=str(cache)) is None
+    assert not cache.exists()
+
+
 async def test_web_search_is_disabled_on_every_round():
     path = "/workspace/rethlas/agents/generation/tests/run_example.sh"
     session = FakeSession({path: b'--config "web_search=\\"live\\""\n'})
@@ -132,6 +198,8 @@ async def test_the_rethlas_harness_writes_the_mcp_section_and_runner():
     runner = session.files["/root/.psrl-harness/run_rethlas.sh"].decode()
     assert "tests/run_example.sh" in runner
     assert "VERIFY_PROOF_URL" in runner
+    assert ".psrl-wheelhouse" in runner
+    assert "--no-index" in runner
     assert "{{" not in runner
     env = harness.build_env(_runtime())
     assert env["PSRL_RETHLAS_MODEL"] == "/models/test"

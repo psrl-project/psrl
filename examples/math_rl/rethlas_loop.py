@@ -2,13 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
+import fcntl
+import hashlib
 import io
+import logging
+import os
 import re
 import shlex
+import shutil
+import subprocess
+import sys
 import tarfile
+import tempfile
 import time
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -26,6 +35,16 @@ from psrl.workers.agent_loop.harness import HarnessResult, HarnessRuntime, Harne
 
 _DEFAULT_VERIFIER_URL = "http://127.0.0.1:8091/verify"
 _DEFAULT_MCP_TIMEOUT = "timeout_seconds: int = 3600"
+_RETHLAS_REQUIREMENTS = "agents/generation/mcp/requirements.txt"
+_RETHLAS_WHEELHOUSE_PREFIX = "agents/generation/.psrl-wheelhouse"
+_RETHLAS_WHEELHOUSE_CACHE_ENV = "PSRL_RETHLAS_WHEELHOUSE_CACHE"
+_WORKSPACE_ROOT = "/workspace"
+_WORKSPACE_LINK_NAMES = ("results", ".scratch", ".memory")
+_WHEELHOUSE_PLATFORM = "manylinux2014_x86_64"
+_UNSET = object()
+
+psrl_logger = logging.getLogger("psrl.math_rl.rethlas_loop")
+psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
 _EXCLUDED_PARTS = frozenset(
     {
         ".git",
@@ -75,8 +94,13 @@ class RethlasSettings:
         )
 
 
-def pack_rethlas(repo_path: str) -> bytes:
-    """Pack a Rethlas checkout for staging, excluding runtime state and VCS data."""
+def pack_rethlas(repo_path: str, wheelhouse: str | Path | None = None) -> bytes:
+    """Pack a Rethlas checkout for staging, excluding runtime state and VCS data.
+
+    ``wheelhouse`` is an optional directory of wheels for the generation agent's
+    MCP runtime. Its files are added under ``agents/generation/.psrl-wheelhouse``
+    so the sandbox can create the venv without reaching the package index.
+    """
     root = Path(repo_path)
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
@@ -86,7 +110,135 @@ def pack_rethlas(repo_path: str) -> bytes:
                 continue
             if path.is_file():
                 archive.add(path, arcname=str(relative), recursive=False)
+        if wheelhouse is not None:
+            wheel_root = Path(wheelhouse)
+            prefix = PurePosixPath(_RETHLAS_WHEELHOUSE_PREFIX)
+            for path in sorted(wheel_root.rglob("*")):
+                if path.is_file():
+                    archive.add(
+                        path,
+                        arcname=str(prefix / path.relative_to(wheel_root)),
+                        recursive=False,
+                    )
     return buffer.getvalue()
+
+
+def _wheelhouse_key(requirements: bytes, python_version: str) -> str:
+    """Return a stable cache key for one requirements file and interpreter version."""
+    digest = hashlib.sha256(requirements + b"\0" + python_version.encode("utf-8"))
+    return digest.hexdigest()[:16]
+
+
+def _wheelhouse_download_command(
+    requirements: Path, destination: Path, python_version: str
+) -> list[str]:
+    """Build the pip command that downloads wheels for the sandbox interpreter."""
+    abi = f"cp{python_version.replace('.', '')}"
+    return [
+        sys.executable,
+        "-m",
+        "pip",
+        "download",
+        "--only-binary=:all:",
+        "--python-version",
+        python_version,
+        "--implementation",
+        "cp",
+        "--abi",
+        abi,
+        "--platform",
+        _WHEELHOUSE_PLATFORM,
+        "-d",
+        str(destination),
+        "-r",
+        str(requirements),
+    ]
+
+
+def build_rethlas_wheelhouse(
+    repo_path: str,
+    python_version: str,
+    cache_root: str | None = None,
+) -> Path | None:
+    """Download the MCP runtime wheels once per requirements hash.
+
+    The result is a directory the runner can install from with
+    ``--no-index --find-links``. ``None`` means the requirements file is missing
+    or the download failed, in which case the runner keeps its online fallback.
+    """
+    repository = Path(repo_path)
+    requirements = repository / _RETHLAS_REQUIREMENTS
+    if not requirements.is_file():
+        return None
+    key = _wheelhouse_key(requirements.read_bytes(), python_version)
+    root = Path(
+        cache_root
+        or os.environ.get(_RETHLAS_WHEELHOUSE_CACHE_ENV)
+        or Path.home() / ".cache" / "psrl" / "rethlas-wheelhouse"
+    )
+    destination = root / key
+    if (destination / "complete").is_file():
+        return destination
+    root.mkdir(parents=True, exist_ok=True)
+    try:
+        lock = open(root / f"{key}.lock", "w")
+    except OSError as error:
+        psrl_logger.warning(f"Could not open the Rethlas wheelhouse lock in {root}: {error!r}.")
+        return None
+    with lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if (destination / "complete").is_file():
+            return destination
+        temporary = Path(tempfile.mkdtemp(prefix=f".{key}-", dir=root))
+        try:
+            subprocess.run(
+                _wheelhouse_download_command(requirements, temporary, python_version),
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            (temporary / "complete").write_text("ok\n", encoding="utf-8")
+            temporary.rename(destination)
+        except (OSError, subprocess.CalledProcessError) as error:
+            details = getattr(error, "stderr", "") or ""
+            psrl_logger.warning(
+                f"Could not build the Rethlas runtime wheelhouse for python {python_version}: "
+                f"{error!r} {details[-500:]}"
+            )
+            shutil.rmtree(temporary, ignore_errors=True)
+            return None
+    return destination
+
+
+async def link_workspace_paths(session, repo: str) -> None:
+    """Resolve the workspace-root paths named by the Rethlas skills into the checkout.
+
+    The skills write proofs to ``/workspace/results/{problem_id}/`` and keep state
+    under ``/workspace/.scratch`` and ``/workspace/.memory``. The episode stages the
+    checkout at ``/workspace/rethlas``, so without these links a proof written at
+    the documented path lands outside the tree the artifact collector reads. A
+    directory already present at a link path is moved aside once, never deleted.
+    """
+    quoted_repo = shlex.quote(repo)
+    targets = " ".join(f"{quoted_repo}/{name}" for name in _WORKSPACE_LINK_NAMES)
+    names = " ".join(_WORKSPACE_LINK_NAMES)
+    command = (
+        f"mkdir -p {targets} {shlex.quote(_WORKSPACE_ROOT)} && "
+        f"for name in {names}; do "
+        f'link="{_WORKSPACE_ROOT}/$name"; '
+        f'target="{quoted_repo}/$name"; '
+        'if [ -e "$link" ] && [ ! -L "$link" ]; then '
+        'mv "$link" "$link.psrl-image" || exit 1; '
+        "fi; "
+        'ln -sfn "$target" "$link" || exit 1; '
+        "done"
+    )
+    result = await session.exec(command, timeout_s=60)
+    if result.exit_code != 0:
+        raise RuntimeError(
+            f"Linking the workspace paths into {repo} failed with exit {result.exit_code}: "
+            f"{(result.stderr or '')[-500:]}"
+        )
 
 
 def episode_id_for(value: Any) -> str:
@@ -161,6 +313,24 @@ class RethlasHarnessAgentLoop(MathHarnessAgentLoop):
         )
         self.rethlas = RethlasSettings.from_mapping(rethlas)
         self._episode_gateways: dict[str, VerifierGateway] = {}
+        self._wheelhouse: Path | None | object = _UNSET
+        self._archive: bytes | None = None
+
+    async def _staged_wheelhouse(self) -> Path | None:
+        """Build the MCP wheelhouse once per worker and reuse it for every episode."""
+        if self._wheelhouse is _UNSET:
+            self._wheelhouse = await asyncio.to_thread(
+                build_rethlas_wheelhouse,
+                self.rethlas.repo_path,
+                self.rethlas.venv_python,
+            )
+        return self._wheelhouse if isinstance(self._wheelhouse, Path) else None
+
+    def _staged_archive(self, wheelhouse: Path | None) -> bytes:
+        """Pack the checkout and its runtime once, then reuse the archive."""
+        if self._archive is None:
+            self._archive = pack_rethlas(self.rethlas.repo_path, wheelhouse=wheelhouse)
+        return self._archive
 
     def _validate_repo(self) -> None:
         repo_path = self.rethlas.repo_path
@@ -185,7 +355,7 @@ class RethlasHarnessAgentLoop(MathHarnessAgentLoop):
         problem_name = self.rethlas.problem_name
         await session.exec(f"mkdir -p {shlex.quote(state_dir)} {shlex.quote(repo)}", timeout_s=60)
 
-        archive = pack_rethlas(self.rethlas.repo_path)
+        archive = self._staged_archive(await self._staged_wheelhouse())
         archive_path = f"{state_dir}/rethlas.tar.gz"
         await session.write_bytes(archive_path, archive)
         extract = await session.exec(
@@ -202,6 +372,7 @@ class RethlasHarnessAgentLoop(MathHarnessAgentLoop):
             f"mkdir -p {shlex.quote(repo)}/data/psrl {shlex.quote(repo)}/results/psrl/{shlex.quote(problem_name)}",
             timeout_s=60,
         )
+        await link_workspace_paths(session, repo)
         await session.write_bytes(f"{repo}/data/psrl/{problem_name}.md", task.state.problem.encode("utf-8"))
 
         gateway = await get_verifier_gateway(
