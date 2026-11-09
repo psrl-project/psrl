@@ -8,6 +8,7 @@ import tarfile
 from pathlib import Path
 
 import pytest
+from examples.math_rl.agent_loop import MathHarnessTaskState, stage_reference_material
 from examples.math_rl.rethlas_harness import RethlasCommandHarness
 from examples.math_rl.rethlas_loop import (
     _wheelhouse_download_command,
@@ -128,6 +129,35 @@ async def test_the_workspace_paths_resolve_into_the_staged_checkout():
         assert name in command
 
 
+async def test_the_reference_material_is_staged_for_the_prompt():
+    session = FakeSession()
+    state = MathHarnessTaskState(
+        uid="u_1",
+        problem="Prove P.",
+        solution_path="/workspace/solution.md",
+        references=("Bri15 (arXiv:1310.0186)",),
+        literature_review="Brion studies the Picard variety.",
+        literature_reviewed_at="2026-10-22T00:00:00+00:00",
+    )
+    await stage_reference_material(session, "/workspace/rethlas/data/psrl/problem.refs", state)
+    base = "/workspace/rethlas/data/psrl/problem.refs"
+    references = session.files[f"{base}/references.md"].decode()
+    literature = session.files[f"{base}/literature.md"].decode()
+    assert "Bri15 (arXiv:1310.0186)" in references
+    assert "research material" in references
+    assert "Brion studies the Picard variety." in literature
+    assert "last reviewed at 2026-10-22" in literature
+    assert any("mkdir -p" in command for command in session.commands)
+
+
+async def test_a_task_without_references_stages_nothing():
+    session = FakeSession()
+    state = MathHarnessTaskState(uid="u_1", problem="Prove P.", solution_path="/workspace/solution.md")
+    await stage_reference_material(session, "/workspace/rethlas/data/psrl/problem.refs", state)
+    assert session.files == {}
+    assert session.commands == []
+
+
 async def test_a_workspace_link_failure_is_reported():
     class FailingSession(FakeSession):
         async def exec(self, command: str, timeout_s: float | None = None):
@@ -200,6 +230,8 @@ async def test_the_rethlas_harness_writes_the_mcp_section_and_runner():
     assert "VERIFY_PROOF_URL" in runner
     assert ".psrl-wheelhouse" in runner
     assert "--no-index" in runner
+    assert 'PROBLEM_NAME="$(cat "$STATE/problem_name"' in runner
+    assert 'PROBLEM_FILE="data/psrl/${PROBLEM_NAME}.md"' in runner
     assert "{{" not in runner
     env = harness.build_env(_runtime())
     assert env["PSRL_RETHLAS_MODEL"] == "/models/test"

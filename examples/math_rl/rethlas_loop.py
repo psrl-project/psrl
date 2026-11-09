@@ -28,6 +28,7 @@ from examples.math_rl.agent_loop import (
     MathHarnessArtifact,
     MathHarnessTaskState,
     last_assistant_message,
+    stage_reference_material,
 )
 from examples.math_rl.verifier_gateway import VerifierGateway, get_verifier_gateway
 from psrl.sandbox import SandboxPathNotFoundError
@@ -374,6 +375,10 @@ class RethlasHarnessAgentLoop(MathHarnessAgentLoop):
         )
         await link_workspace_paths(session, repo)
         await session.write_bytes(f"{repo}/data/psrl/{problem_name}.md", task.state.problem.encode("utf-8"))
+        await stage_reference_material(
+            session, f"{repo}/data/psrl/{problem_name}.refs", task.state
+        )
+        await session.write_bytes(f"{state_dir}/problem_name", problem_name.encode("utf-8"))
 
         gateway = await get_verifier_gateway(
             self.verifier_config,

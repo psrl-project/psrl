@@ -46,7 +46,8 @@ if [ -s "$STATE/gateway_host" ]; then
 fi
 export VERIFY_PROOF_URL="$(cat "$STATE/verifier_url")"
 export VERIFIER_EPISODE_ID="$(cat "$STATE/episode_id")"
-export PROBLEM_FILE="data/psrl/problem.md"
+PROBLEM_NAME="$(cat "$STATE/problem_name" 2>/dev/null || echo problem)"
+export PROBLEM_FILE="data/psrl/${PROBLEM_NAME}.md"
 export MAX_ITERATIONS="${PSRL_RETHLAS_MAX_ITERATIONS:-3}"
 export LLM_MODEL="${PSRL_RETHLAS_MODEL:?PSRL_RETHLAS_MODEL is not set}"
 export LLM_REASONING_EFFORT="${PSRL_RETHLAS_EFFORT:-max}"
@@ -56,7 +57,7 @@ export MEMORY_ROOT="$REPO/.memory"
 export HOME="${HOME:-/root}"
 export CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 
-mkdir -p "$REPO/results/psrl/problem" "$LOG_ROOT" "$SCRATCH_ROOT" "$MEMORY_ROOT"
+mkdir -p "$REPO/results/psrl/${PROBLEM_NAME}" "$LOG_ROOT" "$SCRATCH_ROOT" "$MEMORY_ROOT"
 
 cd "$REPO/agents/generation"
 WHEELHOUSE="$REPO/agents/generation/.psrl-wheelhouse"
@@ -85,7 +86,7 @@ if bash tests/run_example.sh; then
 else
     rc=$?
     echo "run_example.sh exited $rc"
-    for log in "$LOG_ROOT/psrl/problem/iter"/*.md; do
+    for log in "$LOG_ROOT/psrl/${PROBLEM_NAME}/iter"/*.md; do
         [ -f "$log" ] || continue
         echo "===== $log"
         tail -n 120 "$log"

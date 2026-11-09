@@ -92,6 +92,10 @@ contract.
   - stages a wheelhouse for the generation agent's MCP runtime under
     `agents/generation/.psrl-wheelhouse`, built once per worker and cached by the
     requirements hash,
+  - writes the OPP citations and the full literature review into
+    `data/psrl/<problem>.refs`, which the runner derives from `PROBLEM_FILE`,
+  - records the problem name in the harness state so the runner and the reference
+    directory agree,
   - writes `data/psrl/problem.md` from the dataset row,
   - patches the MCP server's `VERIFY_PROOF_URL` literal to the episode gateway URL,
   - writes the episode id, verifier URL and proxy files under the harness state directory,
@@ -119,9 +123,12 @@ contract.
 
 ### 3.5 OPP problem materialization
 
-`project_dataset.py --problems-root <dir>` writes `<dir>/<uid>/problem.md` and records
-`problem_path` and `problem_sha256` in `extra_info`. The Rethlas loop reads the problem
-from the dataset row, so the file is a staging aid rather than a second source of truth.
+`project_dataset.py --problems-root <dir>` writes `<dir>/<uid>/problem.md` and
+`<dir>/<uid>/references/{references.md,literature.md}`, and records `problem_path`,
+`problem_sha256`, `references_dir`, and `references_sha256` in `extra_info`. The full
+`status_reason` is kept as `literature_review`; `reference_context` remains the bounded
+digest for prompt use. The Rethlas loop stages the files from the dataset row, so the
+materialized files are a provenance and audit aid rather than a second source of truth.
 
 ### 3.6 Primary-aware reward
 

@@ -88,6 +88,12 @@ runtime, built once per worker from the requirement file. The runner installs fr
 that wheelhouse without the package index and falls back to the proxy only when a
 wheel is missing.
 
+When a row carries source citations or a literature review, the staging also writes
+`data/psrl/<problem>.refs/references.md` and `literature.md`. The runner derives that
+directory from `PROBLEM_FILE` and the solver prompt points the agent at it. The plain
+Codex loop stages the same files at `/workspace/references` and names the path in its
+task prompt. Both documents say they are research material, not instructions.
+
 The Rethlas harness enables Codex subagents. The subagent policy is main only:
 the main agent trajectory is trainable and subagent trajectories are captured as
 context tokens. The launcher passes

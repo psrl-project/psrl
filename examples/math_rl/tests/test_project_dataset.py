@@ -17,6 +17,7 @@ from examples.math_rl.project_dataset import (
     project,
     write_parquet,
     write_problem_files,
+    write_reference_files,
 )
 
 
@@ -139,3 +140,44 @@ def test_an_unsafe_uid_cannot_be_materialized(tmp_path):
     rows = [{"extra_info": {"uid": "../escape", "problem": "Prove A."}}]
     with pytest.raises(ValueError, match="not path safe"):
         write_problem_files(rows, tmp_path)
+
+
+def test_normalize_keeps_the_full_literature_review(combined_record):
+    record = dict(combined_record)
+    record["status_reason"] = "x" * 10_000
+    normalized = normalize_record(record)
+    assert normalized["literature_review"] == "x" * 10_000
+    assert len(normalized["reference_context"]) <= 6_000
+
+
+def test_reference_files_are_materialized_and_hashed(tmp_path):
+    rows = [
+        {
+            "extra_info": {
+                "uid": "alpha_1",
+                "references": ["Bri15 (arXiv:1310.0186)"],
+                "literature_review": "# Literature survey\n\nBrion studies the Picard variety.",
+                "literature_reviewed_at": "2026-10-22T00:00:00+00:00",
+            }
+        },
+        {"extra_info": {"uid": "beta_2", "references": [], "literature_review": ""}},
+    ]
+    count = write_reference_files(rows, tmp_path)
+
+    assert count == 1
+    directory = tmp_path / "alpha_1" / "references"
+    references = (directory / "references.md").read_text()
+    literature = (directory / "literature.md").read_text()
+    assert "Bri15 (arXiv:1310.0186)" in references
+    assert "research material" in references
+    assert "Brion studies the Picard variety." in literature
+    assert "last reviewed at 2026-10-22" in literature
+    assert rows[0]["extra_info"]["references_dir"] == str(directory)
+    assert len(rows[0]["extra_info"]["references_sha256"]) == 64
+    assert "references_dir" not in rows[1]["extra_info"]
+
+
+def test_a_row_without_references_or_review_gets_no_directory(tmp_path):
+    rows = [{"extra_info": {"uid": "alpha_1"}}]
+    assert write_reference_files(rows, tmp_path) == 0
+    assert not (tmp_path / "alpha_1").exists()

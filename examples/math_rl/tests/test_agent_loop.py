@@ -57,8 +57,9 @@ def _task(problem: str = "Prove P.") -> HarnessTaskContext[MathHarnessTaskState]
     state = MathHarnessTaskState(
         uid="u_1",
         problem=problem,
-        reference_context="Reference.",
         solution_path=SOLUTION_PATH,
+        references=("Bri15 (arXiv:1310.0186)",),
+        literature_review="Reference.",
     )
     spec = SandboxSpec(source=SandboxSource.image("math-rl-codex:local"))
     return HarnessTaskContext(state=state, prompt="prompt", sandbox_spec=spec)
@@ -99,6 +100,35 @@ def test_last_assistant_message_reads_codex_events():
     assert last_assistant_message(b"not json") is None
 
 
+class _StagingSession:
+    def __init__(self) -> None:
+        self.files: dict[str, bytes] = {}
+        self.commands: list[str] = []
+
+    async def exec(self, command: str, timeout_s: float | None = None):
+        self.commands.append(command)
+
+        class Result:
+            exit_code = 0
+            stdout = ""
+            stderr = ""
+
+        return Result()
+
+    async def write_bytes(self, path: str, data: bytes) -> None:
+        self.files[path] = data
+
+
+def test_the_codex_loop_stages_reference_material():
+    loop = _bare_loop()
+    task = _task()
+    session = _StagingSession()
+    asyncio.run(loop.prepare_harness_sandbox(task, session, {}))
+    assert b"Bri15 (arXiv:1310.0186)" in session.files["/workspace/references/references.md"]
+    assert b"Reference." in session.files["/workspace/references/literature.md"]
+    assert any("/workspace/references" in command for command in session.commands)
+
+
 def test_prepare_harness_task_builds_the_sandbox():
     loop = _bare_loop()
     request = {
@@ -107,11 +137,15 @@ def test_prepare_harness_task_builds_the_sandbox():
             "uid": "u_1",
             "problem": "Prove P.",
             "reference_context": "Reference.",
+            "references": ["Bri15 (arXiv:1310.0186)"],
         },
     }
     task = asyncio.run(loop.prepare_harness_task(request))
     assert task.state.problem == "Prove P."
     assert "Prove P." in task.prompt
+    assert task.state.references == ("Bri15 (arXiv:1310.0186)",)
+    assert "Reference material" in task.prompt
+    assert "/workspace/references" in task.prompt
     assert task.sandbox_spec.workdir == "/workspace"
     assert task.sandbox_spec.env["CODEX_HOME"] == "/root/.codex"
     assert task.sandbox_spec.source.reference == "math-rl-codex:local"
