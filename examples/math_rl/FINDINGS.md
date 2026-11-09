@@ -188,3 +188,21 @@ two-turn training episodes that the model actually produced.
 
 Reward stays zero in both runs because the episodes write no blueprint, so the
 comparison is about trajectory storage rather than model quality.
+
+
+## OPP reference material
+
+The OPP record carries paper-level references and a `status_reason` of roughly 15k to
+28k characters. The projection used to cap that review at 6k characters and no loop
+staged it, so the solver saw only the problem statement.
+
+The projection now keeps the full review as `literature_review` and writes
+`references.md` and `literature.md` under `<uid>/references`. The Rethlas loop stages
+the same files at `data/<problem>.refs`, which its runner derives from `PROBLEM_FILE`,
+and the plain Codex loop stages them at `/workspace/references`.
+
+In the verification run the agent listed the reference directory, read both files, and
+summarized the literature status before drafting. That episode reached four turns, and
+TITO stored its turns with no merge or prefix failure. Reading the review also filled
+the remaining 20k context, so the window size is the next limit on how far an episode
+can use the material.
