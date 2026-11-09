@@ -25,6 +25,7 @@ from psrl.sandbox import SandboxPathNotFoundError
 from psrl.workers.agent_loop.harness import HarnessResult, HarnessRuntime, HarnessTaskContext
 
 _DEFAULT_VERIFIER_URL = "http://127.0.0.1:8091/verify"
+_DEFAULT_MCP_TIMEOUT = "timeout_seconds: int = 3600"
 _EXCLUDED_PARTS = frozenset(
     {
         ".git",
@@ -107,8 +108,13 @@ async def patch_web_search(session, repo: str) -> None:
         await session.write_bytes(path, updated.encode("utf-8"))
 
 
-async def patch_mcp_verifier_url(session, repo: str, url: str) -> None:
-    """Point the generation agent's verification tool at this episode's gateway."""
+async def patch_mcp_verifier_url(session, repo: str, url: str, timeout_s: str | int) -> None:
+    """Point the generation agent's verification tool at this episode's gateway.
+
+    The tool's own request timeout is widened to the harness tool timeout. A slow
+    deployment must not look like a tool failure to the agent while the gateway is
+    still waiting on the same proof.
+    """
     path = f"{repo}/agents/generation/mcp/server.py"
     try:
         raw = await session.read_bytes(path)
@@ -120,7 +126,14 @@ async def patch_mcp_verifier_url(session, repo: str, url: str) -> None:
             "The staged Rethlas MCP server no longer carries the expected local verifier URL; "
             "the adapter cannot redirect it to the gateway."
         )
-    await session.write_bytes(path, text.replace(_DEFAULT_VERIFIER_URL, url, 1).encode("utf-8"))
+    if _DEFAULT_MCP_TIMEOUT not in text:
+        raise RuntimeError(
+            "The staged Rethlas MCP server no longer carries the expected verification timeout; "
+            "the adapter cannot widen it to the episode budget."
+        )
+    text = text.replace(_DEFAULT_VERIFIER_URL, url, 1)
+    text = text.replace(_DEFAULT_MCP_TIMEOUT, f"timeout_seconds: int = {int(timeout_s)}", 1)
+    await session.write_bytes(path, text.encode("utf-8"))
 
 
 class RethlasHarnessAgentLoop(MathHarnessAgentLoop):
@@ -208,7 +221,10 @@ class RethlasHarnessAgentLoop(MathHarnessAgentLoop):
         if self.rethlas.sandbox_proxy:
             await session.write_bytes(f"{state_dir}/proxy", self.rethlas.sandbox_proxy.encode("utf-8"))
 
-        await patch_mcp_verifier_url(session, repo, url)
+        tool_timeout = self.harness_config.env.get(
+            examples.math_rl.rethlas_harness.RETHLAS_TOOL_TIMEOUT_ENV
+        ) or "3600"
+        await patch_mcp_verifier_url(session, repo, url, tool_timeout)
         await patch_web_search(session, repo)
         timing["rethlas_stage_s"] = time.perf_counter() - started
 

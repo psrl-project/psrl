@@ -75,17 +75,29 @@ def test_episode_ids_are_url_safe():
 
 async def test_the_mcp_server_is_pointed_at_the_gateway():
     path = "/workspace/rethlas/agents/generation/mcp/server.py"
-    session = FakeSession({path: b'VERIFY_PROOF_URL = "http://127.0.0.1:8091/verify"\n'})
-    await patch_mcp_verifier_url(session, "/workspace/rethlas", "http://worker:9000/verify/ep-1")
+    session = FakeSession(
+        {
+            path: (
+                b'VERIFY_PROOF_URL = "http://127.0.0.1:8091/verify"\n'
+                b"def verify_proof_service(statement: str, proof: str, timeout_seconds: int = 3600):\n"
+            )
+        }
+    )
+    await patch_mcp_verifier_url(
+        session, "/workspace/rethlas", "http://worker:9000/verify/ep-1", "11100"
+    )
     assert b"http://worker:9000/verify/ep-1" in session.files[path]
     assert b"8091" not in session.files[path]
+    assert b"timeout_seconds: int = 11100" in session.files[path]
 
 
 async def test_a_missing_default_url_fails_loudly():
     path = "/workspace/rethlas/agents/generation/mcp/server.py"
     session = FakeSession({path: b"VERIFY_PROOF_URL = 'moved'\n"})
     with pytest.raises(RuntimeError, match="expected local verifier URL"):
-        await patch_mcp_verifier_url(session, "/workspace/rethlas", "http://worker:9000/verify/ep-1")
+        await patch_mcp_verifier_url(
+            session, "/workspace/rethlas", "http://worker:9000/verify/ep-1", "11100"
+        )
 
 
 async def test_web_search_is_disabled_on_every_round():
