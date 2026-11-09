@@ -157,6 +157,11 @@ group is dropped and refilled rather than trained.
   messages are captured as tokens for the main trajectory and carry no loss. Set
   `TRAJECTORY_TIMEOUT` to cover at least one verification call plus drafting time,
   and raise `MATH_RL_RETHLAS_MAX_CALLS` only when the episode budget allows several.
+- **The zero-variance filter stalls a cold model.** `dynamic_sampling_filter` drops a
+  group when every rollout scores the same. An untrained model on a hard problem makes
+  every group all zero, so the step refills forever. Set
+  `GROUP_POST_PROCESS_ENABLE=false` for an integration smoke where zero reward is
+  expected, and keep the filter on for real training.
 - **The version must match.** The service serves one harness version per process and
   rejects a request that names another. Pin both sides to the same value.
 - **The image is node local.** Building it on the driver does not distribute it. Build

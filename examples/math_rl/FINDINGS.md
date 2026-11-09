@@ -128,3 +128,42 @@ The reward is zero because a one-iteration episode of an untrained model did not
 grading failure count stays at zero and the gold ceiling stays at 1.0, so the artifact,
 finalizer and verdict mapping all ran. The generation loop itself is visible in the TITO
 trajectory dumps under the run's trajectory directory.
+
+
+## Real verifier integration
+
+Preflight against the public deployment with `MATH_RL_VERIFIER_MODEL=glm-5.3`,
+`MATH_RL_VERIFIER_VERSION=V3`, `MATH_RL_VERIFIER_EFFORT=max`, and the stream
+transport:
+
+| Case | Verdict | Score | Wall time |
+| --- | ---: | ---: | ---: |
+| Correct synthetic proof | 7 | 1.00 | 277 s |
+| Broken synthetic proof | 0 | 0.00 | 300 s |
+
+The finalizer path was checked twice. Against a local mock serving V3, a synthetic
+artifact is graded with verdict 7 and an empty artifact is recorded as
+`missing_solution` with `verifier_graded` true. Against the real deployment, one
+synthetic correct artifact also returned verdict 7, score 1.00, in 1067 s. That is
+the path an episode takes when it writes a proof.
+
+One Rethlas training step ran with the real deployment configured, one iteration
+per episode, subagents enabled, and the group filter disabled with
+`GROUP_POST_PROCESS_ENABLE=false` so that a group with no reward variance still
+completes.
+
+| Metric | Value |
+| --- | ---: |
+| Training steps completed | 1 |
+| Wall time for the step | 12 minutes 8 seconds |
+| Validation reward mean@1 | 0.0 |
+| Validation accuracy mean@1 | 0.0 |
+| Grading failures | 0.0 |
+
+The episodes ended without writing `blueprint.md` and the step finished faster than
+one external verification call, so the steps recorded `missing_solution` and did
+not reach the deployment during training. The run is an integration check of the
+configuration, the gateway, the artifact path, and the reward plumbing. The
+deployment is also slow and variable: measured calls took 277 s and 1067 s, so a
+training run has to derive the tool and grading timeouts from the stage timeout,
+which the launcher now does.
