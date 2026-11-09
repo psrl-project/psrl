@@ -167,3 +167,24 @@ configuration, the gateway, the artifact path, and the reward plumbing. The
 deployment is also slow and variable: measured calls took 277 s and 1067 s, so a
 training run has to derive the tool and grading timeouts from the stage timeout,
 which the launcher now does.
+
+
+## Qwen3.8 TITO turn storage
+
+The stock Qwen3.8 template raises when a merged segment is rendered against a
+system-only dummy base. The TITO adapter selection used the model name and
+classified Qwen3.8 as a position-independent Qwen3 model, so every turn after
+the first fell back to a full retokenize and the commit-time prefix validation
+rejected that node. A training session stored only its first assistant turn.
+
+The adapter now follows the tokenizer's own template detection. The comparison
+below uses the same loop, data slice, and verifier settings, and counts the
+two-turn training episodes that the model actually produced.
+
+| Run | Two-turn training episodes | Stored nodes per episode | Merge failures | Prefix failures |
+| --- | ---: | ---: | ---: | ---: |
+| Before the fix | 4 | 1 | 4 | 4 |
+| After the fix | 4 | 2 | 0 | 0 |
+
+Reward stays zero in both runs because the episodes write no blueprint, so the
+comparison is about trajectory storage rather than model quality.
