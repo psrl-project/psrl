@@ -173,6 +173,11 @@ group is dropped and refilled rather than trained.
   messages are captured as tokens for the main trajectory and carry no loss. Set
   `TRAJECTORY_TIMEOUT` to cover at least one verification call plus drafting time,
   and raise `MATH_RL_RETHLAS_MAX_CALLS` only when the episode budget allows several.
+- **A 64k window changes the training layout.** The rollout side runs at 64k, but a
+  TP4/PP2/CP1 actor update leaves the CUDA context in a failed state, and the next
+  optimizer offload or checkpoint save reports an invalid argument. TP2/PP2/CP2
+  trains a 56k sequence; its remaining limit is memory for the logprob engine and
+  the checkpoint. `TRAIN_TP`, `TRAIN_PP`, `TRAIN_CP`, and `OFFLOAD` are knobs.
 - **The first Rethlas episode builds the runtime wheelhouse.** It downloads the MCP
   requirements once per worker and caches them by requirements hash. Set
   `PSRL_RETHLAS_WHEELHOUSE_CACHE` to move the cache. Later episodes stage the
