@@ -147,6 +147,9 @@ group is dropped and refilled rather than trained.
 ## What the recipe fixes
 
 - **Batch.** 32 prompts per step, 8 rollouts per prompt, 32 prompts per optimizer update.
+- **Sequence window.** 16,384 prompt and 49,152 response tokens, so the harness runs
+  with a 65,536 token window and compacts at 75%. Override with `MAX_PROMPT_LENGTH`
+  and `MAX_RESPONSE_LENGTH`.
 - **Algorithm.** GRPO with `group_baseline_valid_only`, plus score centering
   (`score_centering`, `bypass_mode`, `loss_type=reinforce`) and TIS at 2.0.
 - **Zero-variance groups.** `dynamic_sampling_filter` drops and refills groups with no

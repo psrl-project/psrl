@@ -172,12 +172,12 @@ chmod 600 "${RESOLVED_AGENT_CONFIG}"
 AGENT_CONFIG=${RESOLVED_AGENT_CONFIG}
 
 # --- Cluster layout: 2 nodes, 8 GPUs each ---
-GEN_TP=2
-GEN_PP=1
-VAL_TP=2
-TRAIN_TP=4
-TRAIN_PP=2
-TRAIN_CP=1
+GEN_TP=${GEN_TP:-2}
+GEN_PP=${GEN_PP:-1}
+VAL_TP=${VAL_TP:-2}
+TRAIN_TP=${TRAIN_TP:-4}
+TRAIN_PP=${TRAIN_PP:-2}
+TRAIN_CP=${TRAIN_CP:-1}
 
 NNODES=2
 NGPUS_PER_NODE=8
@@ -197,8 +197,8 @@ train_prompt_bsz=${TRAIN_BSZ:-32}
 n_resp_per_prompt=${ROLLOUT_N:-8}
 n_resp_per_prompt_val=1
 train_prompt_mini_bsz=${TRAIN_MINI_BSZ:-${train_prompt_bsz}}
-max_prompt_length=4096
-max_response_length=16384
+max_prompt_length=${MAX_PROMPT_LENGTH:-16384}
+max_response_length=${MAX_RESPONSE_LENGTH:-49152}
 packing_length=$((max_prompt_length + max_response_length))
 max_turns=60
 trajectory_timeout=${TRAJECTORY_TIMEOUT:-3600}
@@ -224,7 +224,7 @@ val_top_p=0.7
 # --- Training hyperparameters ---
 actor_lr=1e-6
 lr_warmup_steps=${LR_WARMUP_STEPS:-10}
-offload=True
+offload=${OFFLOAD:-True}
 
 PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo \
     --config-path="${PSRL_PATH}/psrl/trainer/config" \
