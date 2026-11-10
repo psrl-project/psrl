@@ -10,6 +10,8 @@ from psrl.workers.gen.smg_adapter import (
     is_cache_aware_method,
 )
 
+pytestmark = pytest.mark.cpu_test
+
 
 def _make_config(**routing_strategy_overrides):
     routing_strategy = {
@@ -98,14 +100,6 @@ def test_cache_aware_cfg_reads_nested_block():
 
 
 @pytest.mark.unit
-def test_cache_aware_cfg_legacy_top_level_fallback():
-    config = _make_config(cache_threshold=0.42, gpu_overlap_weight=1.5, lmcache_overlap_weight=0.7)
-    assert _cache_aware_cfg(config, "cache_threshold") == 0.42
-    assert _cache_aware_cfg(config, "gpu_overlap_weight") == 1.5
-    assert _cache_aware_cfg(config, "lmcache_overlap_weight") == 0.7
-
-
-@pytest.mark.unit
 def test_build_rollout_router_args_cache_aware_nested():
     config = _make_config(
         method="cache_aware",
@@ -163,6 +157,8 @@ def test_worker_registration_payload_includes_worker_id():
     payload = build_worker_registration_payload(
         url="grpc://127.0.0.1:30000",
         model_id="my-model",
+        role="rollout",
+        fuse_rollout_with_validate=False,
         max_model_len=4096,
         dp_size=1,
         tp_size=1,
@@ -177,12 +173,53 @@ def test_worker_registration_payload_omits_worker_id_when_absent():
     payload = build_worker_registration_payload(
         url="grpc://127.0.0.1:30000",
         model_id="my-model",
+        role="rollout",
+        fuse_rollout_with_validate=False,
         max_model_len=4096,
         dp_size=1,
         tp_size=1,
         pp_size=1,
     )
     assert "id" not in payload
+
+
+@pytest.mark.parametrize(
+    ("role", "fuse", "scope"),
+    [
+        ("rollout", False, "train"),
+        ("validate", False, "validate"),
+        ("rollout", True, "all"),
+        ("validate", True, "all"),
+        ("reward_model_qwen", False, "train"),
+        ("reward_model_qwen", True, "train"),
+    ],
+)
+def test_worker_registration_declares_request_eligibility(role, fuse, scope):
+    payload = build_worker_registration_payload(
+        url="grpc://localhost:30000",
+        model_id="model",
+        role=role,
+        fuse_rollout_with_validate=fuse,
+        max_model_len=4096,
+        dp_size=1,
+        tp_size=1,
+        pp_size=1,
+    )
+    assert payload["labels"]["psrl_request_scope"] == scope, "Registration must declare request eligibility."
+
+
+def test_worker_registration_rejects_unknown_role():
+    with pytest.raises(ValueError, match="Unsupported inference worker role"):
+        build_worker_registration_payload(
+            url="grpc://localhost:30000",
+            model_id="model",
+            role="unknown",
+            fuse_rollout_with_validate=False,
+            max_model_len=4096,
+            dp_size=1,
+            tp_size=1,
+            pp_size=1,
+        )
 
 
 @pytest.mark.unit

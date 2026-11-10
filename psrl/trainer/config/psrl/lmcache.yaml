@@ -62,7 +62,7 @@ enable_p2p: False
 # Use `tcp` when NIXL or UCX is unavailable.
 p2p_transfer_channel: nixl
 
-# Base HTTP port. `RolloutCoordinator` selects an available port from this value.
+# Base HTTP port. `GlobalCoordinator` selects an available port from this value.
 controller_base_port: 9000
 
 # Health timeout includes slow imports and cluster CPU or filesystem contention.

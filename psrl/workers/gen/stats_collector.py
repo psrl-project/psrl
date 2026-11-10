@@ -2,7 +2,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Final
 
 import numpy as np
@@ -28,12 +28,13 @@ class EngineStats:
     @staticmethod
     def get_default_snapshot() -> dict:
         return {
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": None,
             "total_elapsed_time": 0.0,
             "elapsed_time_since_last_record": 0.0,
             "scheduler_stats": {
                 "req_id_to_prompt_token_num": {},
                 "req_id_to_response_token_num": {},
+                "req_id_in_waiting": [],
                 "num_running_reqs": 0,
                 "num_waiting_reqs": 0,
                 "kv_cache_usage": 0.0,
@@ -216,6 +217,7 @@ class DPLBStatCollector(StatLoggerBase):
                 "req_id_to_response_token_num": scheduler_stats.req_id_to_response_token_num
                 if scheduler_stats.req_id_to_response_token_num
                 else {},
+                "req_id_in_waiting": list(scheduler_stats.req_id_in_waiting),
                 "num_running_reqs": scheduler_stats.num_running_reqs,
                 "num_waiting_reqs": scheduler_stats.num_waiting_reqs,
                 "kv_cache_usage": scheduler_stats.kv_cache_usage,
@@ -224,13 +226,14 @@ class DPLBStatCollector(StatLoggerBase):
             scheduler_stats = {
                 "req_id_to_prompt_token_num": {},
                 "req_id_to_response_token_num": {},
+                "req_id_in_waiting": [],
                 "num_running_reqs": 0,
                 "num_waiting_reqs": 0,
                 "kv_cache_usage": 0.0,
             }
 
         snapshot = {
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "total_elapsed_time": curr_time - self.start_time,
             "elapsed_time_since_last_record": curr_time - self.last_record_time,
             "scheduler_stats": scheduler_stats,

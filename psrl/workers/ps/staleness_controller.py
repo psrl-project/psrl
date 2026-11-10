@@ -1,25 +1,13 @@
 import enum
-import logging
 from dataclasses import dataclass
 from functools import wraps
 
 import numpy as np
 
-# NOTE(lhy): Standard logging keeps this module importable without heavy PSRL dependencies
-# while integrating with the runtime root logger.
-try:
-    from psrl.utils.logger import get_ps_logger as _get_ps_logger
+from psrl.utils.logger import get_ps_logger
+from psrl.workers.gen.utils import RolloutInstanceId
 
-    psrl_logger = _get_ps_logger()
-except Exception:
-    psrl_logger = logging.getLogger("psrl.workers.ps.staleness_controller")
-
-# NOTE(lhy): Define the lightweight `RolloutInstanceId` locally to avoid importing Ray
-# and vLLM through the generation package.
-try:
-    from psrl.workers.gen.utils import RolloutInstanceId
-except Exception:
-    RolloutInstanceId = tuple  # type: ignore[assignment,misc]
+psrl_logger = get_ps_logger()
 
 
 def _state_locked(func):
@@ -560,6 +548,8 @@ class StalenessInventory:
         """
         staleness = self.staleness if self.staleness is not None else 0
         if entry_info.prompt_id in self.data_tracker:
+            if self.is_validate:
+                return True
             buffer_id, _ = self.data_tracker[entry_info.prompt_id]
             if model_version + staleness >= buffer_id:
                 return True
@@ -586,6 +576,10 @@ class StalenessInventory:
                 return False
         self.ensure_buffer_exists(model_version + staleness)
         pending_buffers = self.get_buffers_with_capacity()
+        if self.is_validate:
+            return any(buffer_id not in self._ready_for_delete_buffer_ids for buffer_id in pending_buffers)
+
+        # Get all PENDING buffers within the staleness limit.
         candidate_ids = [
             bid
             for bid in pending_buffers

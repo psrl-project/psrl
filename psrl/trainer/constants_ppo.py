@@ -17,27 +17,29 @@ PPO_RAY_RUNTIME_ENV = {
     },
 }
 
+_RAY_ENVIRONMENT_KEYS = (
+    "PYTHONPATH",
+    "PYTHONPYCACHEPREFIX",
+    "LD_LIBRARY_PATH",
+    "NIXL_PLUGIN_DIR",
+)
+
 
 def get_ppo_ray_runtime_env():
     """
-    A filter function to return the PPO Ray runtime environment.
-    To avoid repeat of some environment variables that are already set.
+    Return worker settings with explicit driver overrides.
     """
     working_dir = (
         json.loads(os.environ.get(RAY_JOB_CONFIG_JSON_ENV_VAR, "{}")).get("runtime_env", {}).get("working_dir", None)
     )
 
     runtime_env = {
-        "env_vars": PPO_RAY_RUNTIME_ENV["env_vars"].copy(),
+        "env_vars": {key: os.environ.get(key, value) for key, value in PPO_RAY_RUNTIME_ENV["env_vars"].items()},
         **({"working_dir": None} if working_dir is None else {}),
     }
-    for key in list(runtime_env["env_vars"].keys()):
-        if os.environ.get(key) is not None:
-            runtime_env["env_vars"].pop(key, None)
 
-    for key in ("PYTHONPATH", "PYTHONPYCACHEPREFIX"):
-        val = os.environ.get(key)
-        if val:
+    for key, val in os.environ.items():
+        if val and (key in _RAY_ENVIRONMENT_KEYS or key.startswith("UCX_")):
             runtime_env["env_vars"][key] = val
 
     return runtime_env

@@ -28,7 +28,7 @@ class TestRequestLifecycleHappyPath:
         assert tracker.get_request_status(1) == [PSRL_RequestStatus.ROLLOUT_ROUTING]
 
     def test_full_happy_path_to_completed(self, tracker):
-        """Walk PENDING → ROLLOUT_ROUTING → DISPATCHED → RUNNING → COMPLETED → REWARD → COMPLETED."""
+        """Walk PENDING to COMPLETED through rollout and reward stages."""
         tracker.add_request(100)
         for status in [
             PSRL_RequestStatus.ROLLOUT_ROUTING,
@@ -41,6 +41,33 @@ class TestRequestLifecycleHappyPath:
         ]:
             tracker.update_request_status(100, status)
         assert tracker.get_request_status(100) == [PSRL_RequestStatus.COMPLETED]
+
+    def test_completed_is_not_regressed_by_reward_completed(self, tracker):
+        tracker.add_request(200)
+        tracker.update_request_status(200, PSRL_RequestStatus.COMPLETED)
+        result = tracker.update_request_status(200, PSRL_RequestStatus.REWARD_COMPLETED)
+        assert result is True
+        assert tracker.get_request_status(200) == [PSRL_RequestStatus.COMPLETED]
+
+    def test_remove_train_ready_accepts_completed(self, tracker):
+        tracker.add_request(201)
+        tracker.update_request_status(201, PSRL_RequestStatus.COMPLETED)
+        tracker.remove_train_ready_request(201)
+        with pytest.raises(KeyError):
+            tracker.get_request_status(201)
+
+    def test_remove_train_ready_accepts_reward_completed(self, tracker):
+        tracker.add_request(202)
+        tracker.update_request_status(202, PSRL_RequestStatus.REWARD_COMPLETED)
+        tracker.remove_train_ready_request(202)
+        with pytest.raises(KeyError):
+            tracker.get_request_status(202)
+
+    def test_remove_train_ready_rejects_reward_running(self, tracker):
+        tracker.add_request(203)
+        tracker.update_request_status(203, PSRL_RequestStatus.REWARD_RUNNING)
+        with pytest.raises(AssertionError, match="not train ready"):
+            tracker.remove_train_ready_request(203)
 
     def test_generic_running_state_reachable(self, tracker):
         tracker.add_request(2)

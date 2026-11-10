@@ -7,6 +7,8 @@ from fastapi.responses import Response as FastAPIResponse
 from httpx import ASGITransport
 from psrl.workers.gen.session_router import SessionRouter
 
+pytestmark = pytest.mark.cpu_test
+
 # Mock SMG server
 mock_smg = FastAPI()
 captured: dict = {}

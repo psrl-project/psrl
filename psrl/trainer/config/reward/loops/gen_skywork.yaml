@@ -1,0 +1,52 @@
+defaults:
+  - /model@model: hf_model
+  - /rollout@rollout: psrl_rollout
+  - _self_
+
+reward_loop:
+  source: register
+  name: gen
+reward_loop_type: gen
+reward_fn:
+  - path: null
+    name: skywork
+reward_model_name: Skywork-Reward-V2-Qwen3-8B
+
+enable_resource_pool: True
+n_gpus_per_node: 1
+num_replicas: 4
+nnodes: 1
+rollout_ngpus_per_instance_per_node: 1
+rollout_nnodes_per_instance: 1
+# Null leaves concurrent requests on one reward instance uncapped.
+max_concurrent_requests_per_instance: null
+
+model:
+  path: ${oc.env:PSRL_WORKSPACE,/tmp}/models/Skywork-Reward-V2-Qwen3-8B
+  external_lib: ${oc.select:train_actor_rollout_ref.model.external_lib,null}
+  trust_remote_code: False
+
+rollout:
+  gpu_memory_utilization: 0.5
+  enforce_eager: true
+  tensor_model_parallel_size: 1
+  max_num_batched_tokens: 20480
+  max_num_seqs: 1024
+  load_format: auto
+  enable_chunked_prefill: false
+  enable_prefix_caching: false
+  # One-shot teacher scoring does not reuse KV cache.
+  disable_kv_cache: true
+  disable_log_stats: true
+  skip_tokenizer_init: false
+  n: 1
+  prompt_length: 8192
+  response_length: 8192
+  max_model_len: 16384
+  runner: pooling
+  task: classify
+
+pooling_config:
+  task: classify
+  use_activation: false
+  normalize: false

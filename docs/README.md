@@ -123,6 +123,15 @@ Put figures in `docs/_static/img/` and reference them with a root-relative path:
 Prefer SVG. To convert a PDF figure, use `pdf2svg in.pdf out.svg` or
 `inkscape in.pdf --export-filename=out.svg`.
 
+The resource elasticity overview keeps its PDF source at
+`docs/_static/img/resource_elasticity_overview.pdf`. Regenerate its SVG from the
+repository root with:
+
+```bash
+python -m pip install PyMuPDF
+python examples/elastic/elastic_analysis/render_elastic_overview.py
+```
+
 The repository `.gitignore` excludes `**/*.png` as a runtime artifact, with an
 explicit exception for `docs/_static/img/*.png`. Keep new raster figures in that
 directory so they are not silently dropped from commits.

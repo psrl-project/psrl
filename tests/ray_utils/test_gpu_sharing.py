@@ -8,6 +8,7 @@ import pytest
 import ray
 
 
+@pytest.mark.gpu
 def test_gpu_sharing(ray_cluster):
     # Initialize the cluster before checking its GPU resources.
     if ray.cluster_resources().get("GPU", 0) < 1:

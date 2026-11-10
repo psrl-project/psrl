@@ -4,12 +4,12 @@ from tensordict import TensorDict
 from verl.utils import tensordict_utils as tu
 
 from psrl.utils.reward_score import default_compute_score_async
-from psrl.workers.reward.reward_loop.base import RewardManagerBase
+from psrl.workers.reward.reward_loop.base import RewardLoopBase
 from psrl.workers.reward.reward_loop.registry import register
 
 
 @register("dapo")
-class DAPORewardManager(RewardManagerBase):
+class DAPORewardLoop(RewardLoopBase):
     """Reward loop for DAPO."""
 
     def __init__(
@@ -23,6 +23,7 @@ class DAPORewardManager(RewardManagerBase):
         self.compute_score = compute_score or default_compute_score_async
         self.is_async_reward_score = inspect.iscoroutinefunction(self.compute_score)
 
+        # DAPO Reward Config
         overlong_buffer_cfg = reward_kwargs.get("overlong_buffer_cfg", None)
         self.overlong_buffer_cfg = overlong_buffer_cfg
         self.max_resp_len = reward_kwargs.get("max_resp_len", None)
@@ -89,6 +90,7 @@ class DAPORewardManager(RewardManagerBase):
                 reward_extra_info[key] = value
         else:
             score = result
+            reward_extra_info["score"] = score
             reward_extra_info["acc"] = score
 
         reward = score

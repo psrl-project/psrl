@@ -460,10 +460,13 @@ class PSManager(RequestStatusTracker):
             if staleness_inventory.can_reserve_data_without_new_reserve_entry(entry_info, model_version):
                 indicators.append(float("-inf"))
             elif staleness_inventory.can_reserve_data(entry_info, model_version):
-                max_pending_buffer_id = staleness_inventory.get_max_pending_buffer_id(
-                    model_version + self.psrl_config.staleness
-                )
-                indicators.append(-max_pending_buffer_id)
+                if is_validate:
+                    indicators.append(0.0)
+                else:
+                    max_pending_buffer_id = staleness_inventory.get_max_pending_buffer_id(
+                        model_version + self.psrl_config.staleness
+                    )
+                    indicators.append(-max_pending_buffer_id)
             else:
                 indicators.append(float("inf"))
         return indicators
@@ -922,14 +925,6 @@ class PSManager(RequestStatusTracker):
         self.nixl_meta_server.notify_all_client_temp_mappings()
         psrl_logger.info("NIXL protocol complete.")
 
-    def nixl_wait_for_update_infos(self, info_num: int):
-        """Wait for NIXL clients to send updated infos to the meta server.
-
-        Args:
-            info_num (int): Number of client infos to wait for
-        """
-        self.nixl_meta_server.wait_for_update_infos(info_num)
-
     def shutdown_nixl_server(self):
         """Shutdown NIXL meta server cleanly.
 
@@ -939,15 +934,6 @@ class PSManager(RequestStatusTracker):
             return
         self.nixl_meta_server.shutdown()
         self.nixl_meta_server = None
-
-    def nixl_broadcast_update_client_infos(self, dst_agent_names: list[str], update_client_names: list[str]):
-        """Broadcast updated client infos to specified NIXL clients.
-
-        Args:
-            dst_agent_names (List[str]): List of destination agent names to receive the updates
-            update_client_names (List[str]): List of client names whose infos are updated
-        """
-        self.nixl_meta_server.broadcast_update_client_infos(dst_agent_names, update_client_names)
 
     def bind_ps_worker_group(self, ps_worker_group: PSWorkerGroup):
         """Bind the PS worker group to the PSManager.
@@ -1150,7 +1136,10 @@ class PSManager(RequestStatusTracker):
         self.model_store = ModelStore(version_tag=version_tag, model_state_dict=model_state_dict)
         if version_tag > 0:
             self.maybe_delete_buffer(version_tag - 1)
-        self.rollout_coordinator.set_ps_model_version.remote(version_tag)
+        if version_tag == 0:
+            self.rollout_coordinator.init_ps_model_version.remote(0)
+        else:
+            self.rollout_coordinator.set_ps_model_version.remote(version_tag)
         log_single_event(
             f"Model with version tag {version_tag} pushed successfully",
             psrl_logger,
@@ -1177,7 +1166,10 @@ class PSManager(RequestStatusTracker):
         self.model_store = ModelStore(version_tag=version_tag, model_state_dict_ref=model_state_dict_ref_list[0])
         if version_tag > 0:
             self.maybe_delete_buffer(version_tag - 1)
-        self.rollout_coordinator.set_ps_model_version.remote(version_tag)
+        if version_tag == 0:
+            self.rollout_coordinator.init_ps_model_version.remote(0)
+        else:
+            self.rollout_coordinator.set_ps_model_version.remote(version_tag)
         log_single_event(
             f"Model with version tag {version_tag} (ref) pushed successfully",
             psrl_logger,

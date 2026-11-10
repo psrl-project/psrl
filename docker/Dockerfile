@@ -236,6 +236,8 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
 # the same source-first patch pattern used by vime and fails during build when
 # a revision drifts away from its PSRL patch.
 COPY docker/patch/ ${PSRL_PATCH_DIR}/
+COPY patch/vllm/v0.22.0.patch ${PSRL_PATCH_DIR}/vllm.patch
+COPY patch/verl/e5ca4acb.patch ${PSRL_PATCH_DIR}/verl.patch
 
 # UCX and NIXL provide the PSRL model-transfer data plane. NIXL v1.2.0 follows
 # the upstream CUDA 13 source-packaging flow without the legacy PSRL patch.

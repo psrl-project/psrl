@@ -1,7 +1,10 @@
 """Tests for the sciaccel_rl terminus-2 subclass with a tighter observation cap."""
 
+import pytest
 from examples.sciaccel_rl.agent import HARBOR_DEFAULT_MAX_OBS_BYTES, TruncatingTerminus2
 from harbor.agents.terminus_2 import Terminus2
+
+pytestmark = pytest.mark.cpu_test
 
 
 def _agent(max_bytes: int) -> TruncatingTerminus2:

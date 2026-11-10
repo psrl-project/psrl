@@ -15,8 +15,10 @@ from verl.utils.device import auto_set_device, is_cuda_available
 
 from psrl.trainer.constants_ppo import get_ppo_ray_runtime_env
 from psrl.trainer.ppo.utils import PSRL_Role
-from psrl.utils.config import validate_config
-from psrl.workers.config.reward_model import resolve_active_managers
+from psrl.utils.config.deployment_mode import expand_ngpus_per_node, resolve_deployment_mode
+from psrl.utils.config.validation import validate_config
+from psrl.workers.config.reward_model import resolve_active_loops
+from psrl.workers.elastic.pool_layout import ReplicaPlacement, elastic_pool_specs, plan_idle_replicas, plan_replicas
 
 psrl_logger = logging.getLogger(__file__)
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
@@ -234,22 +236,27 @@ class TaskRunner:
         train_pool_id = "train_pool"
         train_bundle_resource_num = 0.9 if config.psrl.colocate_validate_and_train else 1.0
         resource_pool_spec = {
-            train_pool_id: [deployment_config.train_ngpus_per_node] * deployment_config.train_nnodes,
+            train_pool_id: expand_ngpus_per_node(
+                deployment_config.train_ngpus_per_node, deployment_config.train_nnodes
+            ),
         }
         # Unequal bundle fractions prevent two colocated workers from claiming one GPU.
         resource_num_per_bundle = {
             train_pool_id: train_bundle_resource_num,
         }
 
+        elastic_replica_placements = {}
+
         # Set the resource pool spec for each rollout instance.
-        total_rollout_gpus = 0
-        if deployment_config.elastic_rm.enable:
+        if deployment_config.elastic.enable:
             rollout_pool_id_list = ["shared_rollout_pool"]
         else:
             rollout_pool_id_list = [f"rollout_pool_{i}" for i in range(deployment_config.n_rollout_instances)]
 
         # If heterogeneous rollout is enabled, we will use the heterogeneous rollout configuration.
         if deployment_config.heterogeneous_rollout.enable:
+            if deployment_config.elastic.enable:
+                raise ValueError("heterogeneous_rollout is not supported when psrl.deployment.elastic.enable is True.")
             heterogeneous_deployment_config = deployment_config.heterogeneous_rollout
             assert (
                 len(heterogeneous_deployment_config.rollout_nnodes_per_instance)
@@ -273,22 +280,26 @@ class TaskRunner:
                 resource_pool_spec[rollout_pool_id] = [
                     heterogeneous_deployment_config.rollout_ngpus_per_node_per_instance[i]
                 ] * heterogeneous_deployment_config.rollout_nnodes_per_instance[i]
-        elif deployment_config.elastic_rm.enable:
-            total_rollout_gpus = (
-                deployment_config.elastic_rm.shared_ngpus_per_node * deployment_config.elastic_rm.shared_nnodes
+        elif deployment_config.elastic.enable:
+            elastic_pools = elastic_pool_specs(deployment_config)
+            rollout_placements = plan_replicas(
+                elastic_pools,
+                (
+                    config.gen_actor_rollout_ref.rollout.tensor_model_parallel_size
+                    * config.gen_actor_rollout_ref.rollout.pipeline_model_parallel_size
+                    * config.gen_actor_rollout_ref.rollout.data_parallel_size
+                ),
             )
-            deployment_config.n_rollout_instances = total_rollout_gpus // (
-                config.gen_actor_rollout_ref.rollout.tensor_model_parallel_size
-                * config.gen_actor_rollout_ref.rollout.pipeline_model_parallel_size
-                * config.gen_actor_rollout_ref.rollout.data_parallel_size
-            )
+            deployment_config.n_rollout_instances = len(rollout_placements)
             psrl_logger.info(
-                f"[Elastic RM] Maximum number of rollout instances = {deployment_config.n_rollout_instances}"
+                f"[Elastic] Maximum number of rollout instances = {deployment_config.n_rollout_instances}"
             )
-            resource_pool_spec["shared_rollout_pool"] = [
-                deployment_config.elastic_rm.shared_ngpus_per_node
-            ] * deployment_config.elastic_rm.shared_nnodes
-            rollout_pool_id_list = ["shared_rollout_pool"]
+            resource_pool_spec.update(elastic_pools)
+            rollout_pool_id_list = []
+            for i, placement in enumerate(rollout_placements):
+                tag = f"rollout_{i}"
+                elastic_replica_placements[tag] = placement
+                rollout_pool_id_list.append(tag)
         else:
             for i in range(deployment_config.n_rollout_instances):
                 rollout_pool_id = rollout_pool_id_list[i]
@@ -310,19 +321,30 @@ class TaskRunner:
         self.mapping[PSRL_Role.Rollout] = rollout_pool_id_list
 
         # Reward model resource pool
-        total_reward_pool_id_list = [] if not deployment_config.elastic_rm.enable else ["shared_rollout_pool"]
-        for reward_model in resolve_active_managers(config.reward):
-            if reward_model.reward_loop_type != "gen":
+        total_reward_pool_id_list = []
+        for reward_model in resolve_active_loops(config.reward):
+            if reward_model.reward_loop_type not in ("gen", "opd"):
                 continue
-            if deployment_config.elastic_rm.enable:
-                reward_model.num_replicas = total_rollout_gpus // (
-                    reward_model.rollout.tensor_model_parallel_size
-                    * reward_model.rollout.pipeline_model_parallel_size
-                    * reward_model.rollout.data_parallel_size
+            if deployment_config.elastic.enable:
+                reward_model_name = reward_model.get("reward_model_name")
+                if not reward_model_name:
+                    reward_model_name = reward_model.model.path.split("/")[-1]
+                reward_placements = plan_replicas(
+                    elastic_pools,
+                    (
+                        reward_model.rollout.tensor_model_parallel_size
+                        * reward_model.rollout.pipeline_model_parallel_size
+                        * reward_model.rollout.data_parallel_size
+                    ),
                 )
+                reward_model.num_replicas = len(reward_placements)
+                for i, placement in enumerate(reward_placements):
+                    tag = f"reward_model_{reward_model_name}_{i}"
+                    elastic_replica_placements[tag] = placement
+                    total_reward_pool_id_list.append(tag)
                 psrl_logger.info(
-                    f"[Elastic RM] Maximum number of reward model"
-                    f"({reward_model.reward_model_name}) instances = {reward_model.num_replicas}"
+                    f"[Elastic] Maximum number of reward model"
+                    f"({reward_model_name}) instances = {reward_model.num_replicas}"
                 )
             elif reward_model.enable_resource_pool:
                 if reward_model.n_gpus_per_node <= 0:
@@ -339,9 +361,54 @@ class TaskRunner:
                     ] * reward_model.rollout_nnodes_per_instance
                 total_reward_pool_id_list.extend(reward_pool_id_list)
             else:
-                raise ValueError("reward_model.enable_resource_pool must be True when elastic_rm.enable is False")
+                raise ValueError(
+                    "reward_model.enable_resource_pool must be True when psrl.deployment.elastic.enable is False."
+                )
 
         self.mapping[PSRL_Role.RewardModel] = total_reward_pool_id_list
+
+        if deployment_config.get("mode") == "trainer_pool_only":
+            requests = []
+            rollout = config.gen_actor_rollout_ref.rollout
+            rollout_size = (
+                rollout.tensor_model_parallel_size * rollout.pipeline_model_parallel_size * rollout.data_parallel_size
+            )
+            requests.append(("idle_rollout", int(deployment_config.trainer_pool_idle_rollout_instances), rollout_size))
+            rewards = [rm for rm in resolve_active_loops(config.reward) if rm.reward_loop_type in ("gen", "opd")]
+            for rm in rewards:
+                name = rm.get("reward_model_name") or rm.model.path.split("/")[-1]
+                size = (
+                    rm.rollout.tensor_model_parallel_size
+                    * rm.rollout.pipeline_model_parallel_size
+                    * rm.rollout.data_parallel_size
+                )
+                requests.append((f"idle_reward_{name}", int(deployment_config.trainer_pool_idle_rm_instances), size))
+            idle = plan_idle_replicas(deployment_config, requests)
+            rollout_tags = []
+            for index, pool_id in enumerate(rollout_pool_id_list):
+                tag = f"rollout_{index}"
+                elastic_replica_placements[tag] = ReplicaPlacement(pool_id, 0, sum(resource_pool_spec[pool_id]))
+                rollout_tags.append(tag)
+            for index in range(int(deployment_config.trainer_pool_idle_rollout_instances)):
+                tag = f"rollout_{len(rollout_tags)}"
+                elastic_replica_placements[tag] = idle[f"idle_rollout_{index}"]
+                rollout_tags.append(tag)
+            self.mapping[PSRL_Role.Rollout] = rollout_tags
+            deployment_config.n_rollout_instances = len(rollout_tags)
+            reward_tags = []
+            for rm in rewards:
+                name = rm.get("reward_model_name") or rm.model.path.split("/")[-1]
+                main_count = rm.num_replicas
+                for index in range(main_count):
+                    tag, pool_id = f"reward_model_{name}_{index}", f"reward_pool_{name}_{index}"
+                    elastic_replica_placements[tag] = ReplicaPlacement(pool_id, 0, sum(resource_pool_spec[pool_id]))
+                    reward_tags.append(tag)
+                for index in range(int(deployment_config.trainer_pool_idle_rm_instances)):
+                    tag = f"reward_model_{name}_{main_count + index}"
+                    elastic_replica_placements[tag] = idle[f"idle_reward_{name}_{index}"]
+                    reward_tags.append(tag)
+                rm.num_replicas = main_count + int(deployment_config.trainer_pool_idle_rm_instances)
+            self.mapping[PSRL_Role.RewardModel] = reward_tags
 
         from psrl.trainer.ppo.utils import ResourcePoolManager
 
@@ -349,6 +416,7 @@ class TaskRunner:
             resource_pool_spec=resource_pool_spec,
             mapping=self.mapping,
             resource_num_per_bundle=resource_num_per_bundle,
+            elastic_replica_placements=elastic_replica_placements,
         )
 
         print(f"resource_pool_spec = {resource_pool_spec}, mapping = {self.mapping}")
@@ -377,6 +445,7 @@ class TaskRunner:
             config: Training configuration object containing all parameters needed
                    for setting up and running the PPO training process.
         """
+        resolve_deployment_mode(config)
         # Print the initial configuration. `resolve=True` will evaluate symbolic values.
         from pprint import pprint
 

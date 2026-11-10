@@ -12,7 +12,6 @@ import torch
 import transfer_queue as tq
 from omegaconf import DictConfig, OmegaConf
 from tensordict import TensorDict
-from verl.trainer.distillation import is_distillation_enabled
 from verl.utils import tensordict_utils as tu
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.dataset.rl_dataset import get_dataset_class
@@ -34,9 +33,14 @@ from psrl.utils.common.http_utils import configure_distributed_post, init_http_c
 from psrl.utils.logger import DualOutputHandler, EventType, log_dual_events
 from psrl.utils.rollout.rollout_trace import RolloutTraceConfig, rollout_trace_attr
 from psrl.workers.agent_loop.context import AgentLoopContext
-from psrl.workers.agent_loop.loops.utils import AGENT_LOOP_REGISTRY, DictConfigWrap, TerminateReason
+from psrl.workers.agent_loop.loops.utils import (
+    DictConfigWrap,
+    TerminateReason,
+    get_agent_loop_config,
+)
 from psrl.workers.gen.utils import TokenOutput
 from psrl.workers.ps.request_status_tracker import PSRL_RequestStatus
+from psrl.workers.reward.client import RewardManagerClient, RewardSubmissionClient, reward_producer_concurrency
 
 psrl_logger = logging.getLogger(__file__)
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
@@ -95,11 +99,6 @@ class PSRL_AgentLoopWorker:
         # TransferQueue bootstrap (connects to controller/storage spun up by the driver).
         tq.init()
 
-        self.distillation_config = config.get("distillation", None)
-        self.distillation_enabled = is_distillation_enabled(self.distillation_config)
-        if self.distillation_enabled:
-            raise NotImplementedError("Distillation is not supported in PSRL yet.")
-
         self.dataset_cls = get_dataset_class(config.data)
 
         self.tokenizer = self.model_config.tokenizer
@@ -110,6 +109,17 @@ class PSRL_AgentLoopWorker:
         self.ps_manager_handle = ps_manager_handle
         self.agent_loop_manager = None
         self.reward_manager = None
+        self.inference_orchestrator = None
+        self.reward_rpc_capacity = reward_producer_concurrency(
+            config.reward.reward_loop_worker,
+            producer_count=worker_num,
+            producer_index=worker_id,
+        )
+        self.validation_reward_rpc_capacity = reward_producer_concurrency(
+            config.reward.validation_reward_loop_worker,
+            producer_count=worker_num,
+            producer_index=worker_id,
+        )
 
         n_rollout_instances = self.config.psrl.deployment.n_rollout_instances
         n_validate_instances = (
@@ -139,12 +149,15 @@ class PSRL_AgentLoopWorker:
         self.busy_loop_task = None
         self.stop_busy_loop_task = False
 
-        # Register agent loop configs from file
+        # Runtime options belong to this worker, so class registration cannot replace them.
+        self.agent_loop_configs: dict[str, DictConfig] = {}
         agent_loop_config_path = config.gen_actor_rollout_ref.rollout.agent.agent_loop_config_path
         if agent_loop_config_path:
             agent_loop_configs = OmegaConf.load(agent_loop_config_path)
             for agent_loop_config in agent_loop_configs:
-                AGENT_LOOP_REGISTRY[agent_loop_config.name] = agent_loop_config
+                self.agent_loop_configs[agent_loop_config.name] = agent_loop_config
+        # Fail at worker start if the default loop is neither built-in nor listed in YAML.
+        self._get_agent_loop_config(config.gen_actor_rollout_ref.rollout.agent.default_agent_loop)
         custom_template_value = config.gen_actor_rollout_ref.model.get("custom_chat_template", None)
         resolved_template = resolve_chat_template_value(custom_template_value)
         if resolved_template is not None:
@@ -168,6 +181,17 @@ class PSRL_AgentLoopWorker:
         handler = DualOutputHandler(self.config.psrl.logging_path, self.log_prefix)
         logging.getLogger("psrl").addHandler(handler)
         psrl_logger.addHandler(handler)
+
+    def _get_agent_loop_config(
+        self,
+        agent_name: str,
+    ) -> dict | DictConfig:
+        """
+        Resolve worker configuration before registered class defaults.
+        """
+        if agent_name in self.agent_loop_configs:
+            return self.agent_loop_configs[agent_name]
+        return get_agent_loop_config(agent_name)
 
     def _terminate_reaper(self) -> None:
         """Belt-and-suspenders cleanup on graceful actor shutdown.
@@ -200,13 +224,22 @@ class PSRL_AgentLoopWorker:
         """
         self.agent_loop_manager = agent_loop_manager
 
-    def set_reward_manager(self, reward_manager: ray.actor.ActorHandle):
-        """Set the reward manager handle for sending processed data.
+    def set_inference_orchestrator(self, orchestrator):
+        """Install shared GPU admission before any agent starts."""
+        self.inference_orchestrator = orchestrator
 
-        Args:
-            reward_manager: Handle to the reward manager actor.
+    def set_reward_managers(
+        self,
+        reward_manager: ray.actor.ActorHandle,
+        validation_reward_manager: ray.actor.ActorHandle,
+    ):
         """
-        self.reward_manager = reward_manager
+        Install reward clients with separate capacity for training and validation.
+        """
+        self.reward_manager = RewardSubmissionClient(
+            training=RewardManagerClient(reward_manager, self.reward_rpc_capacity),
+            validation=RewardManagerClient(validation_reward_manager, self.validation_reward_rpc_capacity),
+        )
 
     def set_distributed_post_actors(
         self,
@@ -359,28 +392,34 @@ class PSRL_AgentLoopWorker:
             name=agent_name,
             validate=validate,
         ):
-            assert agent_name in AGENT_LOOP_REGISTRY, (
-                f"Unregistered agent loop: name={agent_name!r}, available={AGENT_LOOP_REGISTRY.keys()!r}."
-            )
-            agent_loop_config = AGENT_LOOP_REGISTRY[agent_name]
-
-            context = AgentLoopContext(
-                config=self.config,
-                rollout_gateway_url=self.rollout_gateway_url,
-                session_router_url=self.session_router_url,
-                reward_manager=self.reward_manager,
-                ps_manager_handle=self.ps_manager_handle,
-                tokenizer=self.tokenizer,
-                processor=self.processor,
-                dataset_cls=self.dataset_cls,
-                data_config=DictConfigWrap(self.config.data),
-            )
-            # Keep framework objects out of Hydra's dataclass conversion path.
-            agent_loop_factory = hydra.utils.instantiate(
-                config=agent_loop_config,
-                _partial_=True,
-            )
-            agent_loop = agent_loop_factory(context=context)
+            try:
+                agent_loop_config = self._get_agent_loop_config(agent_name)
+                context = AgentLoopContext(
+                    config=self.config,
+                    rollout_gateway_url=self.rollout_gateway_url,
+                    session_router_url=self.session_router_url,
+                    reward_manager=self.reward_manager,
+                    ps_manager_handle=self.ps_manager_handle,
+                    tokenizer=self.tokenizer,
+                    processor=self.processor,
+                    dataset_cls=self.dataset_cls,
+                    data_config=DictConfigWrap(self.config.data),
+                    inference_orchestrator=self.inference_orchestrator,
+                )
+                # Keep framework objects out of Hydra's dataclass conversion path.
+                agent_loop_factory = hydra.utils.instantiate(
+                    config=agent_loop_config,
+                    _partial_=True,
+                )
+                agent_loop = agent_loop_factory(context=context)
+            except Exception as error:
+                # Initialization failures cannot be repaired by replacing the prompt.
+                await self.agent_loop_manager.fail_pipeline.remote(
+                    f"Agent loop initialization failed: name={agent_name!r}, request_id={request_index!r}, "
+                    f"prompt_id={prompt_index!r}, error={error!r}."
+                )
+                await self.ps_manager_handle.abort_requests.remote(request_ids)
+                raise
 
             with log_dual_events(
                 f"Agent loop with requests {request_ids}",
@@ -511,7 +550,7 @@ class PSRL_AgentLoopWorker:
 
         outputs = output if isinstance(output, list) else [output]
 
-        keys, fields = self._build_output_fields(outputs, batch, uid, version_tag, terminate_reason)
+        keys, fields = self._build_output_fields(outputs, batch, uid, prompt_id, version_tag, terminate_reason)
 
         await tq.async_kv_batch_put(
             keys=keys,
@@ -537,6 +576,7 @@ class PSRL_AgentLoopWorker:
         outputs: list,
         batch: TensorDict,
         uid: int,
+        prompt_id: int,
         version_tag: int,
         terminate_reason: TerminateReason = TerminateReason.FINISHED,
     ) -> tuple[list[str], list[dict]]:
@@ -597,9 +637,8 @@ class PSRL_AgentLoopWorker:
             field["prompt_len"] = prompt_len
             field["response_len"] = response_len
             field["uid"] = uid
+            field["parent_id"] = prompt_id
             field.setdefault("version_tag", version_tag)
-            if "parent_id" in batch:
-                field["parent_id"] = tu.get(batch, "parent_id")[0]
             field["trajectory_index"] = i
             field["trajectory_num"] = len(outputs)
             # Carried for metrics so the trainer can report reward and gradient share per

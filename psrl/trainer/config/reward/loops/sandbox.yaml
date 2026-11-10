@@ -1,0 +1,7 @@
+reward_loop_type: naive
+reward_fn:
+  - None
+sandbox_fusion:
+  url: null
+  max_concurrent: 64
+  memory_limit_mb: 1024

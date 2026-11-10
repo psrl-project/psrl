@@ -283,7 +283,7 @@ many sticky sessions pile onto one instance, they can exceed its KV-cache capaci
 The **session strategy**, ported from **ThunderAgent**, adds capacity-based
 **hang / continue** scheduling on top of routing:
 
-- **Hang**: when a pinned instance is over KV capacity, the RolloutCoordinator hangs a
+- **Hang**: when a pinned instance is over KV capacity, the GlobalCoordinator hangs a
   whole session, blocking its *next* turn at the SessionRouter without aborting any
   in-flight turn. Env-status sessions (already off-GPU, cheapest to shed) are hung
   first, then generate-status sessions, smallest footprint first.

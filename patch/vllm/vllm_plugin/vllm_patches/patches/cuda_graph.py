@@ -80,13 +80,9 @@ class TMSCUDAGraphWrapperPatch(vLLMPatch[CUDAGraphWrapper]):
 
             with ExitStack() as stack:
                 if self.cudagraph_options.gc_disable:
-                    # during every model forward for piecewise cudagraph
-                    # mode, we will capture many pieces of cudagraphs
-                    # (roughly one per layer). running gc again and again
-                    # across layers will make the cudagraph capture very slow.
-                    # therefore, we only run gc for the first graph,
-                    # and disable gc for the rest of the graphs.
-                    stack.enter_context(patch("gc.collect", lambda *args, **kwargs: None))
+                    # Skip repeated collections during piecewise capture. Background
+                    # callers still require the integer count returned by `gc.collect`.
+                    stack.enter_context(patch("gc.collect", lambda *args, **kwargs: 0))
                     stack.enter_context(
                         patch(
                             "torch.accelerator.empty_cache",

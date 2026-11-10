@@ -170,18 +170,18 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config --conf
     +train_actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full \
     +train_actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1 \
     \
-    reward.active_managers='[dapo]' \
-    reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer} \
-    reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len} \
-    reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \
-    reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.log=False \
-    reward.managers.dapo.reward_kwargs.max_resp_len=${max_response_length} \
+    reward.active_loops='[dapo]' \
+    reward.reward_loops.dapo.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer} \
+    reward.reward_loops.dapo.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len} \
+    reward.reward_loops.dapo.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \
+    reward.reward_loops.dapo.reward_kwargs.overlong_buffer_cfg.log=False \
+    reward.reward_loops.dapo.reward_kwargs.max_resp_len=${max_response_length} \
     \
-    data.train_files="${TRAIN_FILE}" \
+    +data.train_files="${TRAIN_FILE}" \
     data.reward_model_dicts.0.reward_loop_type=dapo \
     data.reward_model_dicts.0.reward_fn=compute_score \
-    data.val_files="${TEST_FILE}" \
-    data.prompt_key=prompt \
+    +data.val_files="${TEST_FILE}" \
+    +data.prompt_key=prompt \
     data.truncation='left' \
     data.max_prompt_length=${max_prompt_length} \
     data.max_response_length=${max_response_length} \
@@ -200,4 +200,3 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config --conf
     trainer.save_freq=200 \
     trainer.total_epochs=10 \
     trainer.total_training_steps=200 2>&1 | tee ${experiment_name}.log
-

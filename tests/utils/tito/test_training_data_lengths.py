@@ -1,7 +1,10 @@
 """Length invariants across the TITO training-data flow."""
 
+import pytest
 import torch
 from psrl.utils.tito.training_data import build_training_data
+
+pytestmark = pytest.mark.cpu_test
 
 
 def _record(prompt_token_count: int, output_token_ids: list[int], finish_reason: str = "stop") -> dict:

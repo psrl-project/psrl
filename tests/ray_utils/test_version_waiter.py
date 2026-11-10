@@ -31,25 +31,21 @@ class VersionedActor:
     def get_version(self) -> int:
         return self.version
 
+    def waiting_versions(self) -> list[int]:
+        return sorted(self._version_waiters)
 
-@ray.remote
+
+@ray.remote(num_cpus=0)
 def version_waiter(actor_handle, target_ver: int, worker_id: int):
-    ray.get(actor_handle.wait_for_version.remote(target_ver))
+    ray.get(actor_handle.wait_for_version.remote(target_ver), timeout=30)
     return f"waiter {worker_id} unblocked at version {target_ver}"
-
-
-@ray.remote
-def version_setter(actor_handle, new_version: int, delay_s: float):
-    time.sleep(delay_s)
-    ray.get(actor_handle.set_version.remote(new_version))
-    return f"setter set version to {new_version}"
 
 
 def test_version_waiter_already_satisfied(ray_cluster):
     """Waiter for version 0 unblocks immediately since initial version is 0."""
     versioned = VersionedActor.remote()
     waiter = version_waiter.remote(versioned, 0, worker_id=3)
-    result = ray.get(waiter)
+    result = ray.get(waiter, timeout=60)
     assert "waiter 3 unblocked at version 0" in result
 
 
@@ -62,13 +58,16 @@ def test_version_waiter_blocks_until_set(ray_cluster):
         version_waiter.remote(versioned, 2, worker_id=2),
     ]
 
-    setter_futures = [
-        version_setter.remote(versioned, 1, delay_s=0.1),
-        version_setter.remote(versioned, 2, delay_s=0.2),
-    ]
-
-    ray.get(setter_futures)
-    waiter_results = ray.get(waiter_futures)
+    deadline = time.monotonic() + 30
+    while ray.get(versioned.waiting_versions.remote(), timeout=30) != [1, 2]:
+        assert time.monotonic() < deadline, "Both waiters must register before versions advance."
+        time.sleep(0.01)
+    ready, _ = ray.wait(waiter_futures, num_returns=2, timeout=0.2)
+    assert not ready, "Waiters must remain blocked until their version is set."
+    ray.get(versioned.set_version.remote(1), timeout=30)
+    assert "version 1" in ray.get(waiter_futures[0], timeout=60)
+    ray.get(versioned.set_version.remote(2), timeout=30)
+    waiter_results = ray.get(waiter_futures, timeout=60)
 
     assert any("waiter 1 unblocked at version 1" in r for r in waiter_results)
     assert any("waiter 2 unblocked at version 2" in r for r in waiter_results)

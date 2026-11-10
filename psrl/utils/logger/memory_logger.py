@@ -6,8 +6,6 @@ import threading
 from collections.abc import Callable
 from typing import TypeVar
 
-import torch
-
 from .ray_logger import DualOutputHandler
 
 F = TypeVar("F", bound=Callable)
@@ -25,6 +23,8 @@ def _get_device_memory_info(device_id: int, unit: str = "GB", precision: int = 2
         Dict with keys: allocated, reserved, free, total, used (device-level).
         All values are formatted strings in the given unit.
     """
+    import torch
+
     assert unit in ("GB", "MB", "KB"), f"Expected memory unit GB, MB, or KB, got {unit!r}."
     divisor = 1024**3 if unit == "GB" else 1024**2 if unit == "MB" else 1024
 
@@ -52,6 +52,8 @@ def get_all_gpu_memory_info(unit: str = "GB", precision: int = 2) -> list[dict]:
     Returns:
         List of dicts, one per device, each from _get_device_memory_info.
     """
+    import torch
+
     dev_count = torch.cuda.device_count()
     return [_get_device_memory_info(i, unit=unit, precision=precision) for i in range(dev_count)]
 
@@ -88,6 +90,8 @@ def log_gpu_memory_now(
     Returns:
         The formatted message string.
     """
+    import torch
+
     assert torch.cuda.is_available(), "log_gpu_memory_now requires GPU (torch.cuda.is_available())."
     device_infos = get_all_gpu_memory_info(unit=unit)
     message = format_memory_message(device_infos, prefix=prefix, unit=unit)
@@ -117,6 +121,8 @@ class MemoryLogger:
         level: int = logging.INFO,
         unit: str = "GB",
     ):
+        import torch
+
         assert torch.cuda.is_available(), "MemoryLogger requires GPU (torch.cuda.is_available())."
         assert interval_seconds > 0, "interval_seconds must be positive."
 

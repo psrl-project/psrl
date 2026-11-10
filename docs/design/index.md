@@ -66,8 +66,8 @@ LMCache integration for CPU offloading, prefix reuse, and cross-instance P2P KV 
 :link: resource_elasticity
 :link-type: doc
 
-TMS-backed worker lifecycle and elastic inference resources, with current colocation
-constraints documented explicitly.
+Dynamic GPU sharing across rollout, generative reward inference, and training,
+with placement-aware planning and coordinated sleep/wake transitions.
 :::
 
 ::::

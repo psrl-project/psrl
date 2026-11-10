@@ -16,6 +16,7 @@ license = { file = "LICENSE" }
 dependencies = [
     "aiohttp>=3.9.0",
     "cachetools>=5.0.0",
+    "httpx>=0.27.0",
     "vllm-psrl-patches",
 ]
 classifiers = [
@@ -98,11 +99,12 @@ asyncio_mode = "auto"
 addopts = "--verbose --durations=0 --strict-markers"
 testpaths = ["tests"]
 norecursedirs = [
-    "external", "examples", "docs", "scripts", "tools",
+    "deprecated", "external", "examples", "docs", "scripts", "tools",
     "tutorials", "*.egg", ".*", "_darcs", "build",
     "CVS", "dist", "venv", "{arch}",
 ]
 markers = [
+    "gpu: requires explicit GPU execution with --run-gpu",
     "cpu_test: marks tests that run on CPU only (no GPU, no Ray cluster required)",
     "unit: marks unit test (single, well isolated functionality)",
     "integration: marks test checking integrated subsystems",

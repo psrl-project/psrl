@@ -13,7 +13,7 @@ flowchart LR
     SR --> SMG
     SMG <-->|"gRPC admission + Reserve"| PSM["PSManager"]
     SMG -->|"gRPC"| V["PSRL vLLM replicas"]
-    RC["RolloutCoordinator"] -->|"stats, pause/resume, weight version"| SMG
+    RC["GlobalCoordinator"] -->|"stats, pause/resume, weight version"| SMG
 ```
 
 `RolloutGateway` is a Ray actor that launches two child processes:
@@ -42,7 +42,7 @@ load-balancing policy:
 5. Apply the selected SMG policy among valid candidates, record the chosen instance,
    and optionally initiate LMCache KV transfer when the request moved.
 
-The RolloutCoordinator keeps this state current through SMG endpoints for worker
+The GlobalCoordinator keeps this state current through SMG endpoints for worker
 statistics, weight-version updates, routing-loop status, and pause/resume operations.
 This allows weight synchronization to stop new dispatches before interrupting an
 instance, then safely resume routing after the new version is installed.
@@ -83,7 +83,7 @@ workers itself. Its responsibilities are:
   reuse. When sticky is off, later turns are free to re-route.
 - **Hang / continue**: track per-session status (`generate` while inferring on
   vLLM/SMG, `env` while calling the environment) and a hang state (`running` / `hung`).
-  When the RolloutCoordinator's session strategy requests a hang, the session blocks at
+  When the GlobalCoordinator's session strategy requests a hang, the session blocks at
   its next turn boundary (a mid-turn request is deferred and converted to hung once the
   in-flight turn returns, so no work is aborted). A continue releases it. See
   {doc}`flexible_rollout` (Session Strategy).

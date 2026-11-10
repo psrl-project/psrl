@@ -7,6 +7,7 @@ third_party/
 third_party_old/
 third_party_old_2/
 third_party_new/
+third_party*/
 
 # Auto-generated Sphinx api docs
 /docs/generated
@@ -34,6 +35,7 @@ tensorflow/my_graph/*
 # Documentation figures are source assets, not runtime artifacts, so they are
 # re-included after the broad file-type rules above.
 !docs/_static/img/*.png
+!docs/_static/img/resource_elasticity_overview.pdf
 !assets/*.png
 
 # AIRS-Bench pinned parquet dataset files (small metadata, not training data).
@@ -42,6 +44,7 @@ tensorflow/my_graph/*
 
 # Common artifact directories
 **/checkpoints
+**/checkpoint
 **/ckpts
 **/wget-log
 **/_build/
@@ -59,7 +62,7 @@ examples/sciaccel_rl/slides/
 # "topology" contains "log", so the rule above swallows this config group.
 !psrl/eval/config/topology/
 **/models/
-**/data/
+# **/data/
 **/results/
 
 
@@ -261,3 +264,38 @@ dmypy.json
 *.swp
 # macOS
 .DS_Store
+
+# vim
+*.swp
+
+# ckpt
+*.lock
+
+# data
+*.parquet
+
+
+# local logs
+logs
+log
+outputs
+
+
+/models/
+/data/
+
+vllm_bench_results/
+
+.codex
+
+examples/bench/rollout/exp/
+
+.config/
+.triton/
+
+*.csv
+analysis/
+
+*.tar
+
+docker_images/

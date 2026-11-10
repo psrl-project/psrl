@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import os
 
-import ray
 from omegaconf import DictConfig
 
 from psrl.environments.base import Environment
@@ -14,6 +13,7 @@ from psrl.workers.agent_loop.agent_data.conversation_agent_data import (
     ConversationAgentData,
     normalize_openai_messages,
 )
+from psrl.workers.reward.client import RewardSubmissionClient
 
 psrl_logger = logging.getLogger(__file__)
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
@@ -26,7 +26,7 @@ class MiniSWEAgentData(ConversationAgentData):
     def __init__(
         self,
         config: DictConfig,
-        reward_manager: ray.actor.ActorHandle,
+        reward_manager: RewardSubmissionClient,
         env: Environment,
         **kwargs,
     ):

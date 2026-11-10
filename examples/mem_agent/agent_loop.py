@@ -1,9 +1,10 @@
-from examples.mem_agent.config import MemAgentRuntimeConfig, build_runtime_config
-from examples.mem_agent.runner import MemAgent
 from omegaconf import DictConfig
 from psrl.workers.agent_loop.context import AgentLoopContext
 from psrl.workers.agent_loop.loops.session_agent_loop import SessionAgentLoop, SessionAgentResult
 from psrl.workers.agent_loop.loops.utils import TerminateReason, register
+
+from examples.mem_agent.config import MemAgentRuntimeConfig, build_runtime_config
+from examples.mem_agent.runner import MemAgent
 
 
 @register("mem_agent")

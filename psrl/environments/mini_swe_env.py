@@ -20,7 +20,6 @@ import time
 import uuid
 
 import numpy as np
-import ray
 from examples.mini_swe.config import (
     MiniSWEAgentRuntimeConfig,
     apply_data_overrides,
@@ -31,9 +30,40 @@ from transformers import AutoProcessor, AutoTokenizer
 
 from psrl.environments.base import Environment, EnvStepOutput
 from psrl.utils.common.docker_utils import force_remove_containers_by_label
+from psrl.workers.reward.client import RewardManagerClient
 
 psrl_logger = logging.getLogger(__file__)
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
+
+
+def _grading_metadata(
+    data_source: str,
+    extra_info: dict,
+) -> dict:
+    """
+    Require harness inputs only for datasets graded by test execution.
+    """
+    if data_source == "mini_swe_agent_simple":
+        return {}
+    if data_source not in ("swebench_verified", "swe_smith_py", "swe_gym"):
+        raise ValueError(f"Unsupported mini-SWE data source: {data_source!r}.")
+
+    swe_grader = extra_info.get("swe_grader")
+    if swe_grader != "swebench_fresh_container":
+        raise ValueError(f"Expected swe_grader='swebench_fresh_container' for {data_source!r}, got {swe_grader!r}.")
+    swe_problem = extra_info.get("swe_problem")
+    if not isinstance(swe_problem, dict) or not swe_problem.get("instance_id"):
+        raise ValueError(f"Expected swe_problem with an instance_id for {data_source!r}, got {swe_problem!r}.")
+    swe_problem_image = extra_info.get("swe_problem_image")
+    if not isinstance(swe_problem_image, str) or not swe_problem_image:
+        raise ValueError(f"Expected swe_problem_image for {data_source!r}, got {swe_problem_image!r}.")
+
+    return {
+        "swe_grader": swe_grader,
+        "swe_problem": swe_problem,
+        "swe_problem_image": swe_problem_image,
+        "swe_restore_tests": bool(extra_info.get("swe_restore_tests", False)),
+    }
 
 
 @Environment.register("mini_swe_env")
@@ -49,7 +79,7 @@ class MiniSWEEnvironment(Environment[dict, None]):
     def __init__(
         self,
         config: DictConfig,
-        reward_manager: ray.actor.ActorHandle,
+        reward_manager: RewardManagerClient,
         tokenizer: AutoTokenizer,
         processor: AutoProcessor | None = None,
         dataset_cls=None,
@@ -60,7 +90,7 @@ class MiniSWEEnvironment(Environment[dict, None]):
 
         Args:
             config (DictConfig): PSRL trainer configuration.
-            reward_manager (ray.actor.ActorHandle): Ray actor handle for computing rewards.
+            reward_manager (RewardManagerClient): Shared client for submitting reward requests.
             runtime_config (MiniSWEAgentRuntimeConfig | None): Pre-built runtime config
                 from the agent loop. If None, a default config is built from scratch.
         """
@@ -97,14 +127,7 @@ class MiniSWEEnvironment(Environment[dict, None]):
         else:
             extra_info = {}
 
-        # DEBUG: Log extra_info grading fields to diagnose missing grader issue.
-        psrl_logger.warning(
-            f"MiniSWEEnvironment reset: extra_info type={type(extra_info_raw).__name__}, "
-            f"extra_info keys={list(extra_info.keys()) if isinstance(extra_info, dict) else 'N/A'}, "
-            f"swe_grader={extra_info.get('swe_grader', 'MISSING')!r}, "
-            f"has_swe_problem_image={bool(extra_info.get('swe_problem_image', ''))}, "
-            f"task_keys={task_keys}."
-        )
+        grading_metadata = _grading_metadata(task.get("data_source"), extra_info)
 
         # Fall back to raw_prompt for problem_statement if extra_info is empty.
         problem_statement = extra_info.get("problem_statement", "") or ""
@@ -139,32 +162,6 @@ class MiniSWEEnvironment(Environment[dict, None]):
         if not use_preexisting_repo and not repo_path:
             use_preexisting_repo = True
 
-        # Prepared datasets may use either supported grader field schema.
-        swe_grader = str(extra_info.get("swe_grader", "") or extra_info.get("grader", "") or "")
-        swe_problem = extra_info.get("swe_problem", None) or extra_info.get("instance", None) or {}
-        swe_problem_image = str(extra_info.get("swe_problem_image", "") or extra_info.get("image_name", "") or "")
-        swe_restore_tests = bool(
-            extra_info.get("swe_restore_tests", False) or extra_info.get("needs_head_minus_one", False)
-        )
-
-        # Assert: after fallback, grading fields must be non-empty.
-        # If both old and new field names are missing, the parquet is broken.
-        assert swe_grader, (
-            f"extra_info has neither 'swe_grader' nor 'grader' field. "
-            f"Re-run prepare_swebench.py to regenerate the parquet. "
-            f"Available keys: {sorted(extra_info.keys())}."
-        )
-        assert swe_problem and isinstance(swe_problem, dict) and swe_problem.get("instance_id"), (
-            f"extra_info has neither 'swe_problem' nor 'instance' with valid data. "
-            f"Re-run prepare_swebench.py to regenerate the parquet. "
-            f"Available keys: {sorted(extra_info.keys())}."
-        )
-        assert swe_problem_image, (
-            f"extra_info has neither 'swe_problem_image' nor 'image_name' field. "
-            f"Re-run prepare_swebench.py to regenerate the parquet. "
-            f"Available keys: {sorted(extra_info.keys())}."
-        )
-
         observation = {
             "problem_statement": problem_statement,
             "swe_task_id": self._swe_task_id,
@@ -172,10 +169,7 @@ class MiniSWEEnvironment(Environment[dict, None]):
             "repo_path": repo_path,
             "use_preexisting_repo": use_preexisting_repo,
             "preexisting_repo_name": preexisting_repo_name,
-            "swe_grader": swe_grader,
-            "swe_problem": swe_problem,
-            "swe_problem_image": swe_problem_image,
-            "swe_restore_tests": swe_restore_tests,
+            **grading_metadata,
         }
 
         _problem_short = f"{problem_statement[:80]}..." if len(problem_statement) > 80 else problem_statement

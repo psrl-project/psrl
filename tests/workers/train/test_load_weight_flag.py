@@ -1,49 +1,32 @@
-"""CPU-only test: FSDPEngineConfig.load_weight=False causes from_config, not from_pretrained."""
+"""CPU-only tests for the current actor configuration load-weight contract."""
 
 import pytest
 
 pytestmark = pytest.mark.cpu_test
 
 
-def test_load_weight_default_true():
-    from verl.workers.config.engine import FSDPEngineConfig
+def test_fsdp_actor_config_uses_fsdp_strategy():
+    from verl.workers.config.actor import FSDPActorConfig
 
-    cfg = FSDPEngineConfig()
-    assert cfg.load_weight is True
-
-
-def test_load_weight_can_be_set_false():
-    from verl.workers.config.engine import FSDPEngineConfig
-
-    cfg = FSDPEngineConfig(load_weight=False)
-    assert cfg.load_weight is False
+    cfg = FSDPActorConfig(rollout_n=1, ppo_micro_batch_size_per_gpu=1)
+    assert cfg.strategy == "fsdp"
+    assert cfg.engine is cfg.fsdp_config
 
 
-def test_fsdp_engine_load_weight_false_calls_from_config():
-    """When load_weight=False, FSDPEngine._build_module must call from_config, not from_pretrained."""
-    from verl.workers.config.engine import FSDPEngineConfig
+def test_mcore_actor_load_weight_defaults_to_true():
+    from verl.workers.config.actor import McoreActorConfig
 
-    engine_config = FSDPEngineConfig(load_weight=False, strategy="fsdp")
-    engine_config.forward_only = False
-    engine_config.entropy_from_logits_with_chunking = False
-    engine_config.use_torch_compile = False
-
-    assert not engine_config.load_weight
-
-    # Simulate what _build_module checks
-    result = engine_config.load_weight  # should be False
-    assert result is False, "load_weight=False should propagate correctly"
+    cfg = McoreActorConfig(rollout_n=1, ppo_micro_batch_size_per_gpu=1)
+    assert cfg.engine.load_weight is True
 
 
-def test_mcore_engine_config_load_weight_default_true():
+def test_mcore_actor_load_weight_can_be_disabled():
+    from verl.workers.config.actor import McoreActorConfig
     from verl.workers.config.engine import McoreEngineConfig
 
-    cfg = McoreEngineConfig()
-    assert cfg.load_weight is True
-
-
-def test_mcore_engine_config_load_weight_can_be_false():
-    from verl.workers.config.engine import McoreEngineConfig
-
-    cfg = McoreEngineConfig(load_weight=False)
-    assert cfg.load_weight is False
+    cfg = McoreActorConfig(
+        rollout_n=1,
+        ppo_micro_batch_size_per_gpu=1,
+        megatron=McoreEngineConfig(load_weight=False),
+    )
+    assert cfg.engine.load_weight is False

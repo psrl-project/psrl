@@ -192,6 +192,8 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
     rustup component add rustfmt clippy
 
 COPY docker/patch/ ${PSRL_PATCH_DIR}/
+COPY patch/vllm/v0.22.0.patch ${PSRL_PATCH_DIR}/vllm.patch
+COPY patch/verl/e5ca4acb.patch ${PSRL_PATCH_DIR}/verl.patch
 
 # Build a CPU-only UCX/NIXL stack. UCX still supports shared memory, TCP, and
 # RDMA host buffers; CUDA/GDS plugins are intentionally absent.

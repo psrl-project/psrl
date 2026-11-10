@@ -1,9 +1,11 @@
 from abc import ABC, abstractmethod
+from importlib import import_module
 from typing import Any, Generic, SupportsFloat, TypedDict, TypeVar
 
-import ray
 from omegaconf import DictConfig
 from transformers import AutoProcessor, AutoTokenizer
+
+from psrl.workers.reward.client import RewardManagerClient
 
 ConversationType = list[dict[str, str]]
 
@@ -30,7 +32,7 @@ class Environment(ABC, Generic[ObsType, ActType]):
         ActType: Type of actions accepted by the environment
 
     Attributes:
-        reward_manager: Ray actor handle for computing rewards
+        reward_manager: Shared client for submitting reward requests.
         task: Current task being processed
     """
 
@@ -40,7 +42,7 @@ class Environment(ABC, Generic[ObsType, ActType]):
     def __init__(
         self,
         config: DictConfig,
-        reward_manager: ray.actor.ActorHandle,
+        reward_manager: RewardManagerClient,
         tokenizer: AutoTokenizer,
         processor: AutoProcessor | None = None,
         dataset_cls=None,
@@ -49,7 +51,7 @@ class Environment(ABC, Generic[ObsType, ActType]):
 
         Args:
             config: Configuration object containing training settings
-            reward_manager: Ray actor handle for computing rewards
+            reward_manager: Shared client for submitting reward requests.
             tokenizer: Tokenizer for converting between text and tokens
             processor: Optional multimodal processor (e.g. Qwen2VLProcessor).
             dataset_cls: Optional dataset class for loading data.
@@ -150,6 +152,14 @@ class Environment(ABC, Generic[ObsType, ActType]):
         Raises:
             ValueError: If the environment is not found in the registry
         """
+        if name not in cls._registry:
+            module_name = {
+                "tool_env": "psrl.environments.tool_env",
+                "mini_swe_env": "psrl.environments.mini_swe_env",
+                "mlgym_env": "psrl.environments.mlgym_env",
+            }.get(name)
+            if module_name is not None:
+                import_module(module_name)
         if name not in cls._registry:
             raise ValueError(f"Unknown environment: {name}")
         return cls._registry[name](*args, **kwargs)

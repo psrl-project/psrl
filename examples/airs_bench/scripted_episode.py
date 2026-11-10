@@ -19,8 +19,9 @@ import logging
 import os
 from typing import Any
 
-from examples.airs_bench.config import AirsBenchRuntimeConfig, build_runtime_config
 from psrl.environments.mlgym_env import AGENT_WORKSPACE, build_sandbox_spec
+
+from examples.airs_bench.config import AirsBenchRuntimeConfig, build_runtime_config
 
 psrl_logger = logging.getLogger(__file__)
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "INFO"))

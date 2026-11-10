@@ -207,21 +207,21 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config --conf
     psrl.group_post_process.name=dynamic_sampling_filter \
     algorithm.filter_groups.metric=reward_score \
     \
-    reward.active_managers='[dapo]' \
-    reward.managers.dapo.reward_fn.0.path=${PSRL_PATH}/examples/mini_swe/reward.py \
-    reward.managers.dapo.reward_fn.0.name=compute_score \
-    +reward.managers.dapo.reward_fn.0.reward_kwargs.reward_mode=${reward_mode} \
-    reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer} \
-    reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len} \
-    reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \
-    reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.log=False \
-    reward.managers.dapo.reward_kwargs.max_resp_len=${max_response_length} \
+    reward.active_loops='[dapo]' \
+    reward.reward_loops.dapo.reward_fn.0.path=${PSRL_PATH}/examples/mini_swe/reward.py \
+    reward.reward_loops.dapo.reward_fn.0.name=compute_score \
+    +reward.reward_loops.dapo.reward_fn.0.reward_kwargs.reward_mode=${reward_mode} \
+    reward.reward_loops.dapo.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer} \
+    reward.reward_loops.dapo.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len} \
+    reward.reward_loops.dapo.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \
+    reward.reward_loops.dapo.reward_kwargs.overlong_buffer_cfg.log=False \
+    reward.reward_loops.dapo.reward_kwargs.max_resp_len=${max_response_length} \
     \
-    data.train_files="$train_files" \
+    +data.train_files="$train_files" \
     data.reward_model_dicts.0.reward_loop_type=dapo \
     data.reward_model_dicts.0.reward_fn=compute_score \
-    data.val_files="$test_files" \
-    data.prompt_key=prompt \
+    +data.val_files="$test_files" \
+    +data.prompt_key=prompt \
     data.truncation='error' \
     data.max_prompt_length=${max_prompt_length} \
     data.max_response_length=${max_response_length} \

@@ -1,0 +1,9 @@
+{
+    "TP8_PP1": {
+        "other_threshold": 0.0090204,
+        "other_latency_b": 0.0072018,
+        "other_latency_k": 0.000125,
+        "attn_latency_b": 0.0014865914,
+        "attn_latency_k": 2.63e-08
+    }
+}

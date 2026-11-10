@@ -61,7 +61,7 @@ class FakeManager:
         self.rollout_request_tracker: dict = {}
         self._consecutive_group_failures = 0
         self._group_failure_reasons: Counter = Counter()
-        self._refill_breaker_diagnosis: str | None = None
+        self._pipeline_failure: str | None = None
 
         self.train_data_buffers: dict = {}
         self.train_accumulated_buffers: dict = {}
@@ -100,10 +100,10 @@ class FakeManager:
         self._retry_data = PSRL_AgentLoopManager._retry_data.__get__(self)
         self._record_group_failure = PSRL_AgentLoopManager._record_group_failure.__get__(self)
         self._reset_group_failure_streak = PSRL_AgentLoopManager._reset_group_failure_streak.__get__(self)
-        self._trip_refill_breaker = PSRL_AgentLoopManager._trip_refill_breaker.__get__(self)
+        self.fail_pipeline = PSRL_AgentLoopManager.fail_pipeline.__get__(self)
         self._refill_failed_group = PSRL_AgentLoopManager._refill_failed_group.__get__(self)
-        self._refill_breaker_error = PSRL_AgentLoopManager._refill_breaker_error.__get__(self)
-        self._raise_if_refill_breaker_tripped = PSRL_AgentLoopManager._raise_if_refill_breaker_tripped.__get__(self)
+        self._pipeline_error = PSRL_AgentLoopManager._pipeline_error.__get__(self)
+        self._raise_if_pipeline_failed = PSRL_AgentLoopManager._raise_if_pipeline_failed.__get__(self)
         self.wait_for_training_batch = PSRL_AgentLoopManager.wait_for_training_batch.__get__(self)
         self.wait_for_training_chunk = PSRL_AgentLoopManager.wait_for_training_chunk.__get__(self)
 
@@ -137,9 +137,7 @@ class TestZeroRefill:
                 terminate_reason=TerminateReason.ROLLOUT_ERROR,
             )
 
-            assert manager._refill_breaker_diagnosis is not None, (
-                "A refill that dispatched nothing was accepted silently."
-            )
+            assert manager._pipeline_failure is not None, "A refill that dispatched nothing was accepted silently."
 
         asyncio.run(_run())
 
@@ -164,7 +162,7 @@ class TestConsecutiveFailureBreaker:
                 )
 
             assert manager._consecutive_group_failures == 2
-            assert manager._refill_breaker_diagnosis is None
+            assert manager._pipeline_failure is None
 
         asyncio.run(_run())
 
@@ -188,8 +186,8 @@ class TestConsecutiveFailureBreaker:
                     terminate_reason=TerminateReason.ROLLOUT_ERROR,
                 )
 
-            assert manager._refill_breaker_diagnosis is not None
-            assert TerminateReason.ROLLOUT_ERROR.value in manager._refill_breaker_diagnosis
+            assert manager._pipeline_failure is not None
+            assert TerminateReason.ROLLOUT_ERROR.value in manager._pipeline_failure
 
         asyncio.run(_run())
 
@@ -231,7 +229,7 @@ class TestWaiterSurfacesTheBreaker:
 
         async def _run():
             manager = FakeManager(threshold=1)
-            manager._refill_breaker_diagnosis = "rollout_error x1"
+            manager._pipeline_failure = "rollout_error x1"
 
             with pytest.raises(RuntimeError, match="rollout_error"):
                 await manager.wait_for_training_batch(buffer_id=0)
@@ -270,7 +268,7 @@ class TestWaiterSurfacesTheBreaker:
 
         async def _run():
             manager = FakeManager(threshold=1)
-            manager._refill_breaker_diagnosis = "rollout_error x1"
+            manager._pipeline_failure = "rollout_error x1"
 
             # Bounded so an unguarded waiter fails the test instead of hanging it.
             with pytest.raises(RuntimeError, match="rollout_error"):

@@ -31,7 +31,7 @@ install_cudnn() {
 
     # Install cuDNN
     echo "Installing cuDNN Python package..."
-    python -m pip install nvidia-cudnn-cu12=="$required_version"
+    python -m uv pip install nvidia-cudnn-cu12=="$required_version"
     
     # Verify installation and set path
     set_cudnn_path
@@ -56,7 +56,7 @@ install_cudnn
 
 echo "2. Install TransformerEngine"
 echo "Notice: TransformerEngine installation can take a long time, please be patient"
-NVTE_FRAMEWORK=pytorch python -m pip install --no-cache-dir --no-build-isolation git+https://github.com/NVIDIA/TransformerEngine.git@v2.7
+NVTE_FRAMEWORK=pytorch python -m uv pip install --no-cache-dir --no-build-isolation git+https://github.com/NVIDIA/TransformerEngine.git@v2.7
 
 echo "3. Install Megatron"
 python -m pip install git+https://github.com/NVIDIA/Megatron-LM.git@c049020 --no-deps --no-build-isolation
@@ -68,6 +68,7 @@ cd Megatron-Bridge
 git checkout 94d1870
 # Comment out the local megatron-core source (we install Megatron-LM separately above)
 sed -i 's|^megatron-core = { path = "3rdparty/Megatron-LM/", editable = true }|# megatron-core = { path = "3rdparty/Megatron-LM/", editable = true }|' pyproject.toml
+git apply "$PSRL_PATH/patch/megatron_bridge/dependencies.patch"
 python -m uv pip install -e . --no-build-isolation --no-cache-dir --no-deps
 popd
 
@@ -76,4 +77,6 @@ bash "$PSRL_PATH/patch/apply_patch.sh" megatron_bridge
 echo "5. Apply TransformerEngine patch (flash-attn-3 + context parallel compat)"
 bash "$PSRL_PATH/patch/apply_patch.sh" transformer_engine --force
 
+python -m uv pip install "nvidia-nccl-cu12==2.29.7"
+python "${SCRIPT_DIR}/check_environment.py"
 echo "Successfully installed all packages for Megatron"

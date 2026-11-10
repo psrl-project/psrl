@@ -1,0 +1,14 @@
+reward_loop:
+  source: register
+  name: dapo
+reward_loop_type: dapo
+reward_fn:
+  - path: null
+    name: compute_score
+reward_kwargs:
+  max_resp_len: 5120
+  overlong_buffer_cfg:
+    enable: True
+    len: 3072
+    penalty_factor: 1.0
+    log: False

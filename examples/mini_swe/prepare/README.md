@@ -182,9 +182,11 @@ On many clusters the docker daemon itself cannot reach `registry-1.docker.io`
 (user-space proxy env vars like `http_proxy` are **not** inherited by
 `dockerd`). `prefetch_images.sh` sidesteps this by using **skopeo** — a
 user-space tool that honours `$http_proxy` / `$https_proxy` from
-`${PSRL_WORKSPACE}/env/psrl.sh` and writes straight to a local `docker-archive`
+`${PSRL_WORKSPACE}/env/env_311.sh` and writes straight to a local `docker-archive`
 tar (or directly into `dockerd` via the Unix socket). No daemon proxy config
-needed.
+needed. Install it first with `dnf -y install skopeo --nobest` (`--nobest` if
+Docker CE `containerd.io` is already installed). `--image-dir` only works with
+skopeo.
 
 #### 3.2 — Dry-run
 
@@ -204,6 +206,7 @@ by the parquet.
 bash examples/mini_swe/prepare/docker_scripts/prefetch_images.sh \
     --parquet examples/mini_swe/data/swe_smith_py_1k/train.parquet \
     --image-dir ${PSRL_WORKSPACE}/docker_images/swe \
+    --method skopeo \
     --workers 4 \
     --retries 5 \
     --mirrors docker.xuanyuan.me,docker.1ms.run,docker.1panel.live,hub.rat.dev,dockerproxy.net,proxy.vvvv.ee,docker.xiaogenban1993.com,lispy.org,registry.cyou \
@@ -217,7 +220,8 @@ What each flag does:
 
 | Flag | Effect |
 |------|--------|
-| `--image-dir DIR` | Save each image as `docker-archive:<DIR>/<image>.tar`. Cached tars are reused on re-run. |
+| `--image-dir DIR` | Save each image as `docker-archive:<DIR>/<image>.tar`. Requires skopeo. Cached tars are reused on re-run. |
+| `--method skopeo` | Puller. Required with `--image-dir`. Default is skopeo if it is on `PATH`, otherwise docker. |
 | `--load` | (optional) After each successful pull, also `docker load -i` into the local `dockerd`. Safe to skip if you plan to load later via [Step 4](#step-4-fan-out-to-all-cluster-nodes). |
 | `--workers N` | Parallel pulls. `4` is sane; heavy networks can push to `8–16`. |
 | `--retries N` | Per `(image, mirror)` retry count on transient failures (`unexpected EOF`, blob `404` from a mirror's cold cache). |
@@ -293,6 +297,7 @@ full pull, just swap `--parquet` for `--images`):
 bash examples/mini_swe/prepare/docker_scripts/prefetch_images.sh \
     --images /tmp/failed_images.txt \
     --image-dir ${PSRL_WORKSPACE}/docker_images/swe \
+    --method skopeo \
     --workers 8 \
     --retries 10 \
     --mirrors docker.xuanyuan.me,docker.1ms.run,docker.1panel.live,hub.rat.dev,dockerproxy.net,proxy.vvvv.ee,docker.xiaogenban1993.com,lispy.org,registry.cyou \
@@ -474,6 +479,7 @@ bash examples/mini_swe/prepare/docker_scripts/swe_gym_subset.sh
 bash examples/mini_swe/prepare/docker_scripts/prefetch_images.sh \
     --parquet examples/mini_swe/data/swe_gym_2438/train.parquet \
     --image-dir ${PSRL_WORKSPACE}/docker_images/swe_gym \
+    --method skopeo \
     --workers 4 \
     --retries 5 \
     --mirrors docker.xuanyuan.me,docker.1ms.run,docker.1panel.live,hub.rat.dev

@@ -1,8 +1,6 @@
 from dataclasses import dataclass, field
 from typing import Any
 
-import torch
-
 # (worker_id, data_parallel_rank)
 RolloutInstanceId = tuple[str, int]
 INVALID_ROLLOUT_INSTANCE_ID: RolloutInstanceId = ("", -1)
@@ -81,6 +79,8 @@ class TokenOutput:
 
     def as_dict(self) -> dict[str, Any]:
         """Convert the TokenOutput dataclass to a dictionary."""
+        import torch
+
         output = {
             "prompt_ids": self.prompt_ids,
             "response_ids": self.response_ids,
@@ -133,6 +133,8 @@ class TokenOutput:
 
         reward_score = output.get("reward_score", None)
         if reward_score is not None:
+            reward_score = float(reward_score)
+            output["reward_score"] = reward_score
             rm_scores = torch.zeros_like(output["response_mask"], dtype=torch.float32)
             rm_scores[-1] = reward_score
             output["rm_scores"] = rm_scores

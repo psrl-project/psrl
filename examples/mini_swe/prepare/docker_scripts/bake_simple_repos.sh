@@ -15,12 +15,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IMAGE="${1:-python:3.11-slim}"
 CONTAINER_NAME="bake_simple_repos_$$"
 
-# export http_proxy=http://your-proxy-host:port
-# export https_proxy=http://your-proxy-host:port
+# export http_proxy=http://your-proxy-host:port https_proxy=http://your-proxy-host:port
+# Set `APT_MIRROR` to `http://mirrors.example.com` if `deb.debian.org` is unreachable.
 
 DOCKER_PROXY_ARGS=()
 # NOTE(lhy): Uncomment and replace the proxy exports above if needed.
-for _name in http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY; do
+for _name in http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY APT_MIRROR; do
     if [[ -n "${!_name:-}" ]]; then
         DOCKER_PROXY_ARGS+=(-e "$_name")
     fi
@@ -32,11 +32,11 @@ echo "=== Baking simple-test repos into: $IMAGE ==="
 SETUP_SCRIPT=$(python3 -c "
 import json, shlex, os
 
-script_dir = '${SCRIPT_DIR}'
+prepare_dir = os.path.dirname('${SCRIPT_DIR}')
 
 commands = []
 for split, fname in [('train', 'simple_cases_train.json'), ('val', 'simple_cases_val.json')]:
-    path = os.path.join(script_dir, fname)
+    path = os.path.join(prepare_dir, fname)
     with open(path) as f:
         cases = json.load(f)
     for idx, case in enumerate(cases):
@@ -61,6 +61,13 @@ echo "[*] Creating container and baking repos..."
 # Install Git because the slim image omits it.
 docker run --name "$CONTAINER_NAME" "${DOCKER_PROXY_ARGS[@]}" "$IMAGE" \
     /bin/bash -ce "
+        if [ -n \"\${APT_MIRROR:-}\" ]; then
+            mirror=\${APT_MIRROR%/}
+            for src in /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list; do
+                [ -f \"\$src\" ] || continue
+                sed -i \"s|http://deb.debian.org|\${mirror}|g\" \"\$src\"
+            done
+        fi &&
         echo '>>> apt-get update' &&
         apt-get update &&
         echo '>>> apt-get install -y git' &&

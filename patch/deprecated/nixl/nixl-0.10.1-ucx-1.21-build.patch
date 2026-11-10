@@ -1,0 +1,137 @@
+diff --git a/meson.build b/meson.build
+index 95e2329..0c753da 100644
+--- a/meson.build
++++ b/meson.build
+@@ -272,15 +272,10 @@ if ucx_dep.found() and cuda_dep.found() and nvcc_prog.found()
+             int main() { return 0; }
+         ''', dependencies : [ucx_dep, doca_gpunetio_dep], args: nvcc_flags)
+ 
+-    have_host_side = cpp.compiles('''
+-            #include <ucp/api/ucp_version.h>
+-            #include <ucp/api/device/ucp_host.h>
+-            #include <ucs/sys/compiler_def.h>
+-            int main() {
+-                UCS_STATIC_ASSERT(UCP_VERSION(UCP_API_MAJOR, UCP_API_MINOR) >= UCP_VERSION(1, 21));
+-                return 0;
+-            }
+-        ''', dependencies: ucx_dep, name: 'UCX Device API (host-side, version >= 1.21)')
++    # The legacy GPU transfer-request path needs the pre-V2 API. UCX 1.21
++    # exposes the V2 local/remote memory-list API instead, so a version-only
++    # probe incorrectly enables code that cannot compile.
++    have_host_side = cpp.has_function('ucp_device_mem_list_create', dependencies: ucx_dep)
+ 
+     if have_gpu_side and have_host_side
+         ucx_gpu_device_api_available = true
+diff --git a/src/plugins/meson.build b/src/plugins/meson.build
+index d41c77f..c547bc6 100644
+--- a/src/plugins/meson.build
++++ b/src/plugins/meson.build
+@@ -26,7 +26,7 @@ if enabled_plugins.get('POSIX')
+ endif
+ 
+ if enabled_plugins.get('OBJ')
+-    subdir('obj')
++    # The PSRL installation does not use the object-store backend.
+ endif
+ 
+ if enabled_plugins.get('AZURE_BLOB')
+diff --git a/src/utils/stream/metadata_stream.cpp b/src/utils/stream/metadata_stream.cpp
+index 5bbd73f..e2b5a86 100644
+--- a/src/utils/stream/metadata_stream.cpp
++++ b/src/utils/stream/metadata_stream.cpp
+@@ -82,7 +82,7 @@ void nixlMDStreamListener::setupListener() {
+         return;
+     }
+ 
+-    if (listen(socketFd, 128) < 0) {
++    if (listen(socketFd, 4096) < 0) {
+         NIXL_PERROR << "Listening failed for stream Socket: "
+                     << socketFd;
+         closeStream();
+@@ -95,7 +95,7 @@ void nixlMDStreamListener::setupListener() {
+ int nixlMDStreamListener::acceptClient() {
+         csock = accept(socketFd, NULL, NULL);
+         if (csock < 0 && errno != EAGAIN) {
+-            NIXL_PERROR << "Cannot accept client connection";
++            NIXL_DEBUG << "Cannot accept client connection";
+         }
+         return csock;
+ }
+@@ -105,7 +105,7 @@ void nixlMDStreamListener::acceptClientsAsync() {
+     while(true) {
+         int clientSocket = accept(socketFd, NULL, NULL);
+         if (clientSocket < 0) {
+-            NIXL_PERROR << "Cannot accept client connection";
++            NIXL_DEBUG << "Cannot accept client connection";
+             continue;
+         }
+         NIXL_DEBUG << "Client connected.";
+diff --git a/src/bindings/python/nixl_bindings.cpp b/src/bindings/python/nixl_bindings.cpp
+index 2da3778..2331761 100644
+--- a/src/bindings/python/nixl_bindings.cpp
++++ b/src/bindings/python/nixl_bindings.cpp
+@@ -152,6 +152,7 @@ PYBIND11_MODULE(_bindings, m) {
+     py::enum_<nixl_thread_sync_t>(m, "nixl_thread_sync_t")
+         .value("NIXL_THREAD_SYNC_NONE", nixl_thread_sync_t::NIXL_THREAD_SYNC_NONE)
+         .value("NIXL_THREAD_SYNC_STRICT", nixl_thread_sync_t::NIXL_THREAD_SYNC_STRICT)
++        .value("NIXL_THREAD_SYNC_RW", nixl_thread_sync_t::NIXL_THREAD_SYNC_RW)
+         .value("NIXL_THREAD_SYNC_DEFAULT", nixl_thread_sync_t::NIXL_THREAD_SYNC_DEFAULT)
+         .export_values();
+ 
+diff --git a/src/api/python/_api.py b/src/api/python/_api.py
+index f1cd7bd..c418997 100644
+--- a/src/api/python/_api.py
++++ b/src/api/python/_api.py
+@@ -126,6 +126,7 @@ nixl_backend_handle = int
+ @param listen_port Specify the port for the listener thread to listen on.
+ @param capture_telemetry Whether to enable telemetry capture.
+ @param num_threads Specify number of threads for the supported multi-threaded backends.
++@param num_workers Specify number of shared workers for each backend.
+ @param backends List of backend names for agent to initialize.
+         Default is UCX, other backends can be added to the list, or after
+         agent creation, can be initialized with create_backend.
+@@ -141,6 +142,7 @@ class nixl_agent_config:
+         capture_telemetry: bool = False,
+         num_threads: int = 0,
+         backends: list[str] = ["UCX"],
++        num_workers: int = 1,
+     ):
+         # TODO: add backend init parameters
+         self.backends = backends
+@@ -149,6 +151,7 @@ class nixl_agent_config:
+         self.port = listen_port
+         self.capture_telemetry = capture_telemetry
+         self.num_threads = num_threads
++        self.num_workers = num_workers
+ 
+ 
+ """
+@@ -178,7 +181,9 @@ class nixl_agent:
+             nixl_conf = nixl_agent_config()  # Using defaults set in nixl_agent_config
+ 
+         thread_config = (
+-            nixlBind.NIXL_THREAD_SYNC_STRICT
++            nixlBind.NIXL_THREAD_SYNC_RW
++            if nixl_conf.num_workers > 1
++            else nixlBind.NIXL_THREAD_SYNC_STRICT
+             if nixl_conf.enable_listen
+             else nixlBind.NIXL_THREAD_SYNC_NONE
+         )
+@@ -189,7 +194,7 @@ class nixl_agent:
+             nixl_conf.enable_listen,
+             nixl_conf.port,
+             thread_config,
+-            1,
++            nixl_conf.num_workers,
+             0,
+             100000,
+             nixl_conf.capture_telemetry,
+@@ -227,6 +232,8 @@ class nixl_agent:
+             else:
+                 # TODO: improve population of init from nixl_conf
+                 init: dict[str, str] = {}
++                if bknd == "UCX":
++                    init["num_workers"] = str(nixl_conf.num_workers)
+                 if nixl_conf.num_threads > 0:
+                     if bknd == "UCX" or bknd == "OBJ":
+                         init["num_threads"] = str(nixl_conf.num_threads)

@@ -9,6 +9,8 @@ from pathlib import Path
 import pytest
 from examples.sciaccel_rl.prepare.build_dataset import _container_source_root
 
+pytestmark = pytest.mark.cpu_test
+
 # The task bank lives outside this repo, so these tests are opt-in. Set
 # SCIACCEL_RL_REPO to a checkout with compiled envs, or they skip.
 SCIACCEL_RL_REPO = os.environ.get("SCIACCEL_RL_REPO", "")

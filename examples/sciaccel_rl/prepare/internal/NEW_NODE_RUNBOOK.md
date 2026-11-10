@@ -24,7 +24,7 @@ pssh -h /tmp/newhosts -t 30 -i '
   hostname -s
   nvidia-smi --query-gpu=count --format=csv,noheader | head -1
   test -d ${PSRL_PATH} && echo REPO_OK || echo REPO_MISSING
-  test -f ${PSRL_WORKSPACE}/env/psrl.sh && echo ENV_OK || echo ENV_MISSING
+  test -f ${PSRL_WORKSPACE}/env/env_311.sh && echo ENV_OK || echo ENV_MISSING
   test -d ${SCIACCEL_REPO}/envs/laps/tasks \
     && echo TASKS_OK || echo TASKS_MISSING'
 ```

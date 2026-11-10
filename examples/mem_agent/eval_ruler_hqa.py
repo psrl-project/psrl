@@ -9,10 +9,11 @@ from collections import Counter
 from pathlib import Path
 
 import aiohttp
+from transformers import AutoTokenizer
+
 from examples.mem_agent.config import MemAgentRuntimeConfig
 from examples.mem_agent.reward import extract_boxed_answer
 from examples.mem_agent.runner import MemAgent
-from transformers import AutoTokenizer
 
 
 def _normalize_answer(value: str) -> str:

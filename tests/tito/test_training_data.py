@@ -4,7 +4,10 @@ import base64
 import io
 
 import numpy as np
+import pytest
 from psrl.utils.tito.training_data import build_training_data
+
+pytestmark = pytest.mark.cpu_test
 
 
 def _npy_b64(arr: np.ndarray) -> str:

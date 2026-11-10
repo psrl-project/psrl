@@ -108,7 +108,8 @@ class SessionAgentLoop(AgentLoopBase):
     ) -> tuple[TokenOutput | list[TokenOutput] | None, TerminateReason]:
         """Run a URL-configured agent and collect its TITO trajectories."""
         async with self.session_scope(request) as session_id:
-            result = await self.run_session(request, self.session_api_url(session_id))
+            async with self.generation_lease(bool(request.get("validate", False))):
+                result = await self.run_session(request, self.session_api_url(session_id))
             training_data = await self.get_training_data(session_id)
             if not training_data or any(item["num_turns"] == 0 or not item["response_ids"] for item in training_data):
                 return None, TerminateReason.ROLLOUT_ERROR

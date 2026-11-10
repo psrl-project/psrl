@@ -7,7 +7,7 @@ set -euo pipefail
 usage() { sed -n '2,3p' "$0"; }
 
 PSRL_PATH=${PSRL_PATH:-$(python3 -c "import os, psrl; print(os.path.dirname(os.path.dirname(psrl.__file__)))")}
-ENV_SCRIPT=${ENV_SCRIPT:-${PSRL_WORKSPACE:-}/env/psrl.sh}
+ENV_SCRIPT=${ENV_SCRIPT:-${PSRL_WORKSPACE:-}/env/env_311.sh}
 
 MODEL=${HF_MODEL_PATH:-${PSRL_WORKSPACE:-}/models/Qwen3.5-9B}
 SERVED_NAME="qwen35-9b"

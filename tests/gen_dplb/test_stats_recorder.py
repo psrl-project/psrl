@@ -5,6 +5,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
+pytestmark = pytest.mark.cpu_test
+
+
 # --- Minimal Stubs Without vLLM or Ray Imports ---
 
 
@@ -73,8 +76,8 @@ def test_record_creates_per_instance_files(tmp_path):
     recorder.record(instance_to_engine_status)
     recorder.close()
 
-    assert (tmp_path / "stats_rollout-0_dp0.jsonl").exists()
-    assert (tmp_path / "stats_rollout-1_dp0.jsonl").exists()
+    assert (tmp_path / "stats_r0_dp0.jsonl").exists()
+    assert (tmp_path / "stats_r1_dp0.jsonl").exists()
 
 
 @pytest.mark.unit
@@ -104,7 +107,7 @@ def test_record_row_schema(tmp_path):
     recorder.record(instance_to_engine_status)
     recorder.close()
 
-    rows = [json.loads(line) for line in (tmp_path / "stats_rollout-0_dp0.jsonl").read_text().splitlines()]
+    rows = [json.loads(line) for line in (tmp_path / "stats_r0_dp0.jsonl").read_text().splitlines()]
     assert len(rows) == 1
     row = rows[0]
     assert row["model_version"] == 42
@@ -140,7 +143,7 @@ def test_record_nullable_iteration_stats(tmp_path):
     recorder.record(instance_to_engine_status)
     recorder.close()
 
-    rows = [json.loads(line) for line in (tmp_path / "stats_rollout-0_dp0.jsonl").read_text().splitlines()]
+    rows = [json.loads(line) for line in (tmp_path / "stats_r0_dp0.jsonl").read_text().splitlines()]
     assert len(rows) == 1
     row = rows[0]
     assert row["avg_ttft"] is None
@@ -186,7 +189,7 @@ def test_record_multiple_ticks_appends(tmp_path):
     recorder.record(status)
     recorder.close()
 
-    rows = (tmp_path / "stats_rollout-0_dp0.jsonl").read_text().strip().splitlines()
+    rows = (tmp_path / "stats_r0_dp0.jsonl").read_text().strip().splitlines()
     assert len(rows) == 2
 
 
@@ -213,7 +216,7 @@ def test_filename_sanitizes_replica_id(tmp_path):
     recorder.record(status)
     recorder.close()
 
-    assert (tmp_path / "stats_rollout_worker_0_dp0.jsonl").exists()
+    assert (tmp_path / "stats_r0_dp0.jsonl").exists()
 
 
 @pytest.mark.unit

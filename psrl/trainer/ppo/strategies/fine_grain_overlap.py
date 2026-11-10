@@ -11,10 +11,11 @@ from typing import TYPE_CHECKING
 
 import ray
 from transfer_queue.metadata import KVBatchMeta
+from verl.trainer.distillation.losses import is_distillation_enabled
 from verl.utils.debug import marked_timer
 
 from psrl.trainer.ppo.strategies.base import StepStrategy, psrl_logger
-from psrl.utils.config import resolve_fine_grain_chunk_size
+from psrl.utils.config.validation import resolve_fine_grain_chunk_size
 from psrl.utils.logger import EventType, log_dual_events
 
 if TYPE_CHECKING:
@@ -37,6 +38,11 @@ class FineGrainOverlapStrategy(StepStrategy):
             cfg: The ``psrl.fine_grain_overlap`` config sub-tree (OmegaConf node).
         """
         super().__init__(trainer)
+        if trainer.elastic_mode:
+            raise ValueError(
+                "FineGrainOverlapStrategy cannot run with elastic deployments. "
+                "Set psrl.fine_grain_overlap.granularity=none."
+            )
         t = trainer
         dp_size = t._get_dp_size(t.actor_wg, "actor")
         self.effective_granularity, self.chunk_groups = resolve_fine_grain_chunk_size(t.config, dp_size)
@@ -76,9 +82,7 @@ class FineGrainOverlapStrategy(StepStrategy):
             KVBatchMeta: The concatenated full batch after all phases complete.
         """
         t = self.trainer
-
         # Switch before GPU work so chunks can arrive while rollout progresses.
-        t.switch_to_trainer_mode()
 
         chunks: list[KVBatchMeta] = []
         chunk_idx = 0
@@ -91,6 +95,8 @@ class FineGrainOverlapStrategy(StepStrategy):
                 chunk_idx,
             )
             chunk_meta, is_last = ray.get(t.agent_loop_manager.wait_for_training_chunk.remote(buffer_id, chunk_idx))
+            if chunk_idx == 0:
+                t.switch_to_trainer_mode()
             psrl_logger.warning(
                 "FineGrainOverlap: got buffer=%d chunk=%d size=%d is_last=%s. Sampling replay buffer",
                 buffer_id,
@@ -124,7 +130,9 @@ class FineGrainOverlapStrategy(StepStrategy):
                 with marked_timer("values", timing_raw, color="cyan"):
                     chunk_meta = t._compute_values(chunk_meta, metrics=metrics)
 
-            if t.config.reward.launch_reward_fn_async:
+            if t.config.reward.launch_reward_fn_async or is_distillation_enabled(
+                getattr(t.config, "distillation", None)
+            ):
                 with marked_timer("async_reward_get", timing_raw, color="yellow"):
                     chunk_meta = ray.get(t.reward_manager.wait_for_reward_of_requests.remote(chunk_meta))
             else:

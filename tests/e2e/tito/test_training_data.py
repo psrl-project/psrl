@@ -3,6 +3,8 @@
 import pytest
 from psrl.utils.tito.training_data import build_training_data
 
+pytestmark = pytest.mark.cpu_test
+
 
 def test_single_turn_no_trim():
     """Single turn: no env tokens, no trim needed."""

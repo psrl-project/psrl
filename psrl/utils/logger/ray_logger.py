@@ -2,15 +2,16 @@ import inspect
 import logging
 import os
 import socket
+import sys
 import time
 from contextlib import contextmanager
 from enum import Enum
 
-import torch
-
 
 def get_worker_info():
     """Get the worker info from the environment variables."""
+    import torch
+
     worker_ip = os.getenv("LOCAL_IP", None)
     if worker_ip is None:
         worker_ip = socket.gethostbyname(socket.gethostname())
@@ -108,44 +109,73 @@ def log_end_event(
         )
 
 
-class DualOutputHandler(logging.Handler):
-    """A logger handler that writes to both the original stdout and a file."""
-
-    def __init__(self, log_dir, log_prefix):
-        super().__init__()
-        self.log_prefix = log_prefix
-        log_dir = os.path.expanduser(log_dir)
-        os.makedirs(log_dir, exist_ok=True)
-        self.file_path = os.path.join(log_dir, log_prefix + ".log")
-        self.file_handler = logging.FileHandler(self.file_path, mode="w")
-        self.stream_handler = logging.StreamHandler()
-        file_log_format = "%(asctime)s - %(filename)s - %(lineno)d - %(message)s"
-        self.file_formatter = logging.Formatter(file_log_format)
-        self.file_handler.setFormatter(self.file_formatter)
-
-    def emit(self, record):
-        self.file_handler.emit(record)
-
-        stream_record = logging.makeLogRecord(record.__dict__)
-        stream_record.msg = f"<{self.log_prefix}> - {record.getMessage()}"
-        stream_record.args = ()
-
-        self.stream_handler.emit(stream_record)
-
-
 class FileOnlyHandler(logging.Handler):
-    """A logger handler that writes only to a file."""
+    """
+    Write formatted records to a file this handler owns.
 
-    def __init__(self, log_dir, log_prefix):
+    Nested `logging.FileHandler` objects are closed by `logging.shutdown` and
+    `dictConfig`. CPython then drops later writes when the mode is `w`.
+    """
+
+    terminator = "\n"
+
+    def __init__(self, log_dir: str, log_prefix: str):
         super().__init__()
         self.log_prefix = log_prefix
         log_dir = os.path.expanduser(log_dir)
         os.makedirs(log_dir, exist_ok=True)
         self.file_path = os.path.join(log_dir, log_prefix + ".log")
-        self.file_handler = logging.FileHandler(self.file_path, mode="w")
-        file_log_format = "%(asctime)s - %(filename)s - %(lineno)d - %(message)s"
-        self.file_formatter = logging.Formatter(file_log_format)
-        self.file_handler.setFormatter(self.file_formatter)
+        self.setFormatter(logging.Formatter("%(asctime)s - %(filename)s - %(lineno)d - %(message)s"))
+        self._stream = None
+        # Truncate at construction so a new process replaces the previous run.
+        self._open("w")
 
-    def emit(self, record):
-        self.file_handler.emit(record)
+    def _open(self, mode: str) -> None:
+        self._stream = open(self.file_path, mode, encoding="utf-8")
+
+    def _ensure_stream(self) -> None:
+        if self._stream is None or self._stream.closed:
+            self._open("a")
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self._ensure_stream()
+            stream = self._stream
+            assert stream is not None, "Log file stream is not open."
+            stream.write(self.format(record) + self.terminator)
+            stream.flush()
+        except Exception:
+            self.handleError(record)
+
+    def flush(self) -> None:
+        self.acquire()
+        try:
+            if self._stream is not None and not self._stream.closed:
+                self._stream.flush()
+        finally:
+            self.release()
+
+    def close(self) -> None:
+        self.acquire()
+        try:
+            if self._stream is not None and not self._stream.closed:
+                self._stream.flush()
+                self._stream.close()
+            self._stream = None
+        finally:
+            self.release()
+            super().close()
+
+
+class DualOutputHandler(FileOnlyHandler):
+    """
+    Write formatted records to a file this handler owns and to stderr.
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:
+        super().emit(record)
+        try:
+            sys.stderr.write(f"<{self.log_prefix}> - {record.getMessage()}{self.terminator}")
+            sys.stderr.flush()
+        except Exception:
+            self.handleError(record)

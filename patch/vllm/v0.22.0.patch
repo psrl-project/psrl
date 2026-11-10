@@ -1,26 +1,70 @@
-From af2fd45499da34349ca3b89dfbbae7141e873213 Mon Sep 17 00:00:00 2001
-From: Somoku <linsh0@protonmail.com>
-Date: Tue, 23 Jun 2026 23:49:57 +0800
-Subject: [PATCH] v0.22.0 patch
-
----
- vllm/config/scheduler.py                      |  12 +
- .../device_communicators/nccl_suspend.py      | 208 ++++++++++++++++++
- vllm/entrypoints/grpc_server.py               |  26 ++-
- vllm/model_executor/models/qwen2.py           |  13 +-
- vllm/v1/core/sched/scheduler.py               |  12 +
- vllm/v1/engine/core_client.py                 |   4 +
- vllm/v1/metrics/loggers.py                    |  13 +-
- vllm/v1/metrics/stats.py                      |   4 +
- vllm/v1/worker/gpu/cudagraph_utils.py         |  10 +
- vllm/v1/worker/gpu/model_runner.py            |  42 ++++
- vllm/v1/worker/gpu_model_runner.py            |  76 +++++++
- vllm/v1/worker/gpu_worker.py                  |  75 +++++++
- 12 files changed, 486 insertions(+), 9 deletions(-)
- create mode 100644 vllm/distributed/device_communicators/nccl_suspend.py
-
+diff --git a/requirements/cuda.txt b/requirements/cuda.txt
+index 99a45c9d3ca32d5a8b45d17504f2cb739c9a0c3e..0043eea52197733a95a7ff330d14ab91b116d8f8 100644
+--- a/requirements/cuda.txt
++++ b/requirements/cuda.txt
+@@ -9,8 +9,8 @@ torchaudio==2.11.0
+ # These must be updated alongside torch
+ torchvision==0.26.0 # Required for phi3v processor. See https://github.com/pytorch/vision?tab=readme-ov-file#installation for corresponding version
+ # FlashInfer should be updated together with the Dockerfile
+-flashinfer-python==0.6.11.post2
+-flashinfer-cubin==0.6.11.post2
++flashinfer-python==0.6.11.post3
++flashinfer-cubin==0.6.11.post3
+ apache-tvm-ffi==0.1.9
+ tilelang==0.1.9
+ # Cap nvidia-cudnn-frontend (transitive dep of flashinfer) due to
+diff --git a/tests/v1/streaming_input/test_async_llm_streaming.py b/tests/v1/streaming_input/test_async_llm_streaming.py
+index b532eed15f38a12bbd725dc961623b9cc1563fea..278867454a06f1ab0b2cf3ca8cb14fb25d57122a 100644
+--- a/tests/v1/streaming_input/test_async_llm_streaming.py
++++ b/tests/v1/streaming_input/test_async_llm_streaming.py
+@@ -94,6 +94,23 @@ async def test_generate_normal_flow(mock_async_llm):
+     assert outputs[1].finished is True
+ 
+ 
++@pytest.mark.asyncio
++async def test_abort_all_uses_internal_request_ids():
++    """abort_all must wake queues keyed by randomized internal request IDs."""
++    llm = MagicMock(spec=AsyncLLM)
++    llm.output_processor = MagicMock()
++    llm.output_processor.abort_all.return_value = ["request-internal"]
++    llm.engine_core = MagicMock()
++    llm.engine_core.abort_requests_async = AsyncMock()
++    llm.log_requests = False
++
++    aborted_count = await AsyncLLM.abort_all(llm)
++
++    assert aborted_count == 1
++    llm.output_processor.abort_all.assert_called_once_with(internal=True)
++    llm.engine_core.abort_requests_async.assert_awaited_once_with(["request-internal"])
++
++
+ def make_output(request_id: str, finished: bool) -> RequestOutput:
+     """Helper to create a RequestOutput."""
+     return RequestOutput(
+diff --git a/vllm/compilation/cuda_graph.py b/vllm/compilation/cuda_graph.py
+index b63d86199720d077118f2427c52498ab216b24a3..cd9678e199c9044c49357781d2fe0600163b7d94 100644
+--- a/vllm/compilation/cuda_graph.py
++++ b/vllm/compilation/cuda_graph.py
+@@ -284,14 +284,10 @@ class CUDAGraphWrapper:
+ 
+             with ExitStack() as stack:
+                 if self.cudagraph_options.gc_disable:
+-                    # during every model forward for piecewise cudagraph
+-                    # mode, we will capture many pieces of cudagraphs
+-                    # (roughly one per layer). running gc again and again
+-                    # across layers will make the cudagraph capture very slow.
+-                    # therefore, we only run gc for the first graph,
+-                    # and disable gc for the rest of the graphs.
++                    # Skip repeated collections during piecewise capture. Background
++                    # callers still require the integer count returned by `gc.collect`.
+                     stack.enter_context(
+-                        patch("gc.collect", lambda *args, **kwargs: None)
++                        patch("gc.collect", lambda *args, **kwargs: 0)
+                     )
+                     stack.enter_context(
+                         patch(
 diff --git a/vllm/config/scheduler.py b/vllm/config/scheduler.py
-index fb6951ea7..893a242bc 100644
+index fb6951ea7dd1b3a5bb38b3fa0bbb7998a378aec5..893a242bc9b42aab32394565ce725ac4aacc8e15 100644
 --- a/vllm/config/scheduler.py
 +++ b/vllm/config/scheduler.py
 @@ -154,6 +154,18 @@ class SchedulerConfig:
@@ -42,9 +86,35 @@ index fb6951ea7..893a242bc 100644
      @staticmethod
      def default_factory(**kwargs):
          """
+diff --git a/vllm/distributed/device_communicators/custom_all_reduce.py b/vllm/distributed/device_communicators/custom_all_reduce.py
+index 65a19626468443e3c7a51455f018e6d5bf851f8f..6b69228fb0956a1d359c24ddda859c2aba16bbbb 100644
+--- a/vllm/distributed/device_communicators/custom_all_reduce.py
++++ b/vllm/distributed/device_communicators/custom_all_reduce.py
+@@ -281,6 +281,21 @@ class CustomAllreduce:
+             # latency) compared to the performance gain of using custom kernels
+             return self.all_reduce(input, registered=False)
+ 
++    def reset_graph_buffers(self) -> None:
++        """Reclaim graph registrations after every rank has released its graphs."""
++        if self.disabled:
++            return
++        assert not self._IS_CAPTURING, "Cannot reset buffers during graph capture."
++
++        # Peer graphs must finish before their IPC mappings can be closed.
++        dist.barrier(group=self.group)
++        ops.dispose(self._ptr)
++        self._ptr = 0
++        self._ptr = ops.init_custom_ar(
++            self.meta_ptrs, self.rank_data, self.rank, self.fully_connected
++        )
++        ops.register_buffer(self._ptr, self.buffer_ptrs)
++
+     def close(self):
+         if not self.disabled and self._ptr:
+             if ops is not None:
 diff --git a/vllm/distributed/device_communicators/nccl_suspend.py b/vllm/distributed/device_communicators/nccl_suspend.py
 new file mode 100644
-index 000000000..76deb7eb7
+index 0000000000000000000000000000000000000000..76deb7eb7e9584274eec89f8dfe9992f54e9baf3
 --- /dev/null
 +++ b/vllm/distributed/device_communicators/nccl_suspend.py
 @@ -0,0 +1,208 @@
@@ -257,8 +327,178 @@ index 000000000..76deb7eb7
 +    )
 +    return {"reclaimed_bytes": reclaimed, "n": n_ok, "total": len(handles)}
 \ No newline at end of file
+diff --git a/vllm/distributed/parallel_state.py b/vllm/distributed/parallel_state.py
+index 712167c601cf35966e319e36c060c867813b6960..a35191aeb6bf53a4871ac62df4dfa780556be0ed 100644
+--- a/vllm/distributed/parallel_state.py
++++ b/vllm/distributed/parallel_state.py
+@@ -23,18 +23,17 @@ If you only need to use the distributed environment without model/pipeline
+  steps.
+ """
+ 
+-import contextlib
+ import gc
++import os
+ import pickle
++import socket
+ import weakref
+ from collections import namedtuple
+ from collections.abc import Callable
+ from contextlib import contextmanager, nullcontext
+ from dataclasses import dataclass
+ from datetime import timedelta
+-from multiprocessing import shared_memory
+ from typing import TYPE_CHECKING, Any, Protocol
+-from unittest.mock import patch
+ 
+ import torch
+ import torch.distributed
+@@ -127,6 +126,19 @@ def _register_group(group: "GroupCoordinator") -> None:
+     _groups[group.unique_name] = weakref.ref(group)
+ 
+ 
++def reset_cudagraph_communication_buffers() -> None:
++    """Reset custom allreduce registrations after local graphs are finalized."""
++    seen: set[int] = set()
++    for group_ref in _groups.values():
++        group = group_ref()
++        if group is None or group.device_communicator is None:
++            continue
++        communicator = getattr(group.device_communicator, "ca_comm", None)
++        if communicator is not None and id(communicator) not in seen:
++            seen.add(id(communicator))
++            communicator.reset_graph_buffers()
++
++
+ def all_reduce(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
+     assert group_name in _groups, f"Group {group_name} is not found."
+     group = _groups[group_name]()
+@@ -1957,6 +1969,24 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
+             )
+ 
+ 
++def _shared_memory_domain_id() -> tuple[str, int, int]:
++    """Identify a host IPC domain without allocating from /dev/shm."""
++    try:
++        with open("/proc/sys/kernel/random/boot_id") as stream:
++            host_id = stream.read().strip()
++    except OSError:
++        host_id = socket.gethostname()
++    try:
++        ipc_namespace = os.stat("/proc/self/ns/ipc").st_ino
++    except OSError:
++        ipc_namespace = -1
++    try:
++        shm_device = os.stat("/dev/shm").st_dev
++    except OSError:
++        shm_device = -1
++    return host_id, ipc_namespace, shm_device
++
++
+ def in_the_same_node_as(
+     pg: ProcessGroup | StatelessProcessGroup, source_rank: int = 0
+ ) -> list[bool]:
+@@ -1965,90 +1995,23 @@ def in_the_same_node_as(
+     as the source rank. It tests if processes are attached to the same
+     memory system (shared access to shared memory).
+     """
++    local_domain = _shared_memory_domain_id()
+     if isinstance(pg, ProcessGroup):
+         assert torch.distributed.get_backend(pg) != torch.distributed.Backend.NCCL, (
+             "in_the_same_node_as should be tested with a non-NCCL group."
+         )
+-        # local rank inside the group
+-        rank = torch.distributed.get_rank(group=pg)
+         world_size = torch.distributed.get_world_size(group=pg)
+-
+-        # global ranks of the processes in the group
+-        ranks = torch.distributed.get_process_group_ranks(pg)
++        domains: list[tuple[str, int, int] | None] = [None] * world_size
++        torch.distributed.all_gather_object(domains, local_domain, group=pg)
+     else:
+-        rank = pg.rank
+         world_size = pg.world_size
+-        ranks = list(range(world_size))
+-
+-    # local tensor in each process to store the result
+-    is_in_the_same_node = torch.tensor(
+-        [0] * world_size, dtype=torch.int32, device="cpu"
+-    )
+-
+-    magic_message = b"magic_message"
+-    shm = None
+-
+-    try:
+-        with contextlib.suppress(OSError):
+-            if rank == source_rank:
+-                # create a shared memory segment
+-                shm = shared_memory.SharedMemory(create=True, size=128)
+-                assert shm.buf is not None, "Buffer was not created"
+-                shm.buf[: len(magic_message)] = magic_message
+-                if isinstance(pg, ProcessGroup):
+-                    torch.distributed.broadcast_object_list(
+-                        [shm.name], src=ranks[source_rank], group=pg
+-                    )
+-                else:
+-                    pg.broadcast_obj(shm.name, src=source_rank)
+-                is_in_the_same_node[rank] = 1
+-            else:
+-                # try to open the shared memory segment
+-                if isinstance(pg, ProcessGroup):
+-                    recv = [None]
+-                    torch.distributed.broadcast_object_list(
+-                        recv, src=ranks[source_rank], group=pg
+-                    )
+-                    name = recv[0]
+-                else:
+-                    name = pg.broadcast_obj(None, src=source_rank)
+-                # fix to https://stackoverflow.com/q/62748654/9191338
+-                # Python incorrectly tracks shared memory even if it is not
+-                # created by the process. The following patch is a workaround.
+-                with patch(
+-                    "multiprocessing.resource_tracker.register",
+-                    lambda *args, **kwargs: None,
+-                ):
+-                    shm = shared_memory.SharedMemory(name=name)
+-                assert shm.buf is not None, "Buffer was not opened"
+-                if shm.buf[: len(magic_message)] == magic_message:
+-                    is_in_the_same_node[rank] = 1
+-    except Exception as e:
+-        logger.error("Error ignored in is_in_the_same_node: %s", e)
+-    finally:
+-        if shm:
+-            shm.close()
+-
+-    if isinstance(pg, ProcessGroup):
+-        torch.distributed.barrier(group=pg)
+-    else:
+-        pg.barrier()
+-
+-    # clean up the shared memory segment
+-    with contextlib.suppress(OSError):
+-        if rank == source_rank and shm:
+-            shm.unlink()
+-
+-    if isinstance(pg, ProcessGroup):
+-        torch.distributed.all_reduce(is_in_the_same_node, group=pg)
+-        aggregated_data = is_in_the_same_node
+-    else:
+-        aggregated_data = torch.zeros_like(is_in_the_same_node)
+-        for i in range(world_size):
+-            rank_data = pg.broadcast_obj(is_in_the_same_node, src=i)
+-            aggregated_data += rank_data
++        domains = [
++            pg.broadcast_obj(local_domain if pg.rank == rank else None, src=rank)
++            for rank in range(world_size)
++        ]
+ 
+-    return [x == 1 for x in aggregated_data.tolist()]
++    source_domain = domains[source_rank]
++    return [domain == source_domain for domain in domains]
+ 
+ 
+ def is_global_first_rank() -> bool:
 diff --git a/vllm/entrypoints/grpc_server.py b/vllm/entrypoints/grpc_server.py
-index b9173b302..c1809d97e 100644
+index b9173b302ca3bd8585832def18417ed9dc393443..c1809d97e65c6600db95967aa041804dbe9645fc 100644
 --- a/vllm/entrypoints/grpc_server.py
 +++ b/vllm/entrypoints/grpc_server.py
 @@ -22,6 +22,7 @@ import argparse
@@ -315,8 +555,249 @@ index b9173b302..c1809d97e 100644
  
      # Create gRPC server
      server = grpc.aio.server(
+diff --git a/vllm/model_executor/layers/fused_moe/all2all_utils.py b/vllm/model_executor/layers/fused_moe/all2all_utils.py
+index 6d48221464372cf24f31ee4246d3e2cfa4d458d4..17d037481e7245c283909242aa7efb694c0b3d2b 100644
+--- a/vllm/model_executor/layers/fused_moe/all2all_utils.py
++++ b/vllm/model_executor/layers/fused_moe/all2all_utils.py
+@@ -42,11 +42,6 @@ if current_platform.is_cuda_alike():
+         )
+     if has_mori():
+         from .prepare_finalize.mori import MoriPrepareAndFinalize
+-    if has_nixl_ep():
+-        from .prepare_finalize.nixl_ep import (
+-            NIXL_EP_QUANT_BLOCK_SHAPE,
+-            NixlEPPrepareAndFinalize,
+-        )
+ 
+ 
+ def _get_ep_all2all_manager(eep_stage: bool = False) -> Any:
+@@ -95,6 +90,8 @@ def maybe_roundup_layer_hidden_size(
+         )
+ 
+     if moe_parallel_config.use_nixl_ep_kernels:
++        from .prepare_finalize.nixl_ep import NixlEPPrepareAndFinalize
++
+         hidden_size = NixlEPPrepareAndFinalize.maybe_roundup_layer_hidden_size(
+             hidden_size
+         )
+@@ -281,6 +278,11 @@ def maybe_make_prepare_finalize(
+         )
+ 
+     elif moe.use_nixl_ep_kernels:
++        from .prepare_finalize.nixl_ep import (
++            NIXL_EP_QUANT_BLOCK_SHAPE,
++            NixlEPPrepareAndFinalize,
++        )
++
+         assert quant_config is not None
+         global_to_physical = physical_to_global = local_expert_global_ids = None
+         if routing_tables is not None:
+diff --git a/vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py b/vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py
+index 92fc6442ced63642f8b4c81ca25264e540e58a63..ce523436d13b5e810734a121388d2ab9fd1c399f 100644
+--- a/vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py
++++ b/vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py
+@@ -3,6 +3,7 @@
+ """Inference-only Qwen3-Next/Qwen3.5 model."""
+ 
+ import functools
++import os
+ from typing import Literal
+ 
+ import torch
+@@ -439,6 +440,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
+         gqa_interleaved_layout=False,
+     ) -> None:
+         super().__init__(config, vllm_config, prefix)
++        self.disable_attn = os.environ.get("VLLM_DISABLE_ATTN") == "1"
+ 
+         self.num_k_heads = config.linear_num_key_heads
+         self.num_v_heads = config.linear_num_value_heads
+@@ -892,14 +894,17 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
+                 device=projected_states_qkvz.device,
+             )
+ 
+-            torch.ops.vllm.qwen_gdn_attention_core(
+-                projected_states_qkvz,
+-                projected_states_ba,
+-                z,
+-                core_attn_out,
+-                fast_kernel=True,
+-                layer_name=_encode_layer_name(self.prefix),
+-            )
++            if not self.disable_attn:
++                torch.ops.vllm.qwen_gdn_attention_core(
++                    projected_states_qkvz,
++                    projected_states_ba,
++                    z,
++                    core_attn_out,
++                    fast_kernel=True,
++                    layer_name=_encode_layer_name(self.prefix),
++                )
++            else:
++                z.zero_()
+ 
+             self._output_projection(core_attn_out, z, output, num_tokens)
+         else:
+@@ -953,14 +958,17 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
+             device=hidden_states.device,
+         )
+ 
+-        torch.ops.vllm.qwen_gdn_attention_core(
+-            mixed_qkv,
+-            b,
+-            a,
+-            core_attn_out,
+-            fast_kernel=False,
+-            layer_name=_encode_layer_name(self.prefix),
+-        )
++        if not self.disable_attn:
++            torch.ops.vllm.qwen_gdn_attention_core(
++                mixed_qkv,
++                b,
++                a,
++                core_attn_out,
++                fast_kernel=False,
++                layer_name=_encode_layer_name(self.prefix),
++            )
++        else:
++            z.zero_()
+ 
+         # ============================================================
+         # Part 3: Output Projection
+@@ -996,13 +1004,16 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
+         )
+         z = torch.empty_like(core_attn_out)
+ 
+-        torch.ops.vllm.gdn_attention_core_xpu(
+-            core_attn_out,
+-            z,
+-            projected_states_qkvz,
+-            projected_states_ba,
+-            self.prefix,
+-        )
++        if not self.disable_attn:
++            torch.ops.vllm.gdn_attention_core_xpu(
++                core_attn_out,
++                z,
++                projected_states_qkvz,
++                projected_states_ba,
++                self.prefix,
++            )
++        else:
++            z.zero_()
+ 
+         # ============================================================
+         # Part 3: Output Projection
+@@ -1050,13 +1061,16 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
+             device=hidden_states.device,
+         )
+ 
+-        torch.ops.vllm.cpu_gdn_attention_core(
+-            mixed_qkv,
+-            b,
+-            a,
+-            core_attn_out,
+-            _encode_layer_name(self.prefix),
+-        )
++        if not self.disable_attn:
++            torch.ops.vllm.cpu_gdn_attention_core(
++                mixed_qkv,
++                b,
++                a,
++                core_attn_out,
++                _encode_layer_name(self.prefix),
++            )
++        else:
++            z.zero_()
+ 
+         z_shape_og = z.shape
+         core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
+@@ -1216,6 +1230,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
+                    head_dim); mutated in-place.
+             core_attn_out: Pre-allocated output buffer for attention results.
+         """
++        if self.disable_attn:
++            z_out.zero_()
++            core_attn_out.zero_()
++            return
++
+         forward_context = get_forward_context()
+         attn_metadata_raw = forward_context.attn_metadata
+ 
+@@ -1273,6 +1292,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
+             a: alpha gating vector                  (num_tokens, num_heads)
+             core_attn_out: Pre-allocated output buffer for attention results.
+         """
++        if self.disable_attn:
++            return
++
+         forward_context = get_forward_context()
+         attn_metadata_raw = forward_context.attn_metadata
+ 
+diff --git a/vllm/model_executor/models/chatglm.py b/vllm/model_executor/models/chatglm.py
+index c5d857e7c3df56106ae19294374409b344db9412..788169229220d242c9316a2f075723ad00bd4358 100644
+--- a/vllm/model_executor/models/chatglm.py
++++ b/vllm/model_executor/models/chatglm.py
+@@ -113,6 +113,14 @@ class GLMAttention(nn.Module):
+             rope_parameters=rope_parameters,
+             is_neox_style=is_neox_style,
+         )
++        self.disable_attn = False
++        import os
++        if "VLLM_DISABLE_ATTN" in os.environ and os.environ["VLLM_DISABLE_ATTN"] == "1":
++            print(
++                "Hijacking the attention in ChatGLM to forbid the use of the attention."
++            )
++            self.disable_attn = True
++
+         self.attn = Attention(
+             self.num_heads,
+             self.head_dim,
+@@ -131,7 +139,11 @@ class GLMAttention(nn.Module):
+         qkv, _ = self.query_key_value(hidden_states)
+         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+         q, k = self.rotary_emb(position_ids, q, k)
+-        context_layer = self.attn(q, k, v)
++        # For profiling, we hijack here to forbid the use of the attention.
++        if self.disable_attn:
++            context_layer = q
++        else:
++            context_layer = self.attn(q, k, v)
+         attn_output, _ = self.dense(context_layer)
+         return attn_output
+ 
+diff --git a/vllm/model_executor/models/glm4.py b/vllm/model_executor/models/glm4.py
+index 89447927d5cdd9b616faf675e87bbdc6b8c65932..1375d33df862c33624940976aa8c03e9c6df8cf6 100644
+--- a/vllm/model_executor/models/glm4.py
++++ b/vllm/model_executor/models/glm4.py
+@@ -123,6 +123,12 @@ class Glm4Attention(nn.Module):
+             rope_parameters=config.rope_parameters,
+             is_neox_style=False,
+         )
++        self.disable_attn = False
++        import os
++        if "VLLM_DISABLE_ATTN" in os.environ and os.environ["VLLM_DISABLE_ATTN"] == "1":
++            print("Hijacking the attention in Glm4 to forbid the use of the attention.")
++            self.disable_attn = True
++
+         self.attn = Attention(
+             self.num_heads,
+             self.head_dim,
+@@ -142,7 +148,11 @@ class Glm4Attention(nn.Module):
+         qkv, _ = self.qkv_proj(hidden_states)
+         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+         q, k = self.rotary_emb(positions, q, k)
+-        attn_output = self.attn(q, k, v)
++        # For profiling, we hijack here to forbid the use of the attention.
++        if self.disable_attn:
++            attn_output = q
++        else:
++            attn_output = self.attn(q, k, v)
+         output, _ = self.o_proj(attn_output)
+         return output
+ 
 diff --git a/vllm/model_executor/models/qwen2.py b/vllm/model_executor/models/qwen2.py
-index b83fedc70..6b1aa16e9 100644
+index b83fedc70db024ce6a3ab5847d20eafd4ad7e2a4..6b1aa16e90360e1f56d9b00b5af9c09b78752588 100644
 --- a/vllm/model_executor/models/qwen2.py
 +++ b/vllm/model_executor/models/qwen2.py
 @@ -189,6 +189,13 @@ class Qwen2Attention(nn.Module):
@@ -346,8 +827,172 @@ index b83fedc70..6b1aa16e9 100644
          output, _ = self.o_proj(attn_output)
          return output
  
+diff --git a/vllm/model_executor/models/qwen3.py b/vllm/model_executor/models/qwen3.py
+index 6dec60232b1d8940a45a3dd1640d33a20ef55259..30943b86b3996fd0bbdb5c43b738ac21f73e2409 100644
+--- a/vllm/model_executor/models/qwen3.py
++++ b/vllm/model_executor/models/qwen3.py
+@@ -123,6 +123,13 @@ class Qwen3Attention(nn.Module):
+             if attn_type == AttentionType.ENCODER_ONLY
+             else Attention
+         )
++
++        self.disable_attn = False
++        import os
++        if "VLLM_DISABLE_ATTN" in os.environ and os.environ["VLLM_DISABLE_ATTN"] == "1":
++            print("Hijacking the attention in Qwen3 to forbid the use of the attention.")
++            self.disable_attn = True
++
+         self.attn = attn_cls(
+             self.num_heads,
+             self.head_dim,
+@@ -157,7 +164,11 @@ class Qwen3Attention(nn.Module):
+         k_by_head = self.k_norm(k_by_head)
+         k = k_by_head.view(k.shape)
+         q, k = self.rotary_emb(positions, q, k)
+-        attn_output = self.attn(q, k, v)
++        # For profiling, we hijack here to forbid the use of the attention.
++        if self.disable_attn:
++            attn_output = q
++        else:
++            attn_output = self.attn(q, k, v)
+         output, _ = self.o_proj(attn_output)
+         return output
+ 
+diff --git a/vllm/model_executor/models/qwen3_moe.py b/vllm/model_executor/models/qwen3_moe.py
+index 4ec1be3367d8f63abcdfe5dad018bdfab7103c71..3dd7e3e77421ce6e8118fc85fee9387461f3474b 100644
+--- a/vllm/model_executor/models/qwen3_moe.py
++++ b/vllm/model_executor/models/qwen3_moe.py
+@@ -321,6 +321,15 @@ class Qwen3MoeAttention(nn.Module):
+             rope_parameters=rope_parameters,
+             dual_chunk_attention_config=dual_chunk_attention_config,
+         )
++
++        self.disable_attn = False
++        import os
++        if "VLLM_DISABLE_ATTN" in os.environ and os.environ["VLLM_DISABLE_ATTN"] == "1":
++            print(
++                "Hijacking the attention in Qwen3Moe to forbid the use of the attention."
++            )
++            self.disable_attn = True
++
+         self.attn = Attention(
+             self.num_heads,
+             self.head_dim,
+@@ -356,7 +365,11 @@ class Qwen3MoeAttention(nn.Module):
+         k_by_head = self.k_norm(k_by_head)
+         k = k_by_head.view(k.shape)
+         q, k = self.rotary_emb(positions, q, k)
+-        attn_output = self.attn(q, k, v)
++        # For profiling, we hijack here to forbid the use of the attention.
++        if self.disable_attn:
++            attn_output = q
++        else:
++            attn_output = self.attn(q, k, v)
+         output, _ = self.o_proj(attn_output)
+         return output
+ 
+diff --git a/vllm/model_executor/models/qwen3_next.py b/vllm/model_executor/models/qwen3_next.py
+index 28e1846662be2f85d4cdfb13470a1310db9f94c1..1b6897dedb93cbb26a8313a06a312a89ff039072 100644
+--- a/vllm/model_executor/models/qwen3_next.py
++++ b/vllm/model_executor/models/qwen3_next.py
+@@ -4,6 +4,7 @@
+ 
+ from collections.abc import Iterable
+ from itertools import islice
++import os
+ 
+ import torch
+ from torch import nn
+@@ -238,6 +239,7 @@ class Qwen3NextAttention(nn.Module):
+             config, "dual_chunk_attention_config", None
+         )
+         self.attn_output_gate = getattr(config, "attn_output_gate", True)
++        self.disable_attn = os.environ.get("VLLM_DISABLE_ATTN") == "1"
+ 
+         self.qkv_proj = QKVParallelLinear(
+             config.hidden_size,
+@@ -312,7 +314,9 @@ class Qwen3NextAttention(nn.Module):
+ 
+         q, k = self.rotary_emb(positions, q, k)
+ 
+-        attn_output = self.attn(q, k, v)
++        # Profiling can disable the expensive attention kernel while retaining
++        # the surrounding projections and output shape.
++        attn_output = q if self.disable_attn else self.attn(q, k, v)
+ 
+         if self.attn_output_gate:
+             gate = torch.sigmoid(gate)
+diff --git a/vllm/outputs.py b/vllm/outputs.py
+index 2c71d2afb1b5f743ed4376e10ecd0fae935d00ef..2fab108f51a04eea756e31445ed2466b82143a97 100644
+--- a/vllm/outputs.py
++++ b/vllm/outputs.py
+@@ -211,6 +211,7 @@ class PoolingRequestOutput(Generic[_O]):
+         prompt_token_ids (list[int]): A list of token IDs used in the prompt.
+         num_cached_tokens: The number of tokens with prefix cache hit.
+         finished (bool): A flag indicating whether the pooling is completed.
++        metrics: Request timing metrics when request statistics are enabled.
+     """
+ 
+     def __init__(
+@@ -220,12 +221,14 @@ class PoolingRequestOutput(Generic[_O]):
+         prompt_token_ids: list[int],
+         num_cached_tokens: int,
+         finished: bool,
++        metrics: RequestStateStats | None = None,
+     ):
+         self.request_id = request_id
+         self.prompt_token_ids = prompt_token_ids
+         self.num_cached_tokens = num_cached_tokens
+         self.finished = finished
+         self.outputs = outputs
++        self.metrics = metrics
+ 
+     def __repr__(self):
+         return (
+@@ -233,7 +236,8 @@ class PoolingRequestOutput(Generic[_O]):
+             f"outputs={self.outputs!r}, "
+             f"prompt_token_ids={self.prompt_token_ids}, "
+             f"num_cached_tokens={self.num_cached_tokens}, "
+-            f"finished={self.finished})"
++            f"finished={self.finished}, "
++            f"metrics={self.metrics})"
+         )
+ 
+ 
+@@ -273,6 +277,7 @@ class EmbeddingRequestOutput(PoolingRequestOutput[EmbeddingOutput]):
+             prompt_token_ids=request_output.prompt_token_ids,
+             num_cached_tokens=request_output.num_cached_tokens,
+             finished=request_output.finished,
++            metrics=getattr(request_output, "metrics", None),
+         )
+ 
+ 
+diff --git a/vllm/utils/import_utils.py b/vllm/utils/import_utils.py
+index e97228bfa609406991cdc6e034523dc416a75f29..2379315365612e5c473edc11757af7e2a66c9ee1 100644
+--- a/vllm/utils/import_utils.py
++++ b/vllm/utils/import_utils.py
+@@ -415,9 +415,17 @@ def has_deep_gemm() -> bool:
+     return _has_module("deep_gemm") or _has_module("vllm.third_party.deep_gemm")
+ 
+ 
++@cache
+ def has_nixl_ep() -> bool:
+-    """Whether the optional `nixl_ep` package is available."""
+-    return _has_module("nixl_ep")
++    """Whether the optional `nixl_ep` package can be imported."""
++    if not _has_module("nixl_ep"):
++        return False
++    try:
++        importlib.import_module("nixl_ep")
++    except (ImportError, OSError) as error:
++        logger.warning_once("Disabling the unavailable NIXL EP backend: %s.", error)
++        return False
++    return True
+ 
+ 
+ def has_triton_kernels() -> bool:
 diff --git a/vllm/v1/core/sched/scheduler.py b/vllm/v1/core/sched/scheduler.py
-index c69c9a811..436a648c4 100644
+index c69c9a8119ab71a06b3e894457706d95b1b261b9..436a648c4f141e732bb9db507b39f115516d10da 100644
 --- a/vllm/v1/core/sched/scheduler.py
 +++ b/vllm/v1/core/sched/scheduler.py
 @@ -81,6 +81,10 @@ class Scheduler(SchedulerInterface):
@@ -390,8 +1035,43 @@ index c69c9a811..436a648c4 100644
          )
  
      def make_spec_decoding_stats(
+diff --git a/vllm/v1/engine/async_llm.py b/vllm/v1/engine/async_llm.py
+index 419e15163a9f208e6f4f66d165c6e26ca0cf570c..5802ecfe138587593324ec47348d8da5988aaa68 100644
+--- a/vllm/v1/engine/async_llm.py
++++ b/vllm/v1/engine/async_llm.py
+@@ -706,9 +706,21 @@ class AsyncLLM(EngineClient):
+ 
+         self.output_handler = asyncio.create_task(output_handler())
+ 
++    async def abort_all(self, internal: bool = False) -> int:
++        """Abort all requests in OutputProcessor and EngineCore."""
++        # OutputProcessor.request_states is keyed by internal request IDs.
++        # Aborting them as external IDs leaves per-request queues unwoken when
++        # request ID randomization is enabled.
++        all_request_ids = self.output_processor.abort_all(internal=True)
++        await self.engine_core.abort_requests_async(all_request_ids)
++
++        if self.log_requests:
++            logger.info("Aborted all requests %s.", ",".join(all_request_ids))
++        return len(all_request_ids)
++
+     async def abort(
+         self, request_id: str | Iterable[str], internal: bool = False
+-    ) -> None:
++    ) -> int:
+         """Abort RequestId in OutputProcessor and EngineCore."""
+ 
+         request_ids = (
+@@ -719,6 +731,7 @@ class AsyncLLM(EngineClient):
+ 
+         if self.log_requests:
+             logger.info("Aborted request(s) %s.", ",".join(request_ids))
++        return len(all_request_ids)
+ 
+     async def notify_kv_transfer_request_rejected(
+         self,
 diff --git a/vllm/v1/engine/core_client.py b/vllm/v1/engine/core_client.py
-index c26380e6e..4e57d916a 100644
+index c26380e6e151571d62df85891d0ed04602dcf0ab..4e57d916a160f86d11ac133524416df6604b35f0 100644
 --- a/vllm/v1/engine/core_client.py
 +++ b/vllm/v1/engine/core_client.py
 @@ -642,6 +642,10 @@ class MPClient(EngineCoreClient):
@@ -405,8 +1085,32 @@ index c26380e6e..4e57d916a 100644
      def shutdown(self, timeout: float | None = None) -> None:
          """Shutdown engine manager under timeout and clean up resources."""
          if self._finalizer.detach() is not None:
+diff --git a/vllm/v1/engine/output_processor.py b/vllm/v1/engine/output_processor.py
+index e1032cfd1f2be4bdb63db980edf4d6bc4ba86e82..65875fb2c19137d1b5f962c9f42900be20088719 100644
+--- a/vllm/v1/engine/output_processor.py
++++ b/vllm/v1/engine/output_processor.py
+@@ -352,6 +352,7 @@ class RequestState:
+                 num_cached_tokens=self.num_cached_tokens,
+                 prompt_token_ids=prompt_token_ids,
+                 finished=finished,
++                metrics=self.stats,
+             )
+         assert self.logprobs_processor is not None
+         if self.output_kind == RequestOutputKind.DELTA:
+@@ -447,6 +448,11 @@ class OutputProcessor:
+             assert state.queue is not None
+             state.queue.put(e)
+ 
++    def abort_all(self, internal: bool = False) -> list[str]:
++        abort_request_ids = list(self.request_states.keys())
++        self.abort_requests(abort_request_ids, internal=internal)
++        return abort_request_ids
++
+     def abort_requests(self, request_ids: Iterable[str], internal: bool) -> list[str]:
+         """Abort a list of requests.
+ 
 diff --git a/vllm/v1/metrics/loggers.py b/vllm/v1/metrics/loggers.py
-index 6855efd9f..8c81f52f8 100644
+index 6855efd9f54c6f8ac5b95704455f64d6e456b4c8..8c81f52f8cc746fee0b472de2d8af9fa196d7c5d 100644
 --- a/vllm/v1/metrics/loggers.py
 +++ b/vllm/v1/metrics/loggers.py
 @@ -1153,8 +1153,20 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
@@ -452,28 +1156,199 @@ index 6855efd9f..8c81f52f8 100644
          if not custom_prometheus_logger:
              self.stat_loggers.append(
 diff --git a/vllm/v1/metrics/stats.py b/vllm/v1/metrics/stats.py
-index a7a5fb7a2..c3a40dd95 100644
+index a7a5fb7a2d2fcdc51eca2b3662a18aa39b3602e7..332be441ed85720ea6b31e58997a485251aa0df8 100644
 --- a/vllm/v1/metrics/stats.py
 +++ b/vllm/v1/metrics/stats.py
-@@ -170,6 +170,10 @@ class KVCacheEvictionEvent:
+@@ -170,6 +170,12 @@ class KVCacheEvictionEvent:
  @dataclass
  class SchedulerStats:
      """Stats associated with the scheduler."""
 +    # NOTE(lhy): we need to add this field to the scheduler stats for PSRL.
++    need_to_abort_reqs: list[str] = field(default_factory=list)
 +    req_id_to_prompt_token_num: dict[str, int] | None = None
 +    req_id_to_response_token_num: dict[str, int] | None = None
++    req_id_in_waiting: list[str] = field(default_factory=list)
 +    preemption_req_ids: list[str] = field(default_factory=list)
-
+ 
      num_running_reqs: int = 0
-
+ 
+diff --git a/vllm/v1/sample/sampler.py b/vllm/v1/sample/sampler.py
+index 9ac3821a3261469cc6fad008161f93528deaf838..5d0e4ebcf68580ad535eb01b1c43bdc0910cb533 100644
+--- a/vllm/v1/sample/sampler.py
++++ b/vllm/v1/sample/sampler.py
+@@ -15,6 +15,7 @@ from vllm.v1.sample.ops.penalties import apply_all_penalties
+ from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
+ 
+ _SAMPLING_EPS = 1e-5
++_LOGPROBS_CHUNK_SIZE = 1024
+ 
+ 
+ class Sampler(nn.Module):
+@@ -77,15 +78,29 @@ class Sampler(nn.Module):
+         # This is different from the V0 sampler, which uses the logits that
+         # is used for sampling (after penalties and temperature scaling).
+         num_logprobs = sampling_metadata.max_num_logprobs
+-        raw_logprobs: torch.Tensor | None = None
+-        if num_logprobs is not None or sampling_metadata.logprob_token_ids:
++        full_logprobs: torch.Tensor | None = None
++        logits_for_logprobs: torch.Tensor | None = None
++        gather_logprobs_mode = logprobs_mode
++        needs_full_logprobs = (
++            num_logprobs == -1 or bool(sampling_metadata.logprob_token_ids)
++        )
++        if needs_full_logprobs:
+             if logprobs_mode == "raw_logprobs":
+-                raw_logprobs = self.compute_logprobs(logits)
++                full_logprobs = self.compute_logprobs(logits)
+             elif logprobs_mode == "raw_logits":
+                 if logits.dtype == torch.float32:
+-                    raw_logprobs = logits.clone()
++                    full_logprobs = logits.clone()
+                 else:
+-                    raw_logprobs = logits.to(torch.float32)
++                    full_logprobs = logits.to(torch.float32)
++        elif num_logprobs is not None:
++            # Keep logits in their original form and normalize only the small
++            # top-k chunks below. This avoids materializing [tokens, vocab]
++            # logprobs for ordinary top-k requests.
++            logits_for_logprobs = (
++                logits.clone()
++                if logits.dtype == torch.float32
++                else logits.to(torch.float32)
++            )
+ 
+         # Use float32 for the logits.
+         logits = logits.to(torch.float32)
+@@ -96,7 +111,11 @@ class Sampler(nn.Module):
+         # Sample the next token.
+         sampled, processed_logprobs = self.sample(logits, sampling_metadata)
+         if processed_logprobs is not None:
+-            raw_logprobs = processed_logprobs
++            if num_logprobs == -1 or sampling_metadata.logprob_token_ids:
++                full_logprobs = processed_logprobs
++            else:
++                logits_for_logprobs = processed_logprobs
++                gather_logprobs_mode = self.logprobs_mode
+         # Convert sampled token ids to int64 (long) type to ensure compatibility
+         # with subsequent operations that may use these values as indices.
+         # This conversion is necessary because FlashInfer sampling operations
+@@ -107,9 +126,9 @@ class Sampler(nn.Module):
+         # This is used by generative_scoring API to get logprobs for specific tokens
+         logprob_token_ids_tensors = None
+         if sampling_metadata.logprob_token_ids:
+-            assert raw_logprobs is not None
++            assert full_logprobs is not None
+             logprob_token_ids_tensors = self.gather_specific_token_logprobs(
+-                raw_logprobs, sampling_metadata.logprob_token_ids, sampled
++                full_logprobs, sampling_metadata.logprob_token_ids, sampled
+             )
+ 
+         if num_logprobs is None:
+@@ -117,13 +136,22 @@ class Sampler(nn.Module):
+         elif num_logprobs == -1:
+             # Return the full unsorted and unranked logprobs.
+             logprobs_tensors = LogprobsTensors(
+-                torch.empty(0), raw_logprobs, torch.empty(0)
++                torch.empty(0), full_logprobs, torch.empty(0)
+             )
+         else:
+             # Gather the logprobs and ranks of the topk and sampled token.
+-            logprobs_tensors = self.gather_logprobs(
+-                raw_logprobs, num_logprobs, token_ids=sampled
+-            )
++            if full_logprobs is not None:
++                logprobs_tensors = self.gather_logprobs(
++                    full_logprobs, num_logprobs, token_ids=sampled
++                )
++            else:
++                assert logits_for_logprobs is not None
++                logprobs_tensors = self.gather_logprobs_chunked(
++                    logits_for_logprobs,
++                    num_logprobs,
++                    token_ids=sampled,
++                    logprobs_mode=gather_logprobs_mode,
++                )
+ 
+         # If we have both num_logprobs and logprob_token_ids, prefer
+         # logprob_token_ids as it's more specific
+@@ -350,6 +378,69 @@ class Sampler(nn.Module):
+ 
+         return LogprobsTensors(indices, logprobs, token_ranks)
+ 
++    @staticmethod
++    def gather_logprobs_chunked(
++        logits: torch.Tensor,
++        num_logprobs: int,
++        token_ids: torch.Tensor,
++        logprobs_mode: LogprobsMode,
++    ) -> LogprobsTensors:
++        """Gather top-k values without materializing a full logprob tensor."""
++        assert token_ids.dtype == torch.int64
++        assert num_logprobs >= 0
++
++        num_tokens = token_ids.shape[0]
++        num_values = num_logprobs + 1
++        if num_tokens == 0:
++            return LogprobsTensors(
++                torch.empty((0, num_values), dtype=torch.int32, device=logits.device),
++                torch.empty((0, num_values), dtype=torch.float32, device=logits.device),
++                torch.empty(0, dtype=torch.int64, device=logits.device),
++            )
++
++        indices_chunks = []
++        values_chunks = []
++        rank_chunks = []
++        for start in range(0, num_tokens, _LOGPROBS_CHUNK_SIZE):
++            end = start + _LOGPROBS_CHUNK_SIZE
++            logits_chunk = logits[start:end]
++            token_ids_chunk = token_ids[start:end].unsqueeze(-1)
++            topk_indices = (
++                torch.topk(logits_chunk, num_logprobs, dim=-1).indices
++                if num_logprobs > 0
++                else torch.empty(
++                    (logits_chunk.shape[0], 0),
++                    dtype=torch.int64,
++                    device=logits_chunk.device,
++                )
++            )
++            selected_ids = torch.cat((token_ids_chunk, topk_indices), dim=1)
++
++            rank_logits = logits_chunk.to(torch.float32)
++            if logprobs_mode in (
++                "raw_logits",
++                "processed_logits",
++                "processed_logprobs",
++            ):
++                selected_values = rank_logits.gather(-1, selected_ids)
++            else:
++                selected_values = rank_logits.gather(-1, selected_ids)
++                selected_values = selected_values - torch.logsumexp(
++                    rank_logits, dim=-1, keepdim=True
++                )
++
++            token_values = rank_logits.gather(-1, token_ids_chunk)
++            token_ranks = batched_count_greater_than(rank_logits, token_values)
++            indices_chunks.append(selected_ids.to(torch.int32))
++            values_chunks.append(selected_values)
++            rank_chunks.append(token_ranks)
++
++        return LogprobsTensors(
++            torch.cat(indices_chunks, dim=0),
++            torch.cat(values_chunks, dim=0),
++            torch.cat(rank_chunks, dim=0),
++        )
++
+     @staticmethod
+     def _combine_outputs_with_spec_tokens(
+         output_token_ids: list[list[int]],
 diff --git a/vllm/v1/worker/gpu/cudagraph_utils.py b/vllm/v1/worker/gpu/cudagraph_utils.py
-index c7a7ffe44..88827f41a 100644
+index c7a7ffe442d275aad9ddc2c6223de7b23e95eec1..88827f41af5bafbec8381cb4942247cc509678eb 100644
 --- a/vllm/v1/worker/gpu/cudagraph_utils.py
 +++ b/vllm/v1/worker/gpu/cudagraph_utils.py
 @@ -184,6 +184,16 @@ class CudaGraphManager:
      def needs_capture(self) -> bool:
          return len(self._capture_descs) > 0
-
+ 
 +    def release(self) -> bool:
 +        """Drop captured graph objects and make dispatch fall back to eager."""
 +        if not self.needs_capture():
@@ -488,13 +1363,13 @@ index c7a7ffe44..88827f41a 100644
      def capture(
          self,
 diff --git a/vllm/v1/worker/gpu/model_runner.py b/vllm/v1/worker/gpu/model_runner.py
-index 52b447550..c145bd9f8 100644
+index 52b44755089920ab1a1aaf41a5bc075a9545ae90..c145bd9f83a57d26c1032c0dc248cb22c60db597 100644
 --- a/vllm/v1/worker/gpu/model_runner.py
 +++ b/vllm/v1/worker/gpu/model_runner.py
 @@ -27,7 +27,9 @@ import numpy as np
  import torch
  import torch.nn as nn
-
+ 
 +from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphWrapper
  from vllm.compilation.counter import compilation_counter
 +from vllm.compilation.cuda_graph import CUDAGraphWrapper
@@ -504,7 +1379,7 @@ index 52b447550..c145bd9f8 100644
 @@ -665,6 +667,46 @@ class GPUModelRunner(LoRAModelRunnerMixin):
          )
          return cuda_graph_size
-
+ 
 +    def _release_speculator_cudagraphs(self) -> bool:
 +        if self.speculator is None:
 +            return False
@@ -549,13 +1424,21 @@ index 52b447550..c145bd9f8 100644
          if not self.req_states.remove_request(req_id):
              return False
 diff --git a/vllm/v1/worker/gpu_model_runner.py b/vllm/v1/worker/gpu_model_runner.py
-index d51bf2284..000000000 100644
+index d51bf2284096cb2dd8f351157e89b65ff7fd233b..7da450232d70e30eef2036ed8ec4b46554050d44 100644
 --- a/vllm/v1/worker/gpu_model_runner.py
 +++ b/vllm/v1/worker/gpu_model_runner.py
-@@ -1369,6 +1369,26 @@ class GPUModelRunner(
+@@ -226,6 +226,7 @@ if TYPE_CHECKING:
+     from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
+ 
+ logger = init_logger(__name__)
++_PROMPT_LOGPROBS_CHUNKED_PATH_LOGGED = False
+ 
+ AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
+ # list when ubatching is enabled
+@@ -1369,6 +1370,26 @@ class GPUModelRunner(
                  # Replace the existing block IDs with the new ones.
                  req_state.block_ids = new_block_ids
-
+ 
 +            # Resync block_ids to the scheduler's authoritative length. When a KV
 +            # load failure rolls back num_computed_tokens without preemption (the
 +            # scheduler's recompute policy keeps the request RUNNING, so the
@@ -579,10 +1462,41 @@ index d51bf2284..000000000 100644
              if req_index is None:
                  # The request is not in the persistent batch.
                  # The request was either preempted and resumed later, or was not
-@@ -6460,6 +6480,62 @@ class GPUModelRunner(
+@@ -5411,10 +5432,26 @@ class GPUModelRunner(
+             # to gather the logprob for.
+             tgt_token_ids = prompt_token_ids[start_tok : start_tok + num_logits]
+ 
+-            # Compute prompt logprobs.
+-            logprobs = self.sampler.compute_logprobs(logits)
+-            token_ids, logprobs, ranks, _ = self.sampler.gather_logprobs(
+-                logprobs, num_prompt_logprobs, tgt_token_ids
++            global _PROMPT_LOGPROBS_CHUNKED_PATH_LOGGED
++            if not _PROMPT_LOGPROBS_CHUNKED_PATH_LOGGED:
++                _PROMPT_LOGPROBS_CHUNKED_PATH_LOGGED = True
++                print(
++                    "[GPUModelRunner prompt logprobs gather path]\n"
++                    "  path=chunked use_chunked=True\n"
++                    f"  req_id={req_id}\n"
++                    f"  num_prompt_logprobs={num_prompt_logprobs}\n"
++                    f"  num_prompt_tokens={num_prompt_tokens}\n"
++                    f"  start_idx={start_idx} start_tok={start_tok}\n"
++                    f"  num_logits={num_logits}\n"
++                    f"  logits_shape={tuple(logits.shape)}\n"
++                    f"  target_token_ids_shape={tuple(tgt_token_ids.shape)}\n"
++                    f"  expected_output_shape=({num_logits}, {num_prompt_logprobs + 1})",
++                    flush=True,
++                )
++
++            # Compute prompt logprobs without materializing full logprobs.
++            token_ids, logprobs, ranks, _ = self.sampler.gather_logprobs_chunked(
++                logits, num_prompt_logprobs, tgt_token_ids, logprobs_mode="raw_logprobs"
+             )
+ 
+             # Transfer GPU->CPU async.
+@@ -6460,6 +6497,62 @@ class GPUModelRunner(
          )
          return cuda_graph_size
-
+ 
 +    def release_cudagraphs(self) -> bool:
 +        """Drop all captured CUDA graphs so their capture-pool memory is freed
 +        before a cumem ``sleep()`` unmaps the virtual-address space.
@@ -643,13 +1557,21 @@ index d51bf2284..000000000 100644
          self,
          desc: BatchDescriptor,
 diff --git a/vllm/v1/worker/gpu_worker.py b/vllm/v1/worker/gpu_worker.py
-index 582c6a17c..0bfa32120 100644
+index 582c6a17cb4e9181c15b0506d8c64f635ac584d2..04320e32bf4065a86590c831c5dc2af5879a87d1 100644
 --- a/vllm/v1/worker/gpu_worker.py
 +++ b/vllm/v1/worker/gpu_worker.py
-@@ -134,6 +134,22 @@ class Worker(WorkerBase):
+@@ -35,6 +35,7 @@ from vllm.distributed.parallel_state import (
+     Handle,
+     get_pp_group,
+     get_tp_group,
++    reset_cudagraph_communication_buffers,
+ )
+ from vllm.distributed.weight_transfer import (
+     WeightTransferEngine,
+@@ -134,6 +135,22 @@ class Worker(WorkerBase):
          # Buffers saved before sleep
          self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
-
+ 
 +        # Whether CUDA graphs were released in the most recent sleep() and
 +        # therefore need to be re-captured once the model is fully awake again.
 +        self._cudagraphs_released: bool = False
@@ -669,16 +1591,30 @@ index 582c6a17c..0bfa32120 100644
          # Weight transfer engine is created in `load_model` once the model
          # is available, since the engine needs a reference to the model.
          self.weight_transfer_engine: WeightTransferEngine | None = None
-@@ -166,8 +182,32 @@ class Worker(WorkerBase):
+@@ -159,15 +176,44 @@ class Worker(WorkerBase):
+ 
+         free_bytes_before_sleep = torch.cuda.mem_get_info()[0]
+ 
+-        # Save the buffers before level 2 sleep
+-        if level == 2:
++        # A failed wake can leave buffers unmapped with valid CPU backups.
++        if level == 2 and not getattr(self, "_weights_suspended", False):
+             model = self.model_runner.model
+             self._sleep_saved_buffers = {
                  name: buffer.cpu().clone() for name, buffer in model.named_buffers()
              }
-
+ 
 +        # Drop captured CUDA graphs before the cumem unmap. With graph capture
 +        # pools resident, per-allocation VMM unmap/remap ops slow to ~6-9s for a
 +        # 32B model (vs ~2s without graphs); releasing graphs first restores the
 +        # fast unmap path. Re-captured lazily on wake_up(). No-op when
 +        # cudagraph_mode is NONE.
-+        self._cudagraphs_released = self.model_runner.release_cudagraphs()
++        released_graphs = self.model_runner.release_cudagraphs()
++        if released_graphs:
++            reset_cudagraph_communication_buffers()
++        self._cudagraphs_released = released_graphs or getattr(
++            self, "_cudagraphs_released", False
++        )
 +
 +        # The cumem unmap below drops the weights and KV cache from GPU virtual
 +        # memory (weights are offloaded to CPU on level-1 sleep, discarded on
@@ -702,11 +1638,10 @@ index 582c6a17c..0bfa32120 100644
          free_bytes_after_sleep, total = torch.cuda.mem_get_info()
          freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
          used_bytes = total - free_bytes_after_sleep
-@@ -183,6 +223,23 @@ class Worker(WorkerBase):
-
+@@ -184,8 +230,25 @@ class Worker(WorkerBase):
          allocator = CuMemAllocator.get_instance()
          allocator.wake_up(tags)
-+
+ 
 +        # Restore NCCL communicator memory before any collective runs again.
 +        # Collective across ranks; no-op at world_size 1 or on older NCCL.
 +        from vllm.distributed.device_communicators import nccl_suspend
@@ -723,13 +1658,17 @@ index 582c6a17c..0bfa32120 100644
 +            self._weights_suspended = False
 +        if tags is None or "kv_cache" in tags:
 +            self._kv_cache_suspended = False
-
++
          # Restore the buffers after level 2 sleep
-         if len(self._sleep_saved_buffers):
-@@ -195,6 +252,24 @@ class Worker(WorkerBase):
+-        if len(self._sleep_saved_buffers):
++        if not self._weights_suspended and len(self._sleep_saved_buffers):
+             model = self.model_runner.model
+             for name, buffer in model.named_buffers():
+                 if name in self._sleep_saved_buffers:
+@@ -195,6 +258,24 @@ class Worker(WorkerBase):
          if tags is None or "kv_cache" in tags:
              self.model_runner.post_kv_cache_wake_up()
-
+ 
 +        # Re-capture CUDA graphs that were released in sleep(), now that the
 +        # model is fully awake. Recapture runs a forward pass through the
 +        # weights AND uses the KV cache, so BOTH must be mapped before it can
@@ -751,6 +1690,3 @@ index 582c6a17c..0bfa32120 100644
      def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
          if not self.vllm_config.model_config.enable_cumem_allocator:
              return nullcontext()
---
-2.43.0
-

@@ -1,8 +1,11 @@
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 
 import pytest
 from psrl.workers.agent_loop.loops.session_agent_loop import SessionAgentLoop, SessionAgentResult
 from psrl.workers.agent_loop.loops.utils import TerminateReason
+
+pytestmark = pytest.mark.cpu_test
 
 
 class ExampleSessionAgentLoop(SessionAgentLoop):
@@ -17,6 +20,7 @@ class ExampleSessionAgentLoop(SessionAgentLoop):
 @pytest.mark.asyncio
 async def test_session_agent_loop_owns_external_agent_lifecycle():
     loop = ExampleSessionAgentLoop.__new__(ExampleSessionAgentLoop)
+    loop.rollout_config = SimpleNamespace(response_length=16)
     loop.session_router_url = "http://session-router"
     loop.trajectory_id_strategy = "manual"
 
@@ -29,6 +33,7 @@ async def test_session_agent_loop_owns_external_agent_lifecycle():
         assert session_id == "sid"
         return [
             {
+                "trajectory_id": 99,
                 "prompt_ids": [1],
                 "response_ids": [2],
                 "response_mask": [1],
@@ -64,6 +69,7 @@ async def test_session_agent_loop_owns_external_agent_lifecycle():
 @pytest.mark.asyncio
 async def test_auto_session_agent_loop_returns_all_resolved_trajectories():
     loop = ExampleSessionAgentLoop.__new__(ExampleSessionAgentLoop)
+    loop.rollout_config = SimpleNamespace(response_length=16)
     loop.session_router_url = "http://session-router"
     loop.trajectory_id_strategy = "auto"
 
@@ -76,6 +82,7 @@ async def test_auto_session_agent_loop_returns_all_resolved_trajectories():
         assert session_id == "sid"
         return [
             {
+                "trajectory_id": 99,
                 "prompt_ids": [1],
                 "response_ids": [2],
                 "response_mask": [1],
@@ -85,6 +92,7 @@ async def test_auto_session_agent_loop_returns_all_resolved_trajectories():
                 "num_turns": 1,
             },
             {
+                "trajectory_id": 100,
                 "prompt_ids": [3],
                 "response_ids": [4],
                 "response_mask": [1],

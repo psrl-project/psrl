@@ -295,20 +295,19 @@ PYTHONUNBUFFERED=1 python3 -m psrl.trainer.main_ppo \
     train_actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${max_tokens_per_gpu} \
     \
     reward.launch_reward_fn_async=True \
-    reward.active_managers='[dapo]' \
-    reward.managers.dapo.reward_fn.0.path=${reward_path} \
-    reward.managers.dapo.reward_fn.0.name=compute_score \
+    reward.active_loops='[dapo]' \
+    reward.reward_loops.dapo.reward_fn.0.path=${reward_path} \
+    reward.reward_loops.dapo.reward_fn.0.name=compute_score \
     `# Off. Length is a symptom of failing to localize the defect, not a cause worth shaping.` \
-    reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.enable=False \
-    reward.managers.dapo.reward_kwargs.max_resp_len=${max_response_length} \
+    reward.reward_loops.dapo.reward_kwargs.overlong_buffer_cfg.enable=False \
+    reward.reward_loops.dapo.reward_kwargs.max_resp_len=${max_response_length} \
     \
-    data.train_files=${train_files} \
-    data.val_files=${val_files} \
+    +data.train_files=${train_files} \
+    +data.val_files=${val_files} \
     data.train_batch_size=${train_batch_size} \
     `# The bank is grouped by category on disk and verl's vendored default is shuffle=False.` \
     data.shuffle=True \
-    data.seed=${DATA_SEED:-1} \
-    data.prompt_key=prompt \
+    +data.prompt_key=prompt \
     data.max_prompt_length=${max_prompt_length} \
     data.max_response_length=${max_response_length} \
     data.return_raw_chat=True \

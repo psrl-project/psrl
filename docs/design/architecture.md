@@ -56,6 +56,9 @@ with a cost model, or cache-aware). SMG also captures multi-turn training data v
 
 ### Rollout Instances
 
+Policy rollout, validation, and reward-model inference use vLLM. Set their rollout
+configuration to `name: vllm`.
+
 vLLM engine pools that handle inference requests. Each instance manages a subset of generation requests and maintains its own KV cache. Rollout instances **pull** new model weights from co-located PS Workers when triggered by the sync strategy. Multiple instances can run different model versions concurrently during the transition period.
 
 ### Reward Service
@@ -107,7 +110,7 @@ sequenceDiagram
 5. **Occupy**: The scored trajectory occupies its reserved slot in the staleness buffer, and trajectory fields are written to TransferQueue.
 6. **Training**: When a buffer is full (Ready state), the Train Worker reads the batch metadata from TransferQueue and consumes it for one gradient step.
 7. **Weight Push**: Updated weights are pushed to PS via RDMA.
-8. **Sync**: The RolloutCoordinator gates SMG on the new version, pausing dispatch, letting instances pull new weights, then resuming routing.
+8. **Sync**: The GlobalCoordinator gates SMG on the new version, pausing dispatch, letting instances pull new weights, then resuming routing.
 
 :::{tip}
 Steps 1-5 (generation) and steps 6-8 (training) run **concurrently**: this is the core advantage of PSRL's decoupled design. The staleness system (see {doc}`staleness_control`) ensures bounded off-policy error.

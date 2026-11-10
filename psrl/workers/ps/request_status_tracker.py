@@ -2,15 +2,19 @@ import enum
 import threading
 from enum import Enum
 from functools import wraps
+from typing import TYPE_CHECKING
 
 import ray
 from omegaconf import DictConfig
 
 from psrl.utils.logger import DualOutputHandler, get_ps_logger
 from psrl.utils.server.command import Command, CommandType
-from psrl.utils.transferqueue_utils import PayloadState, clear_payload, request_payload_keys
+from psrl.utils.transfer_queue.payload import PayloadState, clear_payload, request_payload_keys
 from psrl.workers.gen.utils import INVALID_ROLLOUT_INSTANCE_ID, RolloutInstanceId
 from psrl.workers.ps.staleness_controller import EntryInfo
+
+if TYPE_CHECKING:
+    from psrl.workers.global_coordination.client import CoordinatorClient
 
 psrl_logger = get_ps_logger()
 
@@ -64,6 +68,14 @@ TQ_PAYLOAD_CLEANUP_STATUSES: frozenset = frozenset(
     }
 )
 
+# Occupancy may observe either state because async reward can finish after `COMPLETED`.
+TRAIN_READY_STATUSES: frozenset = frozenset(
+    {
+        PSRL_RequestStatus.COMPLETED,
+        PSRL_RequestStatus.REWARD_COMPLETED,
+    }
+)
+
 
 class RequestStatusTracker:
     """
@@ -87,7 +99,7 @@ class RequestStatusTracker:
             self.alg_rollout_n = self.rollout_n
         self.val_rollout_n = self.psrl_config.val_rollout_n
 
-        self.rollout_coordinator: ray.actor.ActorHandle | None = None
+        self.rollout_coordinator: CoordinatorClient | None = None
 
         self.reward_manager: ray.actor.ActorHandle | None = None
 
@@ -95,8 +107,10 @@ class RequestStatusTracker:
         psrl_logger.addHandler(DualOutputHandler(self.psrl_config.logging_path, self.log_prefix))
         psrl_logger.info("Initialized RequestStatusTracker.")
 
-    def set_rollout_coordinator(self, rollout_coordinator: ray.actor.ActorHandle):
-        """Set the reference to the rollout coordinator."""
+    def set_rollout_coordinator(self, rollout_coordinator: "CoordinatorClient"):
+        """
+        Set the rollout scope client for the global coordinator.
+        """
         self.rollout_coordinator = rollout_coordinator
 
     def set_reward_manager(self, reward_manager: ray.actor.ActorHandle):
@@ -177,6 +191,9 @@ class RequestStatusTracker:
             if req_id in self._request_id_to_status:
                 new_status = status[i]
                 old_status = self._request_id_to_status[req_id]
+                # `COMPLETED` is the occupy gate. Reward bookkeeping must not regress it.
+                if old_status == PSRL_RequestStatus.COMPLETED and new_status != PSRL_RequestStatus.COMPLETED:
+                    continue
                 if old_status != new_status:
                     self._status_to_request_ids[old_status].discard(req_id)
                 self._status_to_request_ids[new_status].add(req_id)
@@ -214,28 +231,28 @@ class RequestStatusTracker:
 
         return status_list
 
+    @_state_locked
     def remove_train_ready_request(self, request_id: list[int] | int):
-        """Remove requests that are ready for training.
-
-        This method removes completed requests from the tracking system
-        after they have been processed by the reward manager.
-        It is a wrapper function for the `remove_request` method.
+        """Remove occupy-ready requests from the tracker.
 
         Args:
-            request_id (Union[List[int], int]): The unique identifier(s) of the request(s) to remove
+            request_id (list[int] | int): The unique identifier(s) of the request(s) to remove.
 
         Raises:
-            AssertionError: If request is not found or not in correct status
+            AssertionError: If a request is missing or not in a train ready status.
         """
-        psrl_logger.debug(f"Removing train-ready requests after reward completion. Request IDs: {request_id}.")
+        psrl_logger.debug(f"Removing train-ready requests. Request IDs: {request_id}.")
         if not isinstance(request_id, list):
             request_id = [request_id]
+        if not request_id:
+            return
 
         for req_id in request_id:
             assert req_id in self._request_id_to_status, f"Request not found in status map. ID: {req_id}."
             assert req_id in self._request_infos, f"Request not found in request info. ID: {req_id}."
-            assert self._request_id_to_status[req_id] == PSRL_RequestStatus.COMPLETED, (
-                f"Request is not complete. ID: {req_id}."
+            current_status = self._request_id_to_status[req_id]
+            assert current_status in TRAIN_READY_STATUSES, (
+                f"Request is not train ready. ID: {req_id}. Status: {current_status!r}."
             )
             assert req_id not in self._abort_request_ids, (
                 f"Aborted request cannot be removed as train ready. ID: {req_id}."

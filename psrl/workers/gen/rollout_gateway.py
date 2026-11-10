@@ -10,6 +10,7 @@ from psrl.utils.common.http_utils import find_available_port
 from psrl.utils.logger import DualOutputHandler
 from psrl.utils.rollout.turn_output_writer import TurnOutputWriter
 from psrl.workers.gen.smg_adapter import build_rollout_router_args, get_trajectory_id_strategy
+from psrl.workers.gen.smg_control import wait_for_router_ready
 
 psrl_logger = logging.getLogger(__file__)
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
@@ -127,10 +128,23 @@ class RolloutGateway:
             daemon=True,
         )
         self.router_process.start()
-        time.sleep(3)
-        assert self.router_process.is_alive(), "SMG router process exited during startup."
+        gateway_url = f"http://{self.smg_ip}:{self.smg_port}"
+        try:
+            wait_for_router_ready(
+                gateway_url,
+                self.router_process,
+                require_elastic_runtime=bool(
+                    self._cfg_get(
+                        "psrl.deployment.elastic.throughput_optimal.enable_request_level_candidate_evaluation",
+                        False,
+                    )
+                ),
+            )
+        except Exception:
+            self.shutdown_router()
+            raise
         psrl_logger.info("Router launched at %s:%s", self.smg_ip, self.smg_port)
-        self.smg_url = f"http://{self.smg_ip}:{self.smg_port}"
+        self.smg_url = gateway_url
         return self.smg_url
 
     def launch_session_router(self) -> str:
@@ -216,9 +230,9 @@ class RolloutGateway:
             self.session_router_process = None
             self.session_router_url = None
 
-        if self.smg_url is None:
-            return
-
-        self.router_process.terminate()
-        self.router_process.join()
-        psrl_logger.info("Router process terminated")
+        if self.router_process is not None and self.router_process.is_alive():
+            self.router_process.terminate()
+            self.router_process.join()
+            psrl_logger.info("Router process terminated.")
+        self.router_process = None
+        self.smg_url = None

@@ -4,6 +4,8 @@ import pytest
 from examples.mem_agent.config import MemAgentRuntimeConfig
 from examples.mem_agent.runner import MemAgent
 
+pytestmark = pytest.mark.cpu_test
+
 
 class WordTokenizer:
     def __init__(self):
@@ -62,7 +64,6 @@ async def test_mem_agent_uses_independent_conversations_and_overwrites_memory():
         model="model",
         config=MemAgentRuntimeConfig(chunk_tokens=2, max_chunks=2),
         api_key="EMPTY",
-        trajectory_id=0,
         http_session=HttpSession(),
     ).run(
         "Which answer?",
@@ -83,7 +84,7 @@ async def test_mem_agent_uses_independent_conversations_and_overwrites_memory():
     assert "memory-two" in calls[2][1]["messages"][0]["content"]
     assert "gamma delta" not in calls[2][1]["messages"][0]["content"]
     assert calls[0][2]["Authorization"] == "Bearer EMPTY"
-    assert calls[0][2]["x-smg-tito-trajectory-id"] == "0"
+    assert "x-smg-tito-trajectory-id" not in calls[0][2], "The session router must assign trajectory IDs."
 
 
 @pytest.mark.asyncio
@@ -103,7 +104,7 @@ async def test_mem_agent_rejects_silent_context_truncation():
 
 
 @pytest.mark.asyncio
-async def test_mem_agent_auto_mode_omits_trajectory_header():
+async def test_mem_agent_leaves_trajectory_assignment_to_session_router():
     calls = []
 
     class Response:
@@ -132,7 +133,6 @@ async def test_mem_agent_auto_mode_omits_trajectory_header():
         model="model",
         config=MemAgentRuntimeConfig(chunk_tokens=1, max_chunks=1),
         api_key="EMPTY",
-        trajectory_id=None,
         http_session=HttpSession(),
     ).run("question", "context")
 

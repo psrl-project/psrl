@@ -4,7 +4,6 @@ import logging
 import os
 import uuid
 
-import ray
 import torch
 from omegaconf import DictConfig
 from PIL import Image
@@ -15,6 +14,7 @@ from psrl.environments.tool_env import ToolAction
 from psrl.tools.tool_parser.base import ToolParser
 from psrl.workers.agent_loop.agent_data.base import AgentData
 from psrl.workers.agent_loop.agent_data.conversation_agent_data import ConversationAgentData
+from psrl.workers.reward.client import RewardSubmissionClient
 
 psrl_logger = logging.getLogger(__name__)
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
@@ -45,7 +45,7 @@ class ToolAgentData(ConversationAgentData):
     def __init__(
         self,
         config: DictConfig,
-        reward_manager: ray.actor.ActorHandle,
+        reward_manager: RewardSubmissionClient,
         env: Environment,
         **kwargs,
     ):
@@ -53,7 +53,7 @@ class ToolAgentData(ConversationAgentData):
 
         Args:
             config: Configuration object containing training settings
-            reward_manager: Ray actor handle for computing rewards
+            reward_manager: Shared client for submitting reward requests.
             env: Environment instance with ``get_tool_schemas()`` method
             tokenizer: Tokenizer for converting between text and tokens
             processor: Optional multimodal processor (e.g. Qwen2VLProcessor).

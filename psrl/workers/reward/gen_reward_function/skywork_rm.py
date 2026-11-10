@@ -35,6 +35,7 @@ class SkyworkGenRewardFunction(GenRewardFunctionBase):
         extra_info: dict | None = None,
         **kwargs,
     ) -> float:
+        # For Skywork reward models, use logits if available, otherwise fall back to string output
         psrl_logger.info(f"SkyworkGenRewardFunction.compute_score called with rm_output_value={rm_output_value}")
         if rm_output_value is not None:
             score = float(rm_output_value)

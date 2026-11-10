@@ -3,32 +3,30 @@ set -e
 set -o pipefail
 trap 'echo "[ERROR] Failed at line $LINENO: $BASH_COMMAND" >&2; exit 1' ERR
 
-VLLM_PATH=${VLLM_PATH:-}
-VERL_PATH=${VERL_PATH:-}
-TQ_PATH=${TQ_PATH:-}
 MAX_JOBS=${MAX_JOBS:-64}
+export MAX_JOBS
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-${MAX_JOBS}}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PSRL_PATH="$(dirname "$SCRIPT_DIR")"
 THIRD_PARTY_PATH="$PSRL_PATH/third_party"
-mkdir -p $THIRD_PARTY_PATH
+mkdir -p "$THIRD_PARTY_PATH"
 
 echo "0. Install uv to boost installation speed"
 python -m pip install uv
+
+echo "Install basic build packages"
+python -m uv pip install "setuptools==80.10.2" wheel build "packaging==25.0" "virtualenv==20.39.1" ninja cmake meson meson-python patchelf
 
 echo "1. Install pytorch and tensordict"
 python -m uv pip install --no-cache-dir "torch==2.11.0" "torchvision==0.26.0" "torchaudio==2.11.0" --index-url https://download.pytorch.org/whl/cu128
 python -m uv pip install --no-cache-dir "triton==3.6.0" "tensordict==0.12.4" torchdata
 
-# For ncclCommSuspend/ncclCommResume support
-# 2.28.9 is not enough
-python -m uv pip install nvidia-nccl-cu12==2.29.7
-
 echo "2. Install basic packages"
 python -m uv pip install "transformers==5.10.1" accelerate datasets peft hf-transfer matplotlib flask click==8.2.1 \
-    "numpy<2.0.0" "pyarrow>=19.0.1" pandas paramiko sortedcontainers \
-    ray[default]==2.49.1 codetiming hydra-core pylatexenc qwen-vl-utils wandb dill pybind11 liger-kernel mathruler blobfile xgrammar \
-    pytest py-spy pre-commit ruff meson ninja pynvml requests einops trl maturin puccinialin protoc-wheel-0 nvidia-modelopt[torch]
+    "numpy==2.2.6" "pyarrow>=19.0.1" pandas paramiko sortedcontainers \
+    ray[default]==2.49.1 codetiming "hydra-core==1.3.2" pylatexenc qwen-vl-utils wandb dill pybind11 liger-kernel mathruler blobfile xgrammar \
+    pytest py-spy pre-commit ruff meson ninja pynvml requests einops "trl==1.14.1" maturin puccinialin protoc-wheel-0 nvidia-modelopt[torch]
 
 python -m uv pip uninstall -y pynvml nvidia-ml-py
 python -m uv pip install --no-cache-dir "nvidia-ml-py>=12.560.30" "fastapi[standard]>=0.115.0" "optree>=0.13.0" "pydantic>=2.9" "grpcio>=1.62.1" "nvidia-cudnn-frontend>=1.13.0"
@@ -58,7 +56,7 @@ mkdir -p apex_src
 pushd apex_src
 git clone https://github.com/NVIDIA/apex.git && \
 cd apex && \
-MAX_JOB=$MAX_JOBS python -m pip install -v --disable-pip-version-check --no-cache-dir --no-build-isolation --config-settings "--build-option=--cpp_ext" --config-settings "--build-option=--cuda_ext" ./
+python -m pip install -v --disable-pip-version-check --no-cache-dir --no-build-isolation --config-settings "--build-option=--cpp_ext" --config-settings "--build-option=--cuda_ext" ./
 popd
 rm -rf apex_src
 
@@ -75,8 +73,6 @@ echo "Building SMG from source..."
 pushd $THIRD_PARTY_PATH
 git clone https://github.com/psrl-project/smg.git -b psrl-dev
 cd smg
-# Comment out the smg-tui workspace dependency (not needed for PSRL build)
-sed -i 's|^smg-tui = { version = "0.1.0", path = "tui" }|# smg-tui = { version = "0.1.0", path = "tui" }|' Cargo.toml
 # Build release binary with PSRL policies
 cargo build --release
 # --no-build-isolation: generate stubs with the ambient grpcio-tools installed above.
@@ -100,15 +96,18 @@ python -c "from smg.router import Router; print('  ✓ smg.router binding instal
 echo "7. Install vllm and verl"
 if [ -z "$VLLM_PATH" ]; then
     pushd $THIRD_PARTY_PATH
-    git clone -b releases/v0.22.0 https://github.com/vllm-project/vllm.git
+    git clone -b v0.22.0 https://github.com/vllm-project/vllm.git
     VLLM_PATH=$THIRD_PARTY_PATH/vllm
     popd
 fi
-pushd $VLLM_PATH
+pushd "$VLLM_PATH"
+git apply "${PSRL_PATH}/patch/vllm/v0.22.0.patch"
 python use_existing_torch.py
 python -m uv pip install -r requirements/build/cuda.txt
 python -m uv pip install --no-build-isolation -e .
 popd
+
+python -m uv pip install "transformers[hf_xet]==5.10.1"
 
 if [ -z "$VERL_PATH" ]; then
     pushd $THIRD_PARTY_PATH
@@ -119,6 +118,7 @@ if [ -z "$VERL_PATH" ]; then
     popd
 fi
 pushd $VERL_PATH
+git apply "${PSRL_PATH}/patch/verl/e5ca4acb.patch"
 python -m uv pip install -e .
 popd
 
@@ -134,25 +134,26 @@ pushd $TQ_PATH
 python -m uv pip install -e .
 popd
 
-echo "8. Apply patch for dependencies..."
+python -m uv pip install -e "${PSRL_PATH}/patch/vllm/vllm_plugin"
 
-bash "$PSRL_PATH/patch/apply_patch.sh" vllm
-bash "$PSRL_PATH/patch/apply_patch.sh" verl
-bash "$PSRL_PATH/patch/apply_patch.sh" transfer_queue
-
-echo "9. Install torch_memory_saver"
+echo "8. Install torch_memory_saver"
 python -m uv pip install git+https://github.com/fzyzcjy/torch_memory_saver.git@d64a6394d1e09c613fab90260054cecc2684586d --no-cache-dir --force-reinstall
 
-echo "10. Install flashinfer"
+echo "9. Install flashinfer"
 mkdir -p flashinfer_src
 pushd flashinfer_src
 git clone https://github.com/flashinfer-ai/flashinfer.git --recursive --branch v0.6.11.post3
 cd flashinfer
 python -m uv pip install -v .
 cd flashinfer-cubin
-python -m build --no-isolation --wheel
-python -m uv pip install dist/*.whl
+python -m uv pip install --no-build-isolation .
 popd
 rm -rf flashinfer_src
 
+# Install NCCL last because dependent packages require the PyTorch wheel's older pin.
+echo "10. Install nvidia-nccl-cu12"
+python -m uv pip install "nvidia-nccl-cu12==2.29.7"
+
+echo "11. Enviroment check"
+python "${SCRIPT_DIR}/check_environment.py"
 echo "Successfully installed all basic packages"

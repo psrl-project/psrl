@@ -23,7 +23,7 @@ class StatsRecorder:
     A run-level config file is written once at startup:
         {logging_path}/stats_config.json
 
-    This class is NOT a Ray actor. It is instantiated inside RolloutCoordinator
+    This class is NOT a Ray actor. It is instantiated inside `GlobalCoordinator`
     and called from a background asyncio task.
     """
 

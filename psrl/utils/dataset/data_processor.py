@@ -9,14 +9,20 @@ import numpy as np
 import ray
 import torch
 import transfer_queue as tq
-from omegaconf import open_dict
+from omegaconf import DictConfig, open_dict
 from tensordict import TensorDict
 from torchdata.stateful_dataloader import StatefulDataLoader
 from transfer_queue import KVBatchMeta
 from verl.utils import tensordict_utils as tu
 from verl.utils.dataset.rl_dataset import collate_fn
 
-from psrl.utils.dataset.utils import create_multi_rl_datasets, create_rl_dataset, create_rl_sampler
+from psrl.utils.dataset.utils import (
+    create_multi_rl_datasets,
+    create_rl_sampler,
+    merge_dataset_config,
+    resolve_split_specs,
+    resolve_train_ratios,
+)
 from psrl.utils.logger import DualOutputHandler
 
 psrl_logger = logging.getLogger(__file__)
@@ -66,10 +72,6 @@ class DataProcessor:
         self.processor = processor
         self.train_dataloader_iters = None
         self.val_dataloader_iters = None
-        if self.config.data.get("use_multi_dataset", True):
-            self.train_datasets_ratios = self.config.data.train_datasets_ratios
-        else:
-            self.train_datasets_ratios = [1.0]
         self._validate_data_config()
         self._val_dataloader_idx = 0  # Index for round-robin selection of validation dataloaders
 
@@ -113,26 +115,17 @@ class DataProcessor:
         self._create_dataloader()
 
     def _validate_data_config(self) -> None:
-        """Validate the data configuration for consistency.
+        """Resolve train/val specs and sampling ratios.
 
-        In multi-dataset mode (use_multi_dataset=True), train_datas and
-        train_datasets_ratios must both be set.
-
-        In legacy mode (use_multi_dataset=False), train_files must be set.
-        If train_datas is also set, a warning is emitted (it will be ignored).
+        `train_files` / `val_files` is a one-dataset shorthand. `train_datas` /
+        `val_datas` is an explicit list. Both become a spec list of length >= 1.
         """
-        if self.config.data.get("use_multi_dataset", True):
-            if not self.config.data.get("train_datas"):
-                raise ValueError("use_multi_dataset=True requires 'train_datas' to be set in data config.")
-            if not self.config.data.get("train_datasets_ratios"):
-                raise ValueError("use_multi_dataset=True requires 'train_datasets_ratios' to be set in data config.")
-        else:
-            if not self.config.data.get("train_files"):
-                raise ValueError("use_multi_dataset=False requires 'train_files' to be set in data config.")
-            if self.config.data.get("train_datas"):
-                psrl_logger.warning(
-                    "use_multi_dataset=False but 'train_datas' is set in data config. It will be ignored."
-                )
+        self._train_specs = resolve_split_specs(self.config.data, "train")
+        self._val_specs = resolve_split_specs(self.config.data, "val")
+        self.train_datasets_ratios = resolve_train_ratios(
+            self.config.data,
+            n_datasets=len(self._train_specs),
+        )
 
     def set_reward_manager(self, reward_manager_handle: ray.actor.ActorHandle):
         self.reward_manager_handle = reward_manager_handle
@@ -150,71 +143,41 @@ class DataProcessor:
             cfg.function_tool_path = multi_turn.get("function_tool_path", None)
         return cfg
 
+    def _dataset_config(self, spec: DictConfig) -> DictConfig:
+        """Merge one split spec onto the global data config and attach tool paths."""
+        return self.with_rollout_tool_paths(merge_dataset_config(self.config.data, spec))
+
     def build_train_and_val_dataset(self) -> None:
         """Build the training and validation datasets.
 
-        Behavior depends on ``config.data.use_multi_dataset``:
-
-        * ``True`` (default): uses the PSRL multi-dataset path. Each entry in
-          ``config.data.train_datas`` / ``config.data.val_datas`` is turned into
-          a separate ``RLHFDataset``. Oversampling ensures that all datasets
-          contribute the same number of batches per epoch.
-
-        * ``False``: falls back to the veRL-native single-dataset path.
-          ``config.data.train_files`` / ``config.data.val_files`` are used. No
-          oversampling is performed, and ``train_datasets_ratios`` is forced to
-          ``[1.0]`` so that the rest of the dataloader pipeline sees a
-          single-element list transparently.
+        Every split is a list of datasets. A single file becomes a one-element
+        list, so sampling, oversampling, and dataloaders stay on one code path.
         """
-        if self.config.data.get("use_multi_dataset", True):
-            self.train_datasets = create_multi_rl_datasets(
-                [self.with_rollout_tool_paths(data_config) for data_config in self.config.data.train_datas],
-                self.tokenizer,
-                self.processor,
-            )
+        self.train_datasets = create_multi_rl_datasets(
+            [self._dataset_config(spec) for spec in self._train_specs],
+            self.tokenizer,
+            self.processor,
+        )
 
-            dataset_sizes = [len(dataset) for dataset in self.train_datasets]
-            rough_batch_sizes = [
-                int(self.config.data.train_batch_size * ratio) for ratio in self.train_datasets_ratios
-            ]
-            rough_num_batches = [
-                dataset_size // rough_batch_size
-                for dataset_size, rough_batch_size in zip(dataset_sizes, rough_batch_sizes)
-            ]
-            max_num_batches = max(rough_num_batches) if rough_num_batches else 0
-            oversample_ratios = [
-                max_num_batches / rough_num_batches[i] if rough_num_batches[i] > 0 else 1.0
-                for i in range(len(self.train_datasets))
-            ]
-            for dataset, oversample_ratio in zip(self.train_datasets, oversample_ratios):
-                dataset.over_sample_dataset(oversample_ratio)
+        dataset_sizes = [len(dataset) for dataset in self.train_datasets]
+        rough_batch_sizes = [int(self.config.data.train_batch_size * ratio) for ratio in self.train_datasets_ratios]
+        rough_num_batches = [
+            dataset_size // rough_batch_size if rough_batch_size > 0 else 0
+            for dataset_size, rough_batch_size in zip(dataset_sizes, rough_batch_sizes)
+        ]
+        max_num_batches = max(rough_num_batches) if rough_num_batches else 0
+        oversample_ratios = [
+            max_num_batches / rough_num_batches[i] if rough_num_batches[i] > 0 else 1.0
+            for i in range(len(self.train_datasets))
+        ]
+        for dataset, oversample_ratio in zip(self.train_datasets, oversample_ratios):
+            dataset.over_sample_dataset(oversample_ratio)
 
-            self.val_datasets = create_multi_rl_datasets(
-                [self.with_rollout_tool_paths(data_config) for data_config in self.config.data.val_datas],
-                self.tokenizer,
-                self.processor,
-            )
-        else:
-            # Keep downstream dataloader operations list-based.
-            self.train_datasets = [
-                create_rl_dataset(
-                    data_paths=self.config.data.train_files,
-                    data_config=self.with_rollout_tool_paths(self.config.data),
-                    tokenizer=self.tokenizer,
-                    processor=self.processor,
-                    max_samples=self.config.data.get("train_max_samples", -1),
-                )
-            ]
-            self.val_datasets = [
-                create_rl_dataset(
-                    data_paths=self.config.data.val_files,
-                    data_config=self.with_rollout_tool_paths(self.config.data),
-                    tokenizer=self.tokenizer,
-                    processor=self.processor,
-                    max_samples=self.config.data.get("val_max_samples", -1),
-                )
-            ]
-            self.train_datasets_ratios = [1.0]
+        self.val_datasets = create_multi_rl_datasets(
+            [self._dataset_config(spec) for spec in self._val_specs],
+            self.tokenizer,
+            self.processor,
+        )
 
     def build_train_sampler(self) -> None:
         """Build the training sampler."""
@@ -465,6 +428,89 @@ class DataProcessor:
                 self._val_dataloader_idx = (self._val_dataloader_idx + 1) % num_dataloaders
                 continue
 
+    @staticmethod
+    def _concat_batch_dicts(batch_dicts: list[dict]) -> dict:
+        """Concatenate a list of batch dicts along the batch dimension."""
+        if not batch_dicts:
+            raise ValueError("batch_dicts must not be empty.")
+
+        concatenated_batch = {}
+        key_sample_values: dict[str, torch.Tensor | np.ndarray] = {}
+        key_order: list[str] = []
+        batch_sizes: list[int] = []
+
+        for batch_dict in batch_dicts:
+            if not batch_dict:
+                raise ValueError("Batch dict must not be empty.")
+
+            first_value = next(iter(batch_dict.values()))
+            batch_sizes.append(len(first_value))
+
+            for key, value in batch_dict.items():
+                if key not in key_sample_values:
+                    key_sample_values[key] = value
+                    key_order.append(key)
+
+        for key in key_order:
+            sample_value = key_sample_values[key]
+            values = []
+            for batch_dict, batch_size in zip(batch_dicts, batch_sizes, strict=True):
+                if key in batch_dict:
+                    values.append(batch_dict[key])
+                else:
+                    values.append(DataProcessor._create_placeholder_like(sample_value, batch_size))
+
+            if isinstance(sample_value, torch.Tensor):
+                concatenated_batch[key] = torch.cat(values, dim=0)
+            elif isinstance(sample_value, np.ndarray):
+                concatenated_batch[key] = np.concatenate(values, axis=0)
+            else:
+                raise TypeError(f"Unsupported value type {type(sample_value)} for key '{key}' in batch concatenation.")
+
+        return concatenated_batch
+
+    @staticmethod
+    def _create_placeholder_like(sample_value: torch.Tensor | np.ndarray, batch_size: int):
+        """Create a placeholder tensor/array matching the sample value's dtype and trailing shape."""
+        if isinstance(sample_value, torch.Tensor):
+            shape = (batch_size, *sample_value.shape[1:])
+            return sample_value.new_zeros(shape)
+        if isinstance(sample_value, np.ndarray):
+            shape = (batch_size, *sample_value.shape[1:])
+            if sample_value.dtype == object:
+                placeholder = np.empty(shape, dtype=object)
+                placeholder[:] = None
+                return placeholder
+            return np.zeros(shape, dtype=sample_value.dtype)
+        raise TypeError(f"Unsupported value type {type(sample_value)} for placeholder creation.")
+
+    @staticmethod
+    def _shuffle_batch_dict(batch_dict: dict) -> dict:
+        """Shuffle a batch dict along the batch dimension."""
+        if not batch_dict:
+            return batch_dict
+
+        first_value = next(iter(batch_dict.values()))
+        batch_size = len(first_value)
+        if batch_size <= 1:
+            return batch_dict
+
+        permutation = torch.randperm(batch_size)
+        permutation_np = permutation.numpy()
+
+        for key, value in batch_dict.items():
+            if isinstance(value, torch.Tensor):
+                if value.is_cuda:
+                    batch_dict[key] = value[permutation.to(value.device)]
+                else:
+                    batch_dict[key] = value[permutation]
+            elif isinstance(value, np.ndarray):
+                batch_dict[key] = value[permutation_np]
+            else:
+                raise TypeError(f"Unsupported value type {type(value)} for key '{key}' in batch shuffling.")
+
+        return batch_dict
+
     def get_val_sample_ids(self, batch_size: int) -> list:
         """
         Generate sample IDs for validation data with cyclic wrapping.
@@ -548,7 +594,7 @@ class DataProcessor:
         else:
             sample_ids = self.get_val_sample_ids(batch_size)
 
-        batch = tu.get_tensordict(batch_dict)
+        batch = self._get_tensordict(batch_dict)
         tu.assign_non_tensor_stack(
             batch,
             "global_steps",
@@ -610,10 +656,7 @@ class DataProcessor:
 
         chunks: list[dict] = []
         remaining = n_prompts
-        # `_get_train_next` rebuilds its iterators before re-raising, so the first
-        # `StopIteration` means this epoch ended rather than the dataset being finished.
-        # One rollover per call is allowed. A second consecutive raise means the
-        # dataloader yields nothing at all, and looping on that would spin forever.
+        # Allow one epoch rollover per call. A second `StopIteration` means an empty dataloader and must not spin.
         rollover_used = False
         with self.dataloader_lock:
             while remaining > 0:
@@ -652,7 +695,7 @@ class DataProcessor:
         batch_dict = chunks[0] if len(chunks) == 1 else self._concat_dict_chunks(chunks)
         sample_ids = self.get_train_sample_ids(actual_n_prompts)
 
-        batch = tu.get_tensordict(batch_dict)
+        batch = self._get_tensordict(batch_dict)
         tu.assign_non_tensor_stack(batch, "global_steps", [self.global_steps] * actual_n_prompts)
         tu.assign_non_tensor_stack(batch, "validate", [False] * actual_n_prompts)
         tu.assign_non_tensor_stack(
@@ -681,6 +724,17 @@ class DataProcessor:
             return 0
         first_key = next(iter(self.retry_buffer))
         return len(self.retry_buffer[first_key])
+
+    @staticmethod
+    def _get_tensordict(batch_dict: dict) -> TensorDict:
+        """Normalize NumPy dataloader values before building a TensorDict."""
+        normalized = {}
+        for key, value in batch_dict.items():
+            if isinstance(value, np.ndarray):
+                normalized[key] = value.tolist() if value.dtype == object else torch.as_tensor(value)
+            else:
+                normalized[key] = value
+        return tu.get_tensordict(normalized)
 
     @staticmethod
     def _concat_dict_chunks(chunks: list[dict]) -> dict:
@@ -814,7 +868,12 @@ class DataProcessor:
 
         The data queue will hold the processed batches, which can be consumed by the rollout server.
         """
+        assert self.reward_manager_handle is not None, (
+            "Reward manager handle is not set. Call `reward_manager_handle()` first."
+        )
+        # self.train_dataloader_iter = iter(self.train_dataloader)
         self.train_dataloader_iters = [iter(dataloader) for dataloader in self.train_dataloaders]
+
         total_epochs = self.config.trainer.total_epochs
 
         # loop until all epochs are processed
@@ -847,7 +906,11 @@ class DataProcessor:
                     psrl_logger.debug("Reinitializing train_dataloader_iters for next epoch")
                     self.train_dataloader_iters = [iter(dl) for dl in self.train_dataloaders]
             except Exception as e:
-                psrl_logger.error(f"Exception in data processing thread: {e}", exc_info=True)
+                psrl_logger.error(
+                    f"Fatal exception in data processing thread. Stopping data processing: {e}",
+                    exc_info=True,
+                )
+                self.stop_data_process = True
 
         psrl_logger.info("Data processing stopped, sending shutdown signal.")
         self.agent_loop_manager_handle.put_data.remote(None)

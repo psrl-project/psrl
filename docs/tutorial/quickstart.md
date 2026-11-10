@@ -175,7 +175,7 @@ first few hundred steps as the policy learns to solve more GSM8K problems.
    lightweight `KVBatchMeta` and reads/writes fields as the DAPO stages execute.
 4. After each training step, training workers push updated weights to the
    **Parameter Server**. Rollout workers pull new versions when coordinated by the
-   RolloutCoordinator.
+   GlobalCoordinator.
 
 ```{seealso}
 - {doc}`configuration`: Full parameter reference and override syntax

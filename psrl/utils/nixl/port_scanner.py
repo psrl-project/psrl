@@ -1,3 +1,4 @@
+import logging
 import socket
 
 import ray
@@ -5,6 +6,8 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 _PORT_SCANNER_PREFIX = "psrl_port_scanner_"
 _PORT_SCANNER_NAMESPACE = "psrl"
+
+psrl_logger = logging.getLogger(__name__)
 
 
 def _actor_name_for_ip(host_ip: str) -> str:
@@ -24,6 +27,11 @@ class PortScanner:
     def __init__(self):
         self.min_port = 20000
         self.max_port = 60000
+
+    def ready(self) -> None:
+        """
+        Confirm the scanner constructor has completed on its pinned node.
+        """
 
     def find_free_port(self):
         for port in range(self.min_port, self.max_port + 1):
@@ -49,20 +57,31 @@ def create_port_scanners(ip_to_node_id: dict[str, str]) -> dict[str, ray.actor.A
         Dict mapping IP to actor handle (for explicit ray.kill at normal exit).
     """
     handles = {}
-    for ip, node_id in ip_to_node_id.items():
-        name = _actor_name_for_ip(ip)
-        # Kill any leftover scanner from a previous crashed run.
-        try:
-            old = ray.get_actor(name, namespace=_PORT_SCANNER_NAMESPACE)
-            ray.kill(old)
-        except ValueError:
-            pass
-        handles[ip] = PortScanner.options(
-            name=name,
-            namespace=_PORT_SCANNER_NAMESPACE,
-            lifetime="detached",
-            scheduling_strategy=NodeAffinitySchedulingStrategy(node_id=node_id, soft=False),
-        ).remote()
+    try:
+        for ip, node_id in ip_to_node_id.items():
+            name = _actor_name_for_ip(ip)
+            # Kill any leftover scanner from a previous crashed run.
+            try:
+                old = ray.get_actor(name, namespace=_PORT_SCANNER_NAMESPACE)
+                ray.kill(old)
+            except ValueError:
+                pass
+            handles[ip] = PortScanner.options(
+                name=name,
+                namespace=_PORT_SCANNER_NAMESPACE,
+                lifetime="detached",
+                num_cpus=0,
+                scheduling_strategy=NodeAffinitySchedulingStrategy(node_id=node_id, soft=False),
+            ).remote()
+        # Report scheduling failures before expensive model initialization begins.
+        ray.get([scanner.ready.remote() for scanner in handles.values()], timeout=60)
+    except Exception:
+        for handle in handles.values():
+            try:
+                ray.kill(handle, no_restart=True)
+            except Exception as e:
+                psrl_logger.warning(f"Failed to release port scanner after initialization failed: {e!r}.")
+        raise
     return handles
 
 

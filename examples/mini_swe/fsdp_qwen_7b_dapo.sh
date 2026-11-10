@@ -19,7 +19,7 @@ echo "=== Pre-flight done ==="
 
 # --- Model ---
 # NOTE(lhy): Modify max_position_embeddings in config.json to 32768 after downloading.
-MODEL_PATH=${PSRL_WORKSPACE}/models/Qwen2.5-7B-Instruct
+MODEL_PATH=${PSRL_WORKSPACE}/models/Qwen2.5-7B
 
 # --- Data ---
 # Generate with: python examples/mini_swe/prepare/prepare_simple_data.py --train_size 64 --test_size 16
@@ -48,19 +48,19 @@ GEN_PP=1
 VAL_TP=1
 VAL_PP=1
 
-TRAIN_SP=2
-TRAIN_FSDP=8
+TRAIN_SP=1
+TRAIN_FSDP=4
 
-NNODES=4
+NNODES=1
 NGPUS_PER_NODE=8
 
-GEN_NNODES=2
-GEN_NGPUS_PER_NODE=${NGPUS_PER_NODE}
+GEN_NNODES=1
+GEN_NGPUS_PER_NODE=4
 GEN_INSTANCES=$(( (GEN_NNODES * GEN_NGPUS_PER_NODE) / (GEN_TP * GEN_PP) ))
 GEN_NGPUS_PER_NODE_PER_INSTANCE=$(( GEN_TP * GEN_PP ))
 
-TRAIN_NNODES=2
-TRAIN_NGPUS_PER_NODE=${NGPUS_PER_NODE}
+TRAIN_NNODES=1
+TRAIN_NGPUS_PER_NODE=4
 
 VAL_INSTANCES=$(( (TRAIN_NNODES * TRAIN_NGPUS_PER_NODE) / (VAL_TP * VAL_PP) ))
 VAL_NGPUS_PER_NODE_PER_INSTANCE=$(( VAL_TP * VAL_PP ))
@@ -106,7 +106,7 @@ use_dynamic_bsz=True
 packing_length=$(( (max_prompt_length + max_response_length) * 1 ))
 offload=False
 
-PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config --config-name='ppo_trainer' \
+PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path="${PSRL_PATH}/psrl/trainer/config" --config-name='ppo_trainer' \
     psrl.ps_manager_ip=${LOCAL_IP} \
     psrl.rollout_n=${n_resp_per_prompt} \
     psrl.staleness=${staleness} \
@@ -125,7 +125,6 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config --conf
     psrl.deployment.total_nnodes=${NNODES} \
     psrl.nixl.server_port=23456 \
     \
-    +gen_actor_rollout_ref.model.override_config.max_position_embeddings=32768 \
     gen_actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
     gen_actor_rollout_ref.rollout.tensor_model_parallel_size=${GEN_TP} \
     gen_actor_rollout_ref.rollout.pipeline_model_parallel_size=${GEN_PP} \
@@ -186,20 +185,20 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path=./config --conf
     algorithm.rollout_correction.rollout_is=${rollout_is} \
     algorithm.rollout_correction.rollout_is_threshold=${rollout_is_threshold} \
     \
-    reward.active_managers='[dapo]' \
-    reward.managers.dapo.reward_fn.0.path=${PSRL_PATH}/examples/mini_swe/reward.py \
-    reward.managers.dapo.reward_fn.0.name=compute_score \
-    reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer} \
-    reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len} \
-    reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \
-    reward.managers.dapo.reward_kwargs.overlong_buffer_cfg.log=False \
-    reward.managers.dapo.reward_kwargs.max_resp_len=${max_response_length} \
+    reward.active_loops='[dapo]' \
+    reward.reward_loops.dapo.reward_fn.0.path=${PSRL_PATH}/examples/mini_swe/reward.py \
+    reward.reward_loops.dapo.reward_fn.0.name=compute_score \
+    reward.reward_loops.dapo.reward_kwargs.overlong_buffer_cfg.enable=${enable_overlong_buffer} \
+    reward.reward_loops.dapo.reward_kwargs.overlong_buffer_cfg.len=${overlong_buffer_len} \
+    reward.reward_loops.dapo.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \
+    reward.reward_loops.dapo.reward_kwargs.overlong_buffer_cfg.log=False \
+    reward.reward_loops.dapo.reward_kwargs.max_resp_len=${max_response_length} \
     \
-    data.train_files="$train_files" \
+    +data.train_files="$train_files" \
     data.reward_model_dicts.0.reward_loop_type=dapo \
     data.reward_model_dicts.0.reward_fn=compute_score \
-    data.val_files="$test_files" \
-    data.prompt_key=prompt \
+    +data.val_files="$test_files" \
+    +data.prompt_key=prompt \
     data.truncation='error' \
     data.max_prompt_length=${max_prompt_length} \
     data.max_response_length=${max_response_length} \

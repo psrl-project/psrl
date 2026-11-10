@@ -4,12 +4,12 @@ from tensordict import TensorDict
 from verl.utils import tensordict_utils as tu
 
 from psrl.utils.reward_score import default_compute_score_async
-from psrl.workers.reward.reward_loop.base import RewardManagerBase
+from psrl.workers.reward.reward_loop.base import RewardLoopBase
 from psrl.workers.reward.reward_loop.registry import register
 
 
 @register("gdpo")
-class GDPORewardManager(RewardManagerBase):
+class GDPORewardLoop(RewardLoopBase):
     """Reward loop for GDPO."""
 
     def __init__(

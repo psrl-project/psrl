@@ -4,13 +4,13 @@ from tensordict import TensorDict
 from verl.utils import tensordict_utils as tu
 
 from psrl.utils.reward_score import default_compute_score_async
-from psrl.workers.reward.reward_loop.base import RewardManagerBase
+from psrl.workers.reward.reward_loop.base import RewardLoopBase
 from psrl.workers.reward.reward_loop.registry import register
 
 
 @register("naive")
-class NaiveRewardManager(RewardManagerBase):
-    """The reward manager."""
+class NaiveRewardLoop(RewardLoopBase):
+    """The reward loop."""
 
     def __init__(
         self,
@@ -72,6 +72,7 @@ class NaiveRewardManager(RewardManagerBase):
                 reward_extra_info[key] = value
         else:
             score = result
+            reward_extra_info["score"] = score
             reward_extra_info["acc"] = score
 
         reward = score

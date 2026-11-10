@@ -16,25 +16,33 @@ from verl.single_controller.base.decorator import (
     register,
 )
 from verl.utils import tensordict_utils as tu
+from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.device import get_device_id, is_cuda_available
 from verl.utils.fs import copy_to_local
 from verl.utils.memory_utils import aggressive_empty_cache
-from verl.workers.config import DistillationConfig
 from verl.workers.engine_workers import ActorRolloutRefWorker
 
+from psrl.trainer.distillation.data import align_teacher_targets
 from psrl.utils.common.patch_utils import apply_tms_patch
 from psrl.utils.converter import create_parameter_mapping
 from psrl.utils.converter.param_sync import ParamSyncPlan
+from psrl.workers.config import DistillationConfig
 
 # Set an architecture before guarded Megatron imports on CPU workers.
 if not is_cuda_available and "TORCH_CUDA_ARCH_LIST" not in os.environ:
     os.environ["TORCH_CUDA_ARCH_LIST"] = "8.0"
 
 try:
+    from megatron.bridge.models.conversion.utils import unwrap_model  # noqa: E402
+
     from psrl.utils.converter.megatron_converter import convert_megatron_inplace  # noqa: E402
 except ImportError:
     convert_megatron_inplace = None
-from megatron.bridge.models.conversion.utils import unwrap_model  # noqa: PLC0415
+
+    def unwrap_model(model):
+        """Return the model unchanged when Megatron is not installed."""
+        return model
+
 
 if not is_cuda_available and os.environ.get("TORCH_CUDA_ARCH_LIST") == "8.0":
     del os.environ["TORCH_CUDA_ARCH_LIST"]
@@ -69,6 +77,26 @@ except ImportError:
 
 psrl_logger = logging.getLogger(__file__)
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
+
+
+def clear_megatron_memory_caches(models) -> None:
+    """
+    Drop cached tensors that are absent from the synchronized model state.
+    """
+    from megatron.core import parallel_state
+    from transformer_engine.pytorch.cpp_extensions.gemm import get_cublas_workspace
+    from transformer_engine.pytorch.module import base
+
+    for model in models:
+        for module in model.modules():
+            for name in ("forward", "get_cos_sin", "get_freqs_non_repeated"):
+                method = getattr(module, name, None)
+                if method is not None and hasattr(method, "cache_clear"):
+                    method.cache_clear()
+    get_cublas_workspace.cache_clear()
+    base._dummy_wgrads.clear()
+    parallel_state.get_global_memory_buffer().buffer.clear()
+    torch._C._cuda_clearCublasWorkspaces()
 
 
 class PSRL_EngineTrainWorker(ActorRolloutRefWorker, PSRL_BaseTrainWorker):
@@ -110,6 +138,7 @@ class PSRL_EngineTrainWorker(ActorRolloutRefWorker, PSRL_BaseTrainWorker):
             apply_tms_patch()
 
         self.log_prefix = f"TrainWorker_R{self.rank}"
+        self._nixl_restore_optimizer_to_device = False
         psrl_logger.addHandler(DualOutputHandler(self.psrl_config.logging_path, self.log_prefix))
         psrl_logger.info(f"Initialized on {get_worker_info()}.")
 
@@ -223,15 +252,96 @@ class PSRL_EngineTrainWorker(ActorRolloutRefWorker, PSRL_BaseTrainWorker):
 
     def nixl_sleep(self, mode: str = "full"):
         """Deregister NIXL tensors and release GPU memory."""
+        if self.config.actor.strategy in {"fsdp", "fsdp2"}:
+            self.actor.engine.optimizer.zero_grad(set_to_none=True)
+        self._nixl_restore_optimizer_to_device = not self.actor.engine.is_optimizer_offload_enabled
+        self.actor.to(device="cpu", model=False, optimizer=True, grad=False)
+        if mode != "meta":
+            # Deregister while the current physical pages are still mapped.
+            # sleep_model() may release those pages immediately afterwards.
+            self.nixl_storage_client.deregister_local_tensors()
         self.sleep_model()
-        if mode == "meta":
-            return
-        self.nixl_storage_client.deregister_local_tensors()
 
     def nixl_wake_up(self):
         """Restore GPU memory and re-register NIXL tensors after sleep."""
         self.wake_up_model()
+        if self._nixl_restore_optimizer_to_device:
+            self.actor.to(device="device", model=False, optimizer=True, grad=False)
+        arena_handle = getattr(self, "_nixl_weight_arena_handle", None)
+        if arena_handle is not None:
+            arena_handle.assert_fsdp_bindings_unchanged()
         self.nixl_storage_client.register_local_tensors(self.unified_state_dict, self.unified_sharding_dict)
+
+    def sleep_for_validation(self):
+        """Preserve CPU transport actor state while validation owns the GPUs."""
+        if self.config.actor.strategy == "megatron":
+            clear_megatron_memory_caches(self.actor.engine.module)
+        self.actor.to(device="cpu", model=True, optimizer=True, grad=True)
+        aggressive_empty_cache(force_sync=True)
+
+    def wake_from_validation(self):
+        """Restore the actor state preserved by CPU transport validation."""
+        self.actor.to(device="device", model=True, optimizer=True, grad=True)
+
+    def _actor_weight_arena_config(self):
+        """Return validated actor arena settings for this engine-worker path."""
+        arena_config = self.psrl_config.nixl.get("weight_arena", None)
+        if arena_config is None or not arena_config.get("actor_enabled", False):
+            return None
+        if self.psrl_config.ps_mode not in ("nixl_cpu", "nixl_gpu"):
+            raise RuntimeError("psrl.nixl.weight_arena.actor_enabled requires psrl.ps_mode=nixl_cpu or nixl_gpu.")
+        if self.psrl_config.tms.range not in ("train", "all"):
+            raise RuntimeError("psrl.nixl.weight_arena.actor_enabled requires psrl.tms.range=train or all.")
+        if self.config.actor.strategy != "fsdp2":
+            raise RuntimeError("Actor weight arena only supports the fsdp2 strategy.")
+        fsdp_config = self.config.actor.fsdp_config
+        if fsdp_config.get("offload_policy", False) or fsdp_config.get("param_offload", False):
+            raise RuntimeError("Actor weight arena does not support FSDP2 parameter offloading.")
+        materialization = str(arena_config.get("actor_materialization", "repack"))
+        if materialization != "repack":
+            raise RuntimeError(
+                "The active PSRL_EngineTrainWorker supports actor_materialization=repack only; "
+                f"got {materialization!r}."
+            )
+        return arena_config
+
+    def _materialize_actor_weight_arena(self) -> None:
+        """Pack the initialized FSDP2 actor shards into the active TMS pool."""
+        arena_config = self._actor_weight_arena_config()
+        if arena_config is None:
+            return
+        if hasattr(self, "_nixl_weight_arena_handle"):
+            raise RuntimeError("Actor weight arena cannot be materialized more than once.")
+
+        from psrl.utils.memory.weight_arena import gb_to_bytes, pack_fsdp2_model_weights_in_fresh_tms_pool
+
+        self._nixl_weight_arena_handle = pack_fsdp2_model_weights_in_fresh_tms_pool(
+            self.actor.engine.module,
+            max_chunk_bytes=gb_to_bytes(arena_config.max_chunk_gb, field_name="max_chunk_gb"),
+            alignment_bytes=int(arena_config.alignment_bytes),
+            enable_cpu_backup=False,
+        )
+        self._nixl_weight_arena_materialization = "repack"
+        self._nixl_weight_arena_handle.assert_fsdp_bindings_unchanged()
+        stats = self._nixl_weight_arena_handle.stats
+        psrl_logger.warning(
+            "[NIXL_WEIGHT_ARENA] role=actor rank=%d materialization=repack arenas=%d unique_storages=%d "
+            "tensor_bindings=%d storage_bytes=%d arena_bytes=%d largest_storage_bytes=%d pack_s=%.6f "
+            "tms_source_reserved_bytes=%d tms_source_active_bytes=%d tms_source_active_allocations=%d "
+            "base_addresses=%s",
+            self.rank,
+            stats.arena_count,
+            stats.unique_storage_count,
+            stats.tensor_binding_count,
+            stats.total_storage_bytes,
+            stats.total_arena_bytes,
+            stats.largest_storage_bytes,
+            stats.pack_seconds,
+            stats.tms_source_reserved_bytes,
+            stats.tms_source_active_bytes,
+            stats.tms_source_active_allocations,
+            self._nixl_weight_arena_handle.base_addresses,
+        )
 
     def sleep_model(self):
         """Release GPU memory for model weights (metadata preserved for wake_up).
@@ -239,6 +349,8 @@ class PSRL_EngineTrainWorker(ActorRolloutRefWorker, PSRL_BaseTrainWorker):
         Uses torch_memory_saver.pause() when TMS range covers training,
         otherwise falls back to manual storage-resize helpers.
         """
+        if self.config.actor.strategy == "megatron":
+            clear_megatron_memory_caches(self.actor.engine.module)
         if self.memory_logger is not None:
             self.memory_logger.log_now(prefix=f"Before TrainWorker_R{self.rank} sleep")
 
@@ -300,14 +412,30 @@ class PSRL_EngineTrainWorker(ActorRolloutRefWorker, PSRL_BaseTrainWorker):
                 if module is not None and hasattr(module, buf_attr):
                     existing = getattr(module, buf_attr)
                     if isinstance(existing, torch.Tensor):
-                        existing.data.copy_(cpu_tensor.to(device=device, dtype=existing.dtype))
+                        if existing.shape != cpu_tensor.shape:
+                            raise RuntimeError(
+                                "Non-persistent buffer shape mismatch while restoring from PS: "
+                                f"{full_name}: model={tuple(existing.shape)}, "
+                                f"PS={tuple(cpu_tensor.shape)}."
+                            )
+
+                        # Replace resized FSDP storage to avoid copying into an invalid CUDA allocation after sleep and
+                        # wake.
+                        target_device = existing.device
+                        if target_device.type == "meta":
+                            target_device = torch.device("cuda", device)
+                        restored = cpu_tensor.to(device=target_device, dtype=existing.dtype)
+                        module._buffers[buf_attr] = restored
+
+                        forward = getattr(module, "forward", None)
+                        if forward is not None and hasattr(forward, "cache_clear"):
+                            forward.cache_clear()
             psrl_logger.info(
                 "[_restore_non_persistent_buffers_from_ps] Restored non-persistent FSDP buffers. "
                 f"Count={len(ps_buffers)}."
             )
         elif strategy == "megatron":
-            from megatron.core.models.common.embeddings.rotary_pos_embedding import RotaryEmbedding
-
+            clear_megatron_memory_caches(self.actor.engine.module)
             ps_buffers = self._get_non_persistent_buffers_from_ps()
 
             inv_freq_tensors = {
@@ -323,7 +451,9 @@ class PSRL_EngineTrainWorker(ActorRolloutRefWorker, PSRL_BaseTrainWorker):
             restored = 0
             for model_chunk in self.actor.engine.module:
                 for module in model_chunk.modules():
-                    if isinstance(module, RotaryEmbedding) and hasattr(module, "inv_freq"):
+                    if isinstance(getattr(module, "inv_freq", None), torch.Tensor):
+                        if module.inv_freq.shape != reference_inv_freq.shape:
+                            raise RuntimeError("Rotary frequency shape does not match the parameter server buffer.")
                         # Cached trigonometric tensors reference released GPU memory.
                         if hasattr(module.forward, "cache_clear"):
                             module.forward.cache_clear()
@@ -429,7 +559,7 @@ class PSRL_EngineTrainWorker(ActorRolloutRefWorker, PSRL_BaseTrainWorker):
                         param.grad.untyped_storage().resize_(param._sleep_grad_storage_size)
                         param.grad.zero_()
 
-    def ray_push_model(self) -> None:
+    def ray_push_model(self, version: int | None = None) -> None:
         """Push model weights to the parameter server via CPU Ray object store.
 
         Modes:
@@ -438,7 +568,7 @@ class PSRL_EngineTrainWorker(ActorRolloutRefWorker, PSRL_BaseTrainWorker):
         """
         ps_manager_handle = self.train_interface.ps_manager_handle
         curr_version = ray.get(ps_manager_handle.get_ps_model_version.remote(debug_info="engine_train_worker"))
-        next_version = curr_version + 1
+        next_version = curr_version + 1 if version is None else version
 
         psrl_logger.info("Gathering per-tensor params for CPU push.")
         per_tensor_param, _ = self.actor.engine.get_per_tensor_param()
@@ -486,6 +616,8 @@ class PSRL_EngineTrainWorker(ActorRolloutRefWorker, PSRL_BaseTrainWorker):
                     elif strategy == "megatron":
                         self.config.actor.megatron.load_weight = False
 
+            if self.distillation_enabled and self._is_actor:
+                self.distillation_config = omega_conf_to_dataclass(self.distillation_config)
             try:
                 ActorRolloutRefWorker.init_model(self)
             finally:
@@ -496,11 +628,17 @@ class PSRL_EngineTrainWorker(ActorRolloutRefWorker, PSRL_BaseTrainWorker):
                             self.config.actor.fsdp_config.load_weight = True
                         elif strategy == "megatron":
                             self.config.actor.megatron.load_weight = True
+            self._materialize_actor_weight_arena()
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @gpu_memory_logger_decorator(log_only_rank_0=False)
     def update_actor(self, data: TensorDict) -> TensorDict:
         """Train the actor for one step, then push updated weights to the PS."""
+        if self.distillation_enabled:
+            loss = self.distillation_config.distillation_loss
+            use_topk = loss.loss_settings.use_topk
+            vocab_size = self.actor.model_config.hf_config.get_text_config().vocab_size
+            data = align_teacher_targets(data, int(loss.topk) if use_topk else 1, use_topk, vocab_size=vocab_size)
         with log_dual_events("Train actor", psrl_logger, event_type=EventType.TRAIN):
             output = ActorRolloutRefWorker.update_actor(self, data)
         push_model = tu.pop(data, key="push_model", default=True)

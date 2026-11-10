@@ -28,7 +28,7 @@ class RewardModelReplica(PSRL_vLLMReplica):
 
         Args:
             replica_rank (int): Global replica rank (used for naming).
-            local_replica_rank (int): Rank within the current node set.
+            local_replica_rank (int): Index of this replica inside one worker group.
             psrl_config: Top-level PSRL configuration.
             config (RolloutConfig): Rollout configuration. Must have ``runner: pooling``.
             model_config (HFModelConfig): HuggingFace model configuration.

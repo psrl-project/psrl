@@ -1,0 +1,7 @@
+reward_loop:
+  source: register
+  name: naive
+reward_loop_type: naive
+reward_fn:
+  - path: null
+    name: compute_score

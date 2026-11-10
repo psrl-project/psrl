@@ -11,22 +11,20 @@ if [[ ! -f "${SMG_DIR}/Cargo.toml" ]]; then
     exit 1
 fi
 
-python -m uv pip uninstall -y smg smg-grpc-proto smg-grpc-servicer psrl-state-grpc-proto
-
-# Match the protobuf 7 runtime before no-build-isolation generates SMG stubs.
-python -m uv pip install --no-cache-dir "grpcio-tools>=1.81.1" "protobuf>=7.35.1,<8"
-
 (
     cd -- "${SMG_DIR}"
     cargo build --release
-    # --no-build-isolation: generate stubs with the ambient grpcio-tools above.
-    python -m uv pip install --no-build-isolation -e crates/grpc_client/python/
-    python -m uv pip install --no-build-isolation -e crates/psrl_state/python/
-    python -m uv pip install -e grpc_servicer/
+    # Match the protobuf runtime used to generate the native service stubs.
+    python -m uv pip install --no-cache-dir "grpcio-tools>=1.81.1" "protobuf>=7.35.1,<8"
+    # Resolve local protocol packages and the servicer together so dependencies retain the editable sources.
+    python -m uv pip install --reinstall --no-build-isolation \
+        -e crates/grpc_client/python/ \
+        -e crates/psrl_state/python/ \
+        -e grpc_servicer/
 
     # Re-assert protobuf 7 after servicer deps (pip may leave an older runtime).
     python -m uv pip install --no-cache-dir "protobuf>=7.35.1,<8"
 
     cd -- bindings/python
-    maturin develop --features vendored-openssl
+    maturin develop --features vendored-openssl --release
 )

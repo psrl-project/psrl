@@ -21,7 +21,7 @@ GRADER_TIMEOUT=1800
 SSH_TIMEOUT=7200
 
 # Shared-FS env script (conda + NCCL / UCX / vLLM / library paths).
-ENV_SCRIPT="${PSRL_WORKSPACE}/env/psrl.sh"
+ENV_SCRIPT="${PSRL_WORKSPACE}/env/env_311.sh"
 
 # Temporarily disable nounset because environment setup accepts unset variables.
 set +u

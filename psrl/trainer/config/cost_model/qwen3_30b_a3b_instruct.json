@@ -1,0 +1,9 @@
+{
+    "TP2_PP1": {
+        "other_threshold": 0.0037829,
+        "other_latency_b": 0.0045191,
+        "other_latency_k": 0.0000455,
+        "attn_latency_b": 0.001517061,
+        "attn_latency_k": 3.58e-08
+    }
+}

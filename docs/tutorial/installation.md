@@ -71,7 +71,7 @@ optional KV-cache components.
 | CUDA | CUDA 12.8-compatible driver/toolchain |
 | Python | 3.12 recommended |
 | Rust/Cargo | Required to build SMG's Rust gateway and Python binding |
-| Build tools | Git, C/C++ toolchain, CMake/Ninja, and sufficient disk space |
+| Build tools | Git, GCC 11+ compatible with CUDA, CMake/Ninja, Autotools, and sufficient disk space |
 | Multi-node network | InfiniBand/RoCE recommended for `nixl_cpu` and LMCache P2P |
 
 Install Rust before running the core installer:
@@ -97,7 +97,7 @@ checkout or installed package.
 
 ```bash
 bash scripts/install_basic.sh
-python -m pip install -e .
+python -m pip install -e '.[test]'
 ```
 
 `install_basic.sh` currently installs:
@@ -106,12 +106,13 @@ python -m pip install -e .
   Apex, and common Python dependencies.
 - SMG, including the release Rust gateway, Python
   binding, gRPC protocol/client package, PSRL state protocol, and gRPC servicer.
-- vLLM `releases/v0.22.0` and the PSRL vLLM patches.
-- A pinned veRL checkout and the PSRL veRL patches. The pinned veRL requirements install `TransferQueue==0.1.7` during the core installation. `SimpleStorage` is the default TransferQueue backend.
+- vLLM `v0.22.0` and the PSRL vLLM patches.
+- A pinned veRL checkout and the PSRL veRL patches. The pinned veRL requirements install `TransferQueue==0.1.8` during the core installation. `SimpleStorage` is the default TransferQueue backend.
 - `torch_memory_saver`.
 
-The installer clones sources under `third_party/`. Set `VLLM_PATH` or `VERL_PATH`
-before running it to use an existing checkout.
+The installer clones dependencies under `third_party/` and applies the vLLM and
+veRL patches before building. Set `VLLM_PATH` or `VERL_PATH` to use an existing
+checkout at the baseline listed in [the patch guide](../../patch/README.md).
 
 ### SMG Requirements
 
@@ -149,10 +150,15 @@ Run these after the core installer:
 
 ```bash
 bash scripts/install_nixl.sh
+source scripts/activate_nixl.sh
 ```
 
 Required for `psrl.ps_mode=nixl_cpu`. NIXL/UCX selects local shared-memory/IPC paths
 where possible and RDMA-capable transports across nodes.
+
+For RDMA jobs, set `UCX_NET_DEVICES` to the ports allocated to the job.
+Use `ucx_info -d` to list available devices. Selecting every interface on hosts
+with many HCAs can exceed UCX's transport-resource limit.
 :::
 
 :::{tab-item} Megatron
@@ -231,5 +237,13 @@ python -c "import megatron; print('Megatron:', megatron.__file__)"
 python -c "import lmcache; print('LMCache:', lmcache.__file__)"
 ```
 
-If all commands succeed without errors, your installation is ready. Proceed to the
-{doc}`quickstart` to run your first training job.
+Run dependency and unit checks in the same environment:
+
+```bash
+python scripts/check_environment.py
+python -m pytest tests
+```
+
+GPU tests are skipped by default. On a GPU node, add `--run-gpu` and provide
+`--gpu-model-path` for tests that need a local checkpoint.
+Proceed to the {doc}`quickstart` to run your first training job.

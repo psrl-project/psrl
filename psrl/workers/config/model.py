@@ -36,6 +36,10 @@ class HFModelConfig(BaseConfig):
     tokenizer_path: str | None = None
     local_tokenizer_path: str | None = None
 
+    # Input tokenizer path. Used when the reward model's chat template differs from the policy
+    input_tokenizer: str | None = None
+
+    # whether to load tokenizer. This is useful when we only want to load model config
     load_tokenizer: bool = True
 
     hf_config: Any = None
@@ -70,6 +74,8 @@ class HFModelConfig(BaseConfig):
     architectures: list[str] | None = None
 
     def __post_init__(self):
+        if self.path in (MISSING, "???"):
+            return
         import_external_libs(self.external_lib)
 
         if self.hf_config_path is None:

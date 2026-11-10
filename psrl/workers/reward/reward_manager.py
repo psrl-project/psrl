@@ -1,22 +1,19 @@
 import asyncio
 import logging
 import os
-from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 import ray
 import torch
 import transfer_queue as tq
-from omegaconf import DictConfig
 from tensordict import TensorDict
 from transfer_queue import KVBatchMeta
-from verl.experimental.reward_loop.reward_manager.base import RewardManagerBase
-from verl.utils import hf_tokenizer
+from verl.trainer.distillation.losses import get_distillation_loss_settings
 from verl.utils import tensordict_utils as tu
-from verl.utils.fs import copy_to_local
 from verl.utils.tensordict_utils import list_of_dict_to_tensordict
 
+from psrl.trainer.distillation.data import validate_teacher_targets
 from psrl.utils.logger import (
     DualOutputHandler,
     EventType,
@@ -24,55 +21,25 @@ from psrl.utils.logger import (
 )
 from psrl.utils.server.command import Command, CommandExtension, CommandType
 from psrl.workers.ps.request_status_tracker import PSRL_RequestStatus
-from psrl.workers.reward.reward_loop import load_reward_manager
-from psrl.workers.reward.reward_model import RewardModelManager
-from psrl.workers.reward.utils import ensure_reward_attention_mask
 
 psrl_logger = logging.getLogger(__name__)
 psrl_logger.setLevel(os.getenv("PSRL_LOGGING_LEVEL", "WARN"))
-
-
-@dataclass
-class RewardSpec:
-    reward_manager_type: str
-    reward_fn_name: str
-    reward_model_name: str | None
-
-    def __hash__(self):
-        return hash((self.reward_manager_type, self.reward_fn_name, self.reward_model_name))
-
-    def __eq__(self, other):
-        if not isinstance(other, RewardSpec):
-            return NotImplemented
-        return (
-            self.reward_manager_type == other.reward_manager_type
-            and self.reward_fn_name == other.reward_fn_name
-            and self.reward_model_name == other.reward_model_name
-        )
-
-    def key(self) -> str:
-        """Return a unique string key for logging/tracking."""
-        return f"{self.reward_manager_type}/{self.reward_fn_name}/{self.reward_model_name}"
 
 
 class RewardLoopManager(CommandExtension):
     def __init__(
         self,
         config,
-        tokenizer,
-        processor,
-        reward_model_configs: list[DictConfig],
-        reward_model_to_manager: dict[str, RewardModelManager],
-        ps_manager_handle=None,
-        reward_loop_workers: list[ray.actor.ActorHandle] | None = None,
+        ps_manager_handle,
+        reward_loop_workers: list[ray.actor.ActorHandle],
+        *,
+        is_validate: bool,
     ):
         """Initialize reward processing state and worker coordination."""
         super().__init__()
 
         self.config = config
-        self.tokenizer = tokenizer
-        self.processor = processor
-        self.reward_model_to_manager = reward_model_to_manager
+        self.is_validate = is_validate
 
         if self.config.psrl.rollout_coordination.redundant_rollout.enable:
             self.rollout_n = self.config.psrl.rollout_coordination.redundant_rollout.redundant_rollout_n
@@ -104,27 +71,24 @@ class RewardLoopManager(CommandExtension):
         self.stop_collect_task = False
         self.stop_dispatch_task = False
 
-        worker_cfg = self.config.reward.reward_loop_worker
+        worker_cfg = (
+            self.config.reward.validation_reward_loop_worker if is_validate else self.config.reward.reward_loop_worker
+        )
+        if worker_cfg.result_queue_size <= 0 or worker_cfg.result_drain_batch_size <= 0:
+            raise ValueError("Reward result queue size and drain batch size must be positive.")
         self.result_queue = asyncio.Queue(maxsize=worker_cfg.result_queue_size)
         self.result_drain_batch_size = worker_cfg.result_drain_batch_size
-        self.reward_loop_workers = reward_loop_workers or []
-        self.use_reward_loop_workers = worker_cfg.enable and len(self.reward_loop_workers) > 0
+        assert reward_loop_workers, "Reward loop workers are required."
+        self.reward_loop_workers = reward_loop_workers
         self.dispatch_idx = 0
         self.attempt_counter = 0
         self.dispatch_queue: asyncio.Queue = asyncio.Queue()
 
         self.ps_manager_handle = ps_manager_handle
 
-        self.reward_model_configs = reward_model_configs
-
-        self.reward_spec_to_manager: dict[RewardSpec, RewardManagerBase] = {}
-
-        if not self.use_reward_loop_workers:
-            self._init_reward_fn()
-
-        self.log_prefix = "RewardLoopManager"
+        self.log_prefix = "ValidationRewardLoopManager" if is_validate else "RewardLoopManager"
         psrl_logger.addHandler(DualOutputHandler(self.config.psrl.logging_path, self.log_prefix))
-        psrl_logger.info("Initialized RewardLoopManager.")
+        psrl_logger.info(f"Initialized {self.log_prefix}.")
 
     def start_busy_loop(self):
         """Start reward request processing tasks."""
@@ -139,12 +103,11 @@ class RewardLoopManager(CommandExtension):
         self.running_loop = asyncio.get_running_loop()
         self.command_loop_task = self.running_loop.create_task(self._command_event_handler())
         self.command_loop_task.add_done_callback(lambda f: f.result())  # To avoid silent error in async tasks
-        if self.use_reward_loop_workers:
-            self.collect_task = self.running_loop.create_task(self._collect_results())
-            self.collect_task.add_done_callback(lambda f: f.result())
-            self.stop_dispatch_task = False
-            self.dispatch_task = self.running_loop.create_task(self._dispatch_loop())
-            self.dispatch_task.add_done_callback(lambda f: f.result())
+        self.collect_task = self.running_loop.create_task(self._collect_results())
+        self.collect_task.add_done_callback(lambda f: f.result())
+        self.stop_dispatch_task = False
+        self.dispatch_task = self.running_loop.create_task(self._dispatch_loop())
+        self.dispatch_task.add_done_callback(lambda f: f.result())
 
     async def stop_busy_loop(self):
         """Stop and await reward request processing tasks."""
@@ -187,7 +150,7 @@ class RewardLoopManager(CommandExtension):
                     uids = command_args.get("uids", None)
                     is_validate = command_args.get("is_validate", False)
 
-                    assert not is_validate, "Eval data should not be aborted in reward manager."
+                    assert not is_validate and not self.is_validate, "Validation rewards must not be aborted."
 
                     if parent_ids is None and uids is None:
                         raise ValueError("Abort command must contain either 'parent_ids' or 'uids' in args.")
@@ -268,17 +231,23 @@ class RewardLoopManager(CommandExtension):
         psrl_logger.info("Command event handler of reward manager has finished.")
 
     async def normalize_reward(self, reward_batch: KVBatchMeta) -> KVBatchMeta:
-        """Normalize rewards in a batch."""
+        """Normalize rewards for real trajectories without consuming padding metadata."""
+        real_keys = [key for key, tag in zip(reward_batch.keys, reward_batch.tags) if not tag.get("is_padding", False)]
+        if not real_keys:
+            return reward_batch
+
         fields = ["uid", "reward_score", "reward_extra_info"]
         data = await tq.async_kv_batch_get(
-            keys=reward_batch.keys, partition_id=reward_batch.partition_id, select_fields=fields
+            keys=real_keys, partition_id=reward_batch.partition_id, select_fields=fields
         )
 
         uids = tu.get(data, "uid")
         reward_extra_infos = tu.get(data, "reward_extra_info")
-        uid_to_data_source = {uid: self.request_id_to_data_source.pop(uid) for uid in set(uids)}
+        uid_to_data_source = {uid: self.request_id_to_data_source[uid] for uid in set(uids)}
+        for uid in uid_to_data_source:
+            self.request_id_to_data_source.pop(uid)
         data_sources = [uid_to_data_source[uid] for uid in uids]
-        reward_scores = tu.get(data, "reward_score")
+        reward_scores = np.asarray(tu.get(data, "reward_score"))
 
         for reward_extra_info, data_source, reward_score in zip(reward_extra_infos, data_sources, reward_scores):
             reward_extra_info["data_source"] = data_source
@@ -287,7 +256,7 @@ class RewardLoopManager(CommandExtension):
         if self.reward_normalization != "batch" and self.reward_normalization != "group":
             data["reward_extra_info"] = reward_extra_infos
             await tq.async_kv_batch_put(
-                keys=reward_batch.keys,
+                keys=real_keys,
                 partition_id=reward_batch.partition_id,
                 fields=data.select("reward_extra_info"),
             )
@@ -296,7 +265,7 @@ class RewardLoopManager(CommandExtension):
         # Only each UID's final trajectory contributes to normalization.
         final_trajectories: dict[str, tuple[int, int]] = {}
         row_session_keys = []
-        for i, key in enumerate(reward_batch.keys):
+        for i, key in enumerate(real_keys):
             fields = key.rsplit("_", 1)
             if len(fields) == 2:
                 uid_key, index = fields[0], int(fields[1])
@@ -333,7 +302,7 @@ class RewardLoopManager(CommandExtension):
         for group_id, group_rewards_dict in group_rewards_dicts.items():
             local_indices = group_rewards_dict["local_indices"]
             rewards = np.array(group_rewards_dict["rewards"])
-            psrl_logger.info(f"Rewards for group {group_id}: {len(rewards)}")
+            psrl_logger.info(f"Rewards for group {group_id!r}: {len(rewards)}.")
             norm_rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
             for local_index, norm_reward in zip(local_indices, norm_rewards):
                 final_reward_scores[local_index] = float(norm_reward)
@@ -345,17 +314,18 @@ class RewardLoopManager(CommandExtension):
         data["reward_extra_info"] = reward_extra_infos
         data["reward_score"] = reward_scores
 
-        response_mask = await tq.async_kv_batch_get(
-            keys=reward_batch.keys,
+        response_data = await tq.async_kv_batch_get(
+            keys=real_keys,
             partition_id=reward_batch.partition_id,
             select_fields=["response_mask"],
-        )["response_mask"]
+        )
+        response_mask = response_data["response_mask"]
         rm_scores = torch.zeros_like(response_mask, dtype=torch.float32)
         rm_scores[:, -1] = torch.as_tensor(reward_scores, dtype=rm_scores.dtype, device=rm_scores.device)
         data["rm_scores"] = rm_scores
 
         await tq.async_kv_batch_put(
-            keys=reward_batch.keys,
+            keys=real_keys,
             partition_id=reward_batch.partition_id,
             fields=data.select("reward_extra_info", "reward_score", "rm_scores"),
         )
@@ -408,12 +378,14 @@ class RewardLoopManager(CommandExtension):
         await asyncio.gather(*tasks)
 
     async def put_reward_result(self, result: dict):
+        if bool(result["is_validate"]) != self.is_validate:
+            raise ValueError("Reward result does not belong to this manager's worker pool.")
         await self.result_queue.put(result)
 
     async def _collect_results(self):
         while not self.stop_collect_task:
             results: list[dict] = []
-            while not self.result_queue.empty():
+            while len(results) < self.result_drain_batch_size and not self.result_queue.empty():
                 results.append(self.result_queue.get_nowait())
 
             if not results:
@@ -431,7 +403,9 @@ class RewardLoopManager(CommandExtension):
             if not request_keys:
                 continue
             expected_attempt = self.request_key_to_attempt.get(request_keys[0])
-            if expected_attempt != result["attempt_id"]:
+            if bool(result.get("is_validate", self.is_validate)) != self.is_validate:
+                raise ValueError("Reward result does not belong to this manager's worker pool.")
+            if any(self.request_key_to_attempt.get(key) != result["attempt_id"] for key in request_keys):
                 psrl_logger.debug(
                     "Drop stale reward result uid=%s attempt=%s expected=%s",
                     result["uid"],
@@ -444,33 +418,43 @@ class RewardLoopManager(CommandExtension):
         if not valid_results:
             return
 
-        for is_validate in (False, True):
-            group = [r for r in valid_results if r["is_validate"] == is_validate]
-            if not group:
+        await self.ps_manager_handle.update_request_status.remote(
+            [result["uid"] for result in valid_results],
+            PSRL_RequestStatus.REWARD_COMPLETED,
+            is_validate=self.is_validate,
+        )
+        for result in valid_results:
+            if any(self.request_key_to_attempt.get(key) != result["attempt_id"] for key in result["request_keys"]):
                 continue
-            uids = [r["uid"] for r in group]
-            await self.ps_manager_handle.update_request_status.remote(
-                uids,
-                PSRL_RequestStatus.REWARD_COMPLETED,
-                is_validate=is_validate,
-            )
-            for result in group:
-                reward = result["result"] if result.get("error") is None else None
-                if result.get("error") is not None:
-                    psrl_logger.error(
-                        "Reward worker %s failed uid=%s keys=%s error=%s",
-                        result["worker_id"],
-                        result["uid"],
-                        result["request_keys"],
-                        result["error"],
-                    )
-                if reward is not None:
-                    reward["response_len"] = result["response_len"]
-                await self._set_reward_for_request_keys(result["request_keys"], reward)
+            reward = result["result"] if result.get("error") is None else None
+            if result.get("error") is not None:
+                psrl_logger.error(
+                    f"Reward worker {result['worker_id']} failed for uid={result['uid']!r}, "
+                    f"keys={result['request_keys']!r}. Error: {result['error']!r}."
+                )
+            if result.get("error") is not None:
+                reward = {"reward_error": result["error"]}
+            if reward is not None:
+                reward["response_len"] = result["response_len"]
+            await self._set_reward_for_request_keys(result["request_keys"], reward)
 
     async def _set_reward_for_request_keys(self, request_keys: list[str], reward: dict[str, Any] | None):
+        teacher_outputs = reward.get("teacher_outputs") if reward else None
+        if teacher_outputs is not None and set(teacher_outputs) != set(request_keys):
+            reward = {"reward_error": "Teacher outputs do not match request_keys."}
+            teacher_outputs = None
         for request_key in request_keys:
             per_key_reward = reward.copy() if reward is not None else None
+            if teacher_outputs is not None:
+                per_key_reward.pop("teacher_outputs")
+                teacher = teacher_outputs[request_key].copy()
+                for field_name in ("reward_extra_info", "reward_metrics"):
+                    per_key_reward[field_name] = {
+                        **per_key_reward.get(field_name, {}),
+                        **teacher.pop(field_name, {}),
+                    }
+                per_key_reward.update(teacher)
+                per_key_reward["response_len"] = teacher["teacher_logprobs"].shape[0]
             self.request_key_to_attempt.pop(request_key, None)
             self.request_key_to_worker.pop(request_key, None)
             if request_key in self.request_key_to_future:
@@ -484,11 +468,10 @@ class RewardLoopManager(CommandExtension):
         self,
         reward_inputs: TensorDict,
     ) -> dict[str, Any] | None:
-        """Compute reward or dispatch reward computation to reward loop workers."""
-        if not self.use_reward_loop_workers:
-            return await self.compute_score_local(reward_inputs)
-
+        """Dispatch reward computation to reward loop workers."""
         is_validate = tu.get(reward_inputs, "validate", False)
+        if bool(is_validate) != self.is_validate:
+            raise ValueError("Reward request does not belong to this manager's worker pool.")
         request_ids = tu.get(reward_inputs, "uid")
         n_trajectories = tu.get(reward_inputs, "n_trajectory")
 
@@ -570,390 +553,80 @@ class RewardLoopManager(CommandExtension):
             sync_results = []
             for request_key in sync_keys:
                 if request_key in self.request_key_to_reward:
-                    sync_results.append(self.request_key_to_reward.pop(request_key))
+                    sync_results.append(self.request_key_to_reward[request_key])
+                    if not self._requires_teacher():
+                        self.request_key_to_reward.pop(request_key, None)
                 else:
-                    sync_results.append(await self.request_key_to_future[request_key])
+                    resolved = await self.request_key_to_future[request_key]
+                    if self._requires_teacher():
+                        self.request_key_to_reward[request_key] = resolved
+                    sync_results.append(resolved)
                     self.request_key_to_future.pop(request_key, None)
 
+        for result in sync_results:
+            if result is not None and "reward_error" in result:
+                raise RuntimeError(f"Reward computation failed: {result['reward_error']}.")
         return sync_results[0] if sync_results else None
 
-    async def wait_for_reward_of_requests(self, requests: KVBatchMeta) -> KVBatchMeta:
-        """Wait for all requested rewards and write them to the transfer queue."""
-        request_keys = requests.keys
-        is_validate = requests.partition_id == "val"
-        partition_id = "val" if is_validate else "train"
-        # Padding from `_balance_batch` in `ray_trainer.py`
-        padding_keys: set[str] = {
-            key for key, tag in zip(requests.keys, requests.tags) if tag.get("is_padding", False)
-        }
-        # Reward may be ready in group post processing
-        ready_keys = {
-            key for key, tag in zip(requests.keys, requests.tags) if not is_validate and tag.get("reward_ready", False)
-        }
-        request_keys_to_put = [key for key in request_keys if key not in ready_keys]
-        request_key_to_reward: dict[str, dict] = {}
-        futures_to_wait = {}
+    def _requires_teacher(self) -> bool:
+        return bool(getattr(getattr(self.config, "distillation", None), "enabled", False)) and not self.is_validate
 
-        for request_key in request_keys_to_put:
+    async def _commit_rewards(self, request_keys: list[str], padding_keys: set[str]) -> None:
+        """Publish scalar rewards and per-trajectory targets before exposing readiness."""
+        fields = []
+        for request_key in request_keys:
             if request_key in padding_keys:
-                request_key_to_reward[request_key] = {
-                    "reward_score": 0.0,
-                    "reward_extra_info": {},
-                    "reward_metrics": {},
-                    "response_len": 1,
-                }
+                reward = self._default_reward_result()
             elif request_key in self.request_key_to_reward:
-                request_key_to_reward[request_key] = self.request_key_to_reward.pop(request_key)
-            elif request_key in self.request_key_to_future:
-                futures_to_wait[request_key] = self.request_key_to_future[request_key]
+                reward = self.request_key_to_reward[request_key]
             else:
-                fut = asyncio.get_running_loop().create_future()
-                self.request_key_to_future[request_key] = fut
-                futures_to_wait[request_key] = fut
-
-        if futures_to_wait:
-            results = await asyncio.gather(*futures_to_wait.values())
-            for request_key, reward in zip(futures_to_wait.keys(), results):
-                request_key_to_reward[request_key] = reward
-
-        fields = []
-        for request_key in request_keys_to_put:
-            reward = request_key_to_reward[request_key]
-            if reward is None:
-                reward = self._default_reward_result()
-            fields.append(reward)
-            self.request_key_to_future.pop(request_key, None)
-
-        for i, f in enumerate(fields):
-            raw_response_len = f.pop("response_len", 1)
-            if raw_response_len <= 0:
-                psrl_logger.error(
-                    "wait_for_reward_of_requests: response_len=%d for key=%s, reward_score=%s, reward_keys=%s",
-                    raw_response_len,
-                    request_keys_to_put[i] if i < len(request_keys_to_put) else "?",
-                    f.get("reward_score"),
-                    list(f.keys()),
-                )
-            response_len = max(raw_response_len, 1)
-            rm_score_tensor = torch.zeros(response_len, dtype=torch.float32)
-            rm_score_tensor[-1] = float(f.get("reward_score", 0.0))
-            f["rm_scores"] = rm_score_tensor
-
-        if request_keys_to_put:
-            await tq.async_kv_batch_put(
-                keys=request_keys_to_put,
-                partition_id=partition_id,
-                fields=list_of_dict_to_tensordict(fields),
-            )
-
-        if not is_validate and self.reward_normalization:
-            requests = await self.normalize_reward(requests)
-
-        return requests
-
-    async def wait_for_reward_ready(self, request_keys: list[str]) -> None:
-        """
-        Write available rewards for request keys to the transfer queue.
-
-        Agent post-processing requires reward scores before the trainer's regular queue write.
-        """
-        futures_to_wait: dict[str, asyncio.Future] = {}
-        resolved: dict[str, dict] = {}
-        for request_key in request_keys:
-            if request_key in self.request_key_to_reward:
-                resolved[request_key] = self.request_key_to_reward[request_key]
-            elif request_key in self.request_key_to_future:
-                fut = self.request_key_to_future[request_key]
-                if fut.done():
-                    resolved[request_key] = fut.result()
-                else:
-                    futures_to_wait[request_key] = fut
-            else:
-                fut = asyncio.get_running_loop().create_future()
-                self.request_key_to_future[request_key] = fut
-                futures_to_wait[request_key] = fut
-
-        if futures_to_wait:
-            results = await asyncio.gather(*futures_to_wait.values())
-            for request_key, result in zip(futures_to_wait.keys(), results):
-                resolved[request_key] = result
-
-        fields = []
-        for request_key in request_keys:
-            reward = resolved.get(request_key)
-            if reward is None:
-                reward = self._default_reward_result()
-            f = reward.copy()
-            response_len = max(f.pop("response_len", 1), 1)
-            rm_score_tensor = torch.zeros(response_len, dtype=torch.float32)
-            rm_score_tensor[-1] = float(f.get("reward_score", 0.0))
-            f["rm_scores"] = rm_score_tensor
-            fields.append(f)
-
+                future = self.request_key_to_future.setdefault(request_key, asyncio.get_running_loop().create_future())
+                reward = await future
+            if reward is not None and "reward_error" in reward:
+                raise RuntimeError(f"Reward computation failed for {request_key!r}: {reward['reward_error']}.")
+            row = (reward or self._default_reward_result()).copy()
+            response_length = max(row.pop("response_len", 1), 1)
+            if self._requires_teacher():
+                loss = self.config.distillation.distillation_loss
+                use_topk = get_distillation_loss_settings(loss.loss_mode).use_topk
+                width = int(loss.topk) if use_topk else 1
+                if request_key in padding_keys:
+                    row.update(teacher_logprobs=torch.zeros(1, width), teacher_weight=0.0)
+                    if use_topk:
+                        row["teacher_ids"] = torch.zeros(1, width, dtype=torch.int64)
+                if use_topk and "teacher_ids" not in row:
+                    raise ValueError(f"Missing teacher_ids for {request_key!r}.")
+                validate_teacher_targets(row, response_length, width, padding=request_key in padding_keys)
+            if "teacher_weight" in row:
+                row["teacher_weight"] = torch.tensor(row["teacher_weight"], dtype=torch.float32)
+            scores = torch.zeros(response_length, dtype=torch.float32)
+            scores[-1] = float(row.get("reward_score", 0.0))
+            row["rm_scores"] = scores
+            fields.append(row)
         if request_keys:
             await tq.async_kv_batch_put(
                 keys=request_keys,
-                partition_id="train",
+                partition_id="val" if self.is_validate else "train",
                 fields=list_of_dict_to_tensordict(fields),
             )
-            for request_key in request_keys:
-                self.request_key_to_reward.pop(request_key, None)
-                self.request_key_to_future.pop(request_key, None)
+            for key in request_keys:
+                self.request_key_to_reward.pop(key, None)
+                self.request_key_to_future.pop(key, None)
 
-    # TODO(linsh): Move the methods below to reward workers.
+    async def wait_for_reward_of_requests(self, requests: KVBatchMeta) -> KVBatchMeta:
+        """Wait for reward fields and publish them atomically to the correct partition."""
+        is_validate = requests.partition_id == "val"
+        if is_validate != self.is_validate:
+            raise ValueError("Reward batch does not belong to this manager's worker pool.")
+        padding = {key for key, tag in zip(requests.keys, requests.tags) if tag.get("is_padding", False)}
+        pending = [
+            key for key, tag in zip(requests.keys, requests.tags) if is_validate or not tag.get("reward_ready", False)
+        ]
+        await self._commit_rewards(pending, padding)
+        if not is_validate and self.reward_normalization:
+            requests = await self.normalize_reward(requests)
+        return requests
 
-    def _init_reward_fn(self):
-        """Initialize local reward loop managers."""
-        input_tokenizer_local_path = copy_to_local(self.config.train_actor_rollout_ref.model.path)
-        self.input_tokenizer = hf_tokenizer(input_tokenizer_local_path, trust_remote_code=True)
-
-        for reward_model_config in self.reward_model_configs:
-            psrl_logger.info(f"Initializing reward function for {reward_model_config}")
-
-            reward_manager_cfg = reward_model_config.reward_manager
-            reward_manager_type = reward_model_config.reward_loop_type
-            reward_fn_configs = reward_model_config.reward_fn
-            reward_model_name = reward_model_config.get("reward_model_name", "null")
-            reward_kwargs = reward_model_config.get("reward_kwargs", {})
-
-            for reward_fn_config in reward_fn_configs:
-                reward_fn_name = reward_fn_config.get("name", "null")
-                reward_spec = RewardSpec(
-                    reward_manager_type=reward_manager_type,
-                    reward_fn_name=reward_fn_name,
-                    reward_model_name=reward_model_name,
-                )
-
-                if reward_spec in self.reward_spec_to_manager:
-                    continue
-
-                if reward_manager_type == "gen" and (
-                    reward_model_name is None or reward_model_name not in self.reward_model_to_manager
-                ):
-                    raise ValueError(f"Reward model manager for {reward_model_name} not found")
-
-                reward_model_manager = self.reward_model_to_manager.get(reward_model_name, None)
-                reward_manager = load_reward_manager(
-                    self.config,
-                    self.input_tokenizer,
-                    reward_manager_cfg=reward_manager_cfg,
-                    reward_fn_config=reward_fn_config,
-                    reward_model_manager=reward_model_manager,
-                    **reward_kwargs,
-                )
-                self.reward_spec_to_manager[reward_spec] = reward_manager
-
-    def _resolve_reward_manager(
-        self, reward_model_dicts: list[dict]
-    ) -> tuple[list[str], list[RewardManagerBase], list[float]]:
-        """
-        Resolve reward loop keys, managers, and coefficients.
-
-        Args:
-            reward_model_dicts: Reward model configurations from `non_tensor_batch`.
-
-        Returns:
-            Parallel lists of keys, loops, and coefficients.
-        """
-        reward_spec_keys, reward_managers, coefs = [], [], []
-        for reward_model_dict in reward_model_dicts:
-            raw_reward_fn = reward_model_dict.get("reward_fn", "default")
-            if isinstance(raw_reward_fn, list) and len(raw_reward_fn) > 0:
-                reward_fn_name = (
-                    raw_reward_fn[0].get("name", "default")
-                    if isinstance(raw_reward_fn[0], dict)
-                    else str(raw_reward_fn[0])
-                )
-            elif isinstance(raw_reward_fn, dict):
-                reward_fn_name = raw_reward_fn.get("name", "default")
-            else:
-                reward_fn_name = str(raw_reward_fn)
-
-            raw_model_name = reward_model_dict.get("reward_model_name", None)
-            if raw_model_name == "null":
-                raw_model_name = None
-
-            reward_spec = RewardSpec(
-                reward_manager_type=reward_model_dict.get("reward_loop_type", "naive"),
-                reward_fn_name=reward_fn_name,
-                reward_model_name=raw_model_name,
-            )
-            manager = self.reward_spec_to_manager.get(reward_spec, None)
-
-            # Dataset defaults can differ from the configured reward spec.
-            if manager is None:
-                candidates = [
-                    (spec, mgr)
-                    for spec, mgr in self.reward_spec_to_manager.items()
-                    if spec.reward_manager_type == reward_spec.reward_manager_type
-                ]
-                if len(candidates) == 0:
-                    all_managers = list(self.reward_spec_to_manager.items())
-                    if len(all_managers) == 1:
-                        candidates = all_managers
-                    elif len(all_managers) > 1:
-                        psrl_logger.info(
-                            f"No reward spec match. Requested={reward_spec!r}, "
-                            f"available={[s for s, _ in all_managers]!r}. "
-                            f"Using the first registered manager as fallback."
-                        )
-                        candidates = [all_managers[0]]
-                if candidates:
-                    reward_spec, manager = candidates[0]
-
-            reward_spec_keys.append(reward_spec.key())
-            reward_managers.append(manager)
-            coefs.append(reward_model_dict.get("reward_coef", 1.0))
-        return reward_spec_keys, reward_managers, coefs
-
-    def pre_process(self, inputs: TensorDict) -> TensorDict:
-        return ensure_reward_attention_mask(inputs)
-
-    async def compute_score_local(
-        self,
-        reward_inputs: TensorDict,
-    ) -> dict[str, Any] | None:
-        """Compute rewards without remote reward loop workers."""
-        is_validate = tu.get(reward_inputs, "validate", False)
-        request_ids = tu.get(reward_inputs, "uid")
-        n_trajectories = tu.get(reward_inputs, "n_trajectory")
-        rollout_n = self.val_rollout_n if is_validate else self.rollout_n
-        request_keys = []
-        for request_id, n_trajectory in zip(request_ids, n_trajectories):
-            self.request_id_to_n_trajectory[request_id] = n_trajectory
-            if n_trajectory > 1:
-                request_keys.extend([f"{request_id}_{i}" for i in range(n_trajectory)])
-            else:
-                request_keys.append(str(request_id))
-
-        update_status_success = await self.ps_manager_handle.update_request_status.remote(
-            request_ids,
-            PSRL_RequestStatus.REWARD_RUNNING,
-            is_validate=is_validate,
-        )
-        if not update_status_success:
-            for request_key in request_keys:
-                self.request_key_to_reward[request_key] = None
-            return None
-
-        result = None
-        with log_dual_events(
-            f"Compute reward for requests {request_ids}",
-            psrl_logger,
-            level=logging.DEBUG,
-            event_type=EventType.OTHER,
-        ):
-            for i, request_id in enumerate(request_ids):
-                reward_input = reward_inputs[i : i + 1]
-                prompt_id_key = "parent_id" if rollout_n > 1 else "uid"
-                prompt_id = tu.get(reward_input, prompt_id_key)[0]
-                data_source = tu.get(reward_input, "data_source")[0]
-
-                if self.reward_normalization == "batch":
-                    self.request_id_to_group[request_id] = data_source
-                elif self.reward_normalization == "group":
-                    self.request_id_to_group[request_id] = prompt_id
-                self.request_id_to_data_source[request_id] = data_source
-
-                if self.config.reward.launch_reward_fn_async:
-                    with log_dual_events(
-                        "Launch async reward model score",
-                        psrl_logger,
-                        level=logging.DEBUG,
-                        event_type=EventType.OTHER,
-                    ):
-                        asyncio.create_task(self._async_reward_task(reward_input))
-                else:
-                    with log_dual_events(
-                        "Compute reward model score",
-                        psrl_logger,
-                        level=logging.DEBUG,
-                        event_type=EventType.OTHER,
-                    ):
-                        reward_input = self.pre_process(reward_input)
-                        # TODO(zyf): Support batched reward computation in synchronous mode.
-                        result = await self._compute_score(reward_input)
-                        update_status_success = await self.ps_manager_handle.update_request_status.remote(
-                            request_id,
-                            PSRL_RequestStatus.REWARD_COMPLETED,
-                            is_validate=is_validate,
-                        )
-                        if not update_status_success:
-                            result = None
-        return result
-
-    async def _compute_score(
-        self,
-        reward_data: TensorDict,
-    ) -> dict[str, Any]:
-        """Run all reward loops for a single sample in parallel and aggregate the results.
-
-        Resolves the reward loops from the input's ``reward_model_dicts``, executes them
-        concurrently, and returns a unified result dict with weighted reward score,
-        per-loop extra info, and per-loop metrics.
-
-        Args:
-            reward_data: A single-sample TensorDict that contains all fields needed
-                by reward loops (tensors in batch, metadata in non_tensor_batch).
-
-        Returns:
-            dict with keys:
-                - ``reward_score``: weighted sum of all loop scores (float)
-                - ``reward_extra_info``: ``{loop_key: extra_info_dict, ...}``
-                - ``reward_metrics``: ``{loop_key: metrics_dict, ...}``
-        """
-        assert len(reward_data) == 1, "Reward input for _compute_score should contain exactly one sample"
-
-        reward_model_dicts = tu.get(reward_data, "reward_model_dicts")[0]
-        reward_spec_keys, reward_managers, reward_coefs = self._resolve_reward_manager(reward_model_dicts)
-
-        futures = [asyncio.create_task(reward_manager.run_single(reward_data)) for reward_manager in reward_managers]
-        results = await asyncio.gather(*futures)
-
-        reward_score = float(np.sum([r["reward_score"] * c for r, c in zip(results, reward_coefs)]))
-        reward_extra_info_dict = {key: r["reward_extra_info"] for key, r in zip(reward_spec_keys, results)}
-        reward_metrics_dict = {key: r.get("reward_metrics", {}) for key, r in zip(reward_spec_keys, results)}
-
-        result = {
-            "reward_score": reward_score,
-            "reward_extra_info": reward_extra_info_dict,
-            "reward_metrics": reward_metrics_dict,
-        }
-
-        return result
-
-    async def _async_reward_task(self, reward_data: TensorDict):
-        """
-        Compute a reward asynchronously and store it for later retrieval.
-
-        The `reward_data` metadata selects all reward loop configuration.
-        """
-        assert len(reward_data) == 1, "Async reward task should be launched with a single-sample batch"
-
-        reward_data = self.pre_process(reward_data)
-        uid = tu.get(reward_data, "uid")[0]
-
-        result = await self._compute_score(reward_data)
-
-        n_trajectory = tu.get(reward_data, "n_trajectory", [1])[0]
-        result["response_len"] = reward_data["responses"].shape[-1]
-
-        trajectory_to_results = {}
-        if n_trajectory > 1:
-            for i in range(n_trajectory):
-                trajectory_to_results[f"{uid}_{i}"] = result
-        else:
-            trajectory_to_results[str(uid)] = result
-
-        await self.set_reward_for_requests(trajectory_to_results)
-
-    async def set_reward_for_requests(self, request_key_to_reward: dict[str, dict[str, Any]]):
-        """Set the reward for the specified request IDs."""
-        for request_key, reward in request_key_to_reward.items():
-            per_key_reward = reward.copy() if reward is not None else None
-            if request_key in self.request_key_to_future:
-                fut = self.request_key_to_future[request_key]
-                if not fut.done():
-                    fut.set_result(per_key_reward)
-            else:
-                self.request_key_to_reward[request_key] = per_key_reward
+    async def wait_for_reward_ready(self, request_keys: list[str]) -> None:
+        """Publish all reward fields before agent group post-processing reads them."""
+        await self._commit_rewards(request_keys, set())

@@ -127,7 +127,7 @@ class KVCacheManager:
         Set the shared LMCache Controller URL.
 
         Called by the vLLM replica setup code after
-        `RolloutCoordinator.init_lmcache_p2p()` broadcasts the URL of the
+        `PolicyAuxiliary.initialize_cache_peers()` broadcasts the URL of the
         single shared Controller subprocess to all vLLM instances.
 
         Args:
@@ -153,7 +153,7 @@ class KVCacheManager:
         local rank targets the destination's same-rank endpoint.
 
         Called by `PSRL_vLLMHttpServer.kv_set_peer_registry()` after
-        `RolloutCoordinator._broadcast_peer_registry()` completes.
+        `PolicyAuxiliary.initialize_cache_peers()` completes.
 
         Args:
             registry (dict[str, list[str]]): Maps lmcache_instance_id (e.g.

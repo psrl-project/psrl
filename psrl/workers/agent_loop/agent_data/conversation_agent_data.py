@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import numpy as np
-import ray
 import torch
 from omegaconf import DictConfig
 from PIL import Image
@@ -12,8 +11,10 @@ from verl.utils.chat_template import apply_chat_template, initialize_system_prom
 from verl.utils.tokenizer import normalize_token_ids
 
 from psrl.environments.base import ConversationType, Environment
+from psrl.utils.dataset.utils import as_object_sample
 from psrl.workers.agent_loop.agent_data.base import AgentData, SessionData, Trajectory
 from psrl.workers.gen.utils import TokenOutput
+from psrl.workers.reward.client import RewardSubmissionClient
 
 
 def normalize_openai_messages(openai_messages: list[dict]) -> ConversationType:
@@ -43,7 +44,7 @@ class ConversationAgentData(AgentData[ConversationType, object]):
     def __init__(
         self,
         config: DictConfig,
-        reward_manager: ray.actor.ActorHandle,
+        reward_manager: RewardSubmissionClient,
         env: Environment,
         **kwargs,
     ):
@@ -245,7 +246,7 @@ class ConversationAgentData(AgentData[ConversationType, object]):
                 "reward_model": np.array([self.session_data.reward_model], dtype=object),
                 "extra_info": np.array([self.session_data.extra_info], dtype=object),
                 "agent_reward_info": np.array([self.session_data.agent_reward_info], dtype=object),
-                "reward_model_dicts": np.array([self.session_data.reward_model_dicts], dtype=object),
+                "reward_model_dicts": as_object_sample(self.session_data.reward_model_dicts),
             }
             if self.session_data.parent_id is not None:
                 tensor_dict["parent_id"] = np.array([self.session_data.parent_id])
@@ -253,7 +254,7 @@ class ConversationAgentData(AgentData[ConversationType, object]):
                 tensor_dict=tensor_dict,
                 non_tensor_dict={"validate": self.session_data.validate},
             )
-            reward_result = await self.reward_manager.compute_score.remote(reward_data)
+            reward_result = await self.reward_manager.compute_score(reward_data)
             self.get_current_step().model_reward = reward_result["reward_score"]
 
         overlong = self._is_overlong(trajectory)

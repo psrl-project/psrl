@@ -26,6 +26,11 @@
     overflow-x: auto;
 }
 
+/* Keep elasticity diagrams readable at their natural aspect ratios. */
+#resource-elasticity .mermaid > svg {
+    height: auto;
+}
+
 /* Code block improvements */
 div.highlight pre {
     font-size: 0.85em;

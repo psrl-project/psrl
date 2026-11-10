@@ -112,7 +112,8 @@ class MiniSWEAgentLoopV1(SessionAgentLoop):
 
             session_id = await self.create_session(request)
             try:
-                result = await self._run_agent(request, observation, runtime_config, session_id)
+                async with self.generation_lease(bool(request.get("validate", False))):
+                    result = await self._run_agent(request, observation, runtime_config, session_id)
             except asyncio.TimeoutError:
                 return None, TerminateReason.TRAJECTORY_TIMEOUT
             if result.get("exit_status") == "error":

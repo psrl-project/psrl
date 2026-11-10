@@ -15,6 +15,8 @@ from psrl.utils.agent.thinking import (
     validate_thinking_template,
 )
 
+pytestmark = pytest.mark.cpu_test
+
 
 def _traj(trajectory_id: int, num_turns: int, response_len: int) -> dict:
     """Build one TITO trajectory shaped like `build_training_data` returns it."""
@@ -90,12 +92,8 @@ class TestTemplateCompatibility:
     def test_bare_content_template_is_allowed(self):
         assert not template_prefills_assistant_think(self.BARE_SRC)
 
-    def test_real_qwen35_template_prefills(self):
-        src = Path("examples/sciaccel_rl/config/qwen35_acc_thinking.jinja2").read_text()
-        assert template_prefills_assistant_think(src)
-
     def test_real_qwen3_template_does_not_prefill(self):
-        src = Path("examples/sciaccel_rl/config/qwen3_acc_thinking.jinja2").read_text()
+        src = Path("psrl/utils/tito/templates/qwen3_thinking_2507_and_next_fixed.jinja").read_text()
         assert not template_prefills_assistant_think(src)
 
     def test_unknown_mode_raises(self):

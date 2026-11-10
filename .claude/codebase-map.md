@@ -1,11 +1,8 @@
 # PSRL Codebase Map
 
 > **Purpose**: Fast-lookup reference for the entire PSRL project. Read this file first to orient yourself in any module.
-> **Last updated**: 2026-07-26 | **Total**: 213 Python files in `psrl/`, ~100 test files in `tests/`, config-as-code via veRL re-export
->
-> **Major shifts since 2026-05**: rollout now runs through the vendored **SMG** gateway (Rust router) with **SessionRouter + TITO** session capture; sample data moves over **TransferQueue** instead of Ray-serialized batches; KV cache offload/reuse via **LMCache**; **RolloutCoordinator** (mixin-composed) replaces the old `rollout_coordinator.py`; a unified **engine train worker** supersedes the separate FSDP/Megatron workers; a standalone **reward-model service** and **gen reward functions** were added; **resource elasticity** (`elastic_rm`) and a **gRPC PSManager** service landed. See §15 for the terminology glossary.
->
-> **Latest changes (2026-07-25/26, commit `11b6d65`)**: the monolithic `psrl.yaml` was **split into 16 per-topic group files** plus the 6 existing `rollout_coordination/` ones (§4) — note `elastic_rm` moved under `psrl.deployment.elastic_rm`; **fine-grained rollout/train overlap** landed as a `StepStrategy` (`psrl.fine_grain_overlap`); pre-SMG dead code (gen worker, FSDP/Megatron train workers, Python router/route-strategy/request-queue, mini-SWE loop v0) and the legacy `unit_tests/` suite were removed, leaving `tests/` (pytest `testpaths`) as the only test suite.
+> **Coordination**: `GlobalCoordinator` owns rollout, validation, and reward model state.
+> `CoordinatorClient` selects a model scope on that shared actor.
 
 ---
 
@@ -41,7 +38,7 @@ PSRL (Post-training Streaming RL) is a distributed LLM post-training framework. 
         │        ┌──────┼───────┴───┬────┘        │                │
         ▼        ▼      ▼           ▼             ▼                ▼
    ┌────────┐ ┌────────┐  ┌──────────────┐  ┌───────────────────────────┐
-   │GenWorker│ │GenWorker│ │ EngineTrain  │  │ RolloutCoordinator         │
+   │GenWorker│ │GenWorker│ │ EngineTrain  │  │ GlobalCoordinator         │
    │(vLLM)  │ │(vLLM)  │  │ Worker(FSDP/ │  │ (stats/pause/weight-version│
    └────────┘ └────────┘  │  Megatron)   │  │  loops driving SMG)        │
         │          │      └──────┬───────┘  └───────────────────────────┘
@@ -49,7 +46,7 @@ PSRL (Post-training Streaming RL) is a distributed LLM post-training framework. 
         └─────── TransferQueue ───────── sample fields (prompt/response/reward/logp) ──────┘
 ```
 
-**Loop**: EngineTrainWorker pushes model → PSManager bumps version → RolloutCoordinator gates SMG on the new version → GenWorkers pull weights via NIXL → SMG dispatches requests → GenWorkers generate → RewardManager/Worker scores → fields land in TransferQueue + staleness buffer fills → DataProcessor batches → Trainer calls update → repeat
+**Loop**: EngineTrainWorker pushes model → PSManager bumps version → GlobalCoordinator gates SMG on the new version → GenWorkers pull weights via NIXL → SMG dispatches requests → GenWorkers generate → RewardManager/Worker scores → fields land in TransferQueue + staleness buffer fills → DataProcessor batches → Trainer calls update → repeat
 
 ---
 
@@ -78,7 +75,7 @@ psrl/
 │       ├── hydra_plugins/psrl_searchpath.py  # Hydra search-path plugin (adds veRL + PSRL config dirs)
 │       ├── psrl/                 # ★ RESTRUCTURED: psrl.yaml split into per-topic group files
 │       │   ├── psrl.yaml         # Thin root: `defaults:` list + a few scalars (staleness, ps_mode, ...)
-│       │   ├── deployment.yaml   # Node/GPU layout per role + heterogeneous_rollout + elastic_rm.*
+│       │   ├── deployment.yaml   # Node/GPU layout per role + heterogeneous_rollout + elastic.*
 │       │   ├── rollout_gateway.yaml   # SMG gateway process knobs (concurrency, RUST_LOG, post actors)
 │       │   ├── server_rollout.yaml    # HTTP rollout service entrypoint for agent loops
 │       │   ├── status_collection.yaml # Engine→coordinator→router status sync + stats_recorder
@@ -105,18 +102,17 @@ psrl/
 │   │   ├── stats_recorder.py     # StatsRecorder: periodic per-replica stats JSONL dump
 │   │   ├── zmq_queue.py          # ZMQPush/PullQueue: cross-process stats/command transport
 │   │   ├── utils.py              # RolloutInstanceId + shared gen constants
-│   │   └── rollout_coordination/ # ★ NEW: RolloutCoordinator (mixin composition)
-│   │       ├── coordinator.py    # RolloutCoordinator: composes all mixins, public API (~838 lines)
-│   │       ├── base.py           # CoordinatorBase: HTTP gateway helpers + routing-loop control
-│   │       ├── command_loop.py   # CommandHandlerMixin: consumes command queue
-│   │       ├── status_loop.py    # StatusMixin: polls SMG stats / routing-loop status
-│   │       ├── sync_and_migrate/ # weight-sync + request-migration strategies
-│   │       │   ├── sync_and_migrate_mixin.py  # shared sync/migrate helpers
-│   │       │   ├── greedy.py     # GreedySyncMixin (sync all instances ASAP)
-│   │       │   └── status_based.py # StatusBasedSyncMixin (sync gated on instance status)
-│   │       └── session/          # session hang/continue scheduling
-│   │           ├── base.py       # SessionScheduler ABC + InstanceCapacity/SessionInfo dataclasses
-│   │           └── thunder_agent.py # ThunderAgentScheduler: KV-capacity hang/continue (ThunderAgent port)
+│   │   └── session_scheduler.py  # Capacity based session hang/continue scheduling
+│   │
+│   ├── global_coordination/     # Shared inference coordination
+│   │   ├── coordinator.py       # GlobalCoordinator actor and model registry
+│   │   ├── client.py            # Scoped CoordinatorClient actor proxy
+│   │   ├── model_state.py       # Replica membership, weight versions, and coordination primitives
+│   │   ├── lifecycle.py         # Gateway eligibility and replica sleep/wake
+│   │   ├── commands.py          # Model scoped command execution and request migration
+│   │   ├── telemetry.py         # Engine observations, gateway demand, snapshots, and recording
+│   │   ├── synchronization.py   # Policy weight synchronization
+│   │   └── auxiliary.py         # Session scheduling and LMCache setup
 │   │
 │   ├── train/                    # --- Training ---
 │   │   ├── engine_train_worker.py # ★ NEW unified worker (replaces the separate fsdp/megatron workers)
@@ -135,16 +131,15 @@ psrl/
 │   │   ├── reward_worker.py      # ★ NEW: Ray reward worker (TransferQueue producer/consumer)
 │   │   ├── reward_protocol.py    # RewardModelRuntimeInfo dataclass (gateway URL + tokenizer)
 │   │   ├── reward_loop/          # Rule/score reward algorithms
-│   │   │   ├── base.py           # RewardManagerBase
+│   │   │   ├── base.py           # RewardLoopBase
 │   │   │   ├── naive.py, dapo.py, prime.py, gdpo.py  # algorithm variants
-│   │   │   ├── gen.py            # GenRewardManager (routes to SMG reward-model gateway)
+│   │   │   ├── gen.py            # GenRewardLoop (routes to SMG reward-model gateway)
 │   │   │   └── registry.py       # RewardLoop factory registry
 │   │   ├── gen_reward_function/  # ★ NEW: pluggable generative-RM scoring fns
 │   │   │   ├── base.py, registry.py  # GenRewardFunctionBase + @gen_reward_func decorator
 │   │   │   ├── default_gen_rm.py, skywork_rm.py  # concrete reward functions
 │   │   └── reward_model/         # ★ NEW: reward-model inference service
-│   │       ├── manager.py        # RewardModelManager (owns replicas + coordinator)
-│   │       ├── coordinator.py    # RewardModelCoordinator (weight sync / routing)
+│   │       ├── manager.py        # RewardModelManager (replicas + scoped client)
 │   │       ├── replica.py        # RewardModelReplica (vLLM-backed RM instance)
 │   │       └── gateway.py        # RM gateway wiring
 │   │
@@ -164,6 +159,12 @@ psrl/
 │   │       ├── session_agent_loop.py    # ★ NEW: SMG SessionRouter + TITO-backed loop
 │   │       ├── mini_swe_agent_loop_v1.py# ★ CURRENT active SWE-bench agent loop (Docker + async PSRL rollout)
 │   │       └── utils.py
+│   │
+│   ├── elastic/                  # Resource elasticity runtime
+│   │   ├── executor.py, cluster_topology.py, pool_layout.py
+│   │   ├── policy_runtime.py, request_snapshot.py, candidate_routing.py
+│   │   ├── sleep_wake_orchestrator.py
+│   │   └── scaling_policy/       # Base, dummy, rule-based, throughput-optimal and evaluation
 │   │
 │   └── config/                   # Worker-level config dataclasses (trimmed)
 │       ├── model.py              # ModelConfig
@@ -187,20 +188,25 @@ psrl/
 │   └── mini_swe_env.py           # MiniSWEEnvironment (SWE-bench task parsing + config merging)
 │
 ├── utils/                        # ★ Shared utilities
-│   ├── config.py                 # validate_config() (cross-group config checks) +
-│   │                             #   resolve_fine_grain_chunk_size()
-│   ├── transferqueue_utils.py    # ★ NEW: TransferQueue field read/write helpers
+│   ├── config/                   # Configuration validation and deployment resolution
+│   │   ├── validation.py         # Cross-group checks and fine-grain chunk sizing
+│   │   └── deployment_mode.py    # Deployment modes and per-node GPU counts
+│   ├── transfer_queue/payload.py # TransferQueue payload lifecycle and metadata helpers
+│   ├── memory/                   # Weight storage and optimizer offload checks
+│   │   ├── weight_arena.py       # Packed model allocations and CPU snapshots
+│   │   ├── node_shared_weight_cache.py  # Node-local shared weight arenas
+│   │   ├── node_shared_memfd_broker.py  # Cross-process memfd sharing
+│   │   └── optimizer_state.py    # Optimizer tensor placement checks
 │   │
 │   ├── kv_cache/                 # ★ NEW: LMCache integration
 │   │   ├── manager.py            # KVCacheManager (offload / prefix retrieval / cross-instance xfer)
 │   │   ├── config.py             # LMCacheConfig
 │   │   └── types.py              # KVCacheBackend (CPU/DISK/REMOTE)
 │   │
-│   ├── elastic_rm/               # ★ NEW: resource elasticity
-│   │   ├── elastic_executor.py   # ElasticExecutor: pause/resume workloads via TMS
-│   │   ├── scaling_policy.py     # ScalingPolicy + InstanceSignal
-│   │   ├── cluster_topology.py   # ClusterTopology / GPUSlot / InstanceStatus
-│   │   └── diagnostics.py        # Backlog diagnostics logging
+│   ├── elastic/                  # Shared elasticity utilities
+│   │   ├── cost_model.py
+│   │   ├── cost_model_path.py    # Resolve model-specific cost-model JSON files
+│   │   └── diagnostics.py, logging.py, overhead.py
 │   │
 │   ├── concurrency/              # ★ NEW: cross-process limiters
 │   │   ├── slot.py               # fcntl file-lock slot limiter
@@ -227,8 +233,8 @@ psrl/
 │   ├── common/                   # chat_template, docker_utils, http_utils (+ distributed POST
 │   │                             #   actor pool), http_io_thread, memory_utils, nixl_names,
 │   │                             #   patch_utils, serialization, worker_naming, dynamic_import
-│   ├── ray/                      # lazy_primitives, lock_context
-│   ├── reward_score/             # sandbox_fusion.py + default async scorer
+│   ├── ray/                      # lock_context and Plasma storage diagnostics
+│   ├── reward_score/             # Scoring helpers and reward-model token metrics
 │   ├── rollout/                  # loop_timer, overflow, rollout_trace, trajectory_writer, vision_utils
 │   ├── server/command.py         # Command / CommandType / CommandExtension (coordinator commands)
 │   └── visualization/            # event_type, log_stats, log_visualizer (+ static/templates)
@@ -299,7 +305,7 @@ Scalars still in `psrl.yaml`: `ps_manager_ip`, `reward_service_ip`, `staleness`,
 
 | Group file → key | Controls |
 |-----------|----------|
-| `deployment.yaml` → `psrl.deployment` | Node/GPU counts per role (`train_nnodes`, `n_rollout_instances`, `rollout_ngpus_per_node_per_instance`, `total_nnodes`), `heterogeneous_rollout.*`, and **`elastic_rm.*`** (★ moved here from `psrl.elastic_rm`) |
+| `deployment.yaml` → `psrl.deployment` | Node/GPU counts per role (`train_nnodes`, `n_rollout_instances`, `rollout_ngpus_per_node_per_instance`, `total_nnodes`), `heterogeneous_rollout.*`, and **`elastic.*`** (`rule_based`, `throughput_optimal`) |
 | `rollout_gateway.yaml` → `psrl.rollout_gateway` | SMG gateway process: `server_max_concurrency`, `rust_log_filter`, health-check waits, `use_distributed_post` + `post_actor_num_per_node` (Ray HTTP POST actor pool) |
 | `server_rollout.yaml` → `psrl.server_rollout` | HTTP rollout service entrypoint used by agent loops (`gateway.router_ip/port`, `server_concurrency`) |
 | `status_collection.yaml` → `psrl.status_collection` | Engine→coordinator→router status sync intervals, file-dump level, `stats_recorder.*` |
@@ -319,7 +325,7 @@ Scalars still in `psrl.yaml`: `ps_manager_ip`, `reward_service_ip`, `staleness`,
 | `rollout_coordination/proactive_filter_strategy.yaml` | proactive filtering of samples (`retry`/`truncate`) |
 | `rollout_coordination/session_strategy.yaml` | session hang/continue (ThunderAgent) params |
 
-There is also a top-level `transfer_queue.*` group, force-enabled in `main_ppo.py`. Cross-group consistency is checked by `psrl/utils/config.py::validate_config()`.
+There is also a top-level `transfer_queue.*` group, force-enabled in `main_ppo.py`. Cross-group consistency is checked by `psrl/utils/config/validation.py::validate_config()`.
 
 ### Launch Command
 
@@ -342,7 +348,7 @@ Templates: `ppo_trainer.yaml`. `model_engine` (default `dp`) selects the actor/r
 |-------|------|------|
 | `PSRL_RayPPOTrainer` | `trainer/ppo/ray_trainer.py` | Main training loop orchestrator |
 | `StepStrategy` | `trainer/ppo/strategies/base.py` | ABC for training step; `FullBatchStepStrategy` (default) and `FineGrainOverlapStrategy` (chunk-pipelined) are the concrete implementations |
-| `TaskRunner` | `trainer/main_ppo.py` | Ray driver: builds worker groups, inits TransferQueue, elastic_rm/reward pools |
+| `TaskRunner` | `trainer/main_ppo.py` | Ray driver: builds worker groups, inits TransferQueue, elastic/reward pools |
 | `DataProcessor` | `utils/dataset/data_processor.py` | Ray actor: dataset loading, batching, TransferQueue producer |
 
 ### Worker Layer
@@ -351,17 +357,18 @@ Templates: `ppo_trainer.yaml`. `model_engine` (default `dp`) selects the actor/r
 |-------|------|------|
 | `PSRL_vLLMHttpServer` / `PSRL_vLLMReplica` | `workers/gen/vllm_async_server.py` | gRPC vLLM engine server registered with SMG |
 | `RolloutGateway` | `workers/gen/rollout_gateway.py` | Ray actor launching SMG Router + SessionRouter subprocesses |
-| `RolloutCoordinator` | `workers/gen/rollout_coordination/coordinator.py` | Drives SMG: stats, pause/resume, weight-version, sync/migrate (mixin-composed) |
+| `GlobalCoordinator` | `workers/global_coordination/coordinator.py` | Owns rollout, validation, and reward model control services |
+| `CoordinatorClient` | `workers/global_coordination/client.py` | Routes control calls to one model scope on the shared actor |
 | `SessionRouter` | `workers/gen/session_router.py` | Session-scoped OpenAI API, hang/continue state (separate uvicorn proc) |
 | `EngineTrainWorker` | `workers/train/engine_train_worker.py` | Unified FSDP/Megatron PPO update worker |
 | `PSRL_BaseTrainWorker` | `workers/train/base_train_worker.py` | Shared train logic: NIXL push, version mgmt |
 | `PSManager` | `workers/ps/ps_manager.py` | Model version store + staleness inventory (also served over gRPC) |
 | `PSStorageWorker` | `workers/ps/ps_storage_worker.py` | Holds model shards on GPU |
 | `RewardManager` | `workers/reward/reward_manager.py` | Reward scoring pipeline over TransferQueue |
-| `RewardModelManager` | `workers/reward/reward_model/manager.py` | Owns RM replicas + coordinator (RM inference service) |
-| `GenRewardManager` | `workers/reward/reward_loop/gen.py` | Routes reward requests to SMG reward-model gateway |
+| `RewardModelManager` | `workers/reward/reward_model/manager.py` | Owns RM replicas and a scoped global coordinator client |
+| `GenRewardLoop` | `workers/reward/reward_loop/gen.py` | Routes reward requests to SMG reward-model gateway |
 | `KVCacheManager` | `utils/kv_cache/manager.py` | LMCache offload / prefix retrieval / cross-instance transfer |
-| `ElasticExecutor` | `utils/elastic_rm/elastic_executor.py` | Pause/resume workloads for GPU re-sharing |
+| `ElasticExecutor` | `workers/elastic/executor.py` | Pause/resume workloads for GPU re-sharing |
 | `PSRL_AgentLoopManager` | `workers/agent_loop/manager.py` | Multi-turn / session tool-use orchestration; also yields training chunks (`wait_for_training_chunk`) for fine-grain overlap and owns the distributed POST actor pool |
 
 ### mini-SWE Agent Layer
@@ -404,7 +411,7 @@ main_ppo.py::main()
     → tq.init(config.transfer_queue)          # TransferQueue data plane
     → TaskRunner (Ray actor on head node)
       → build worker groups (Gen, EngineTrain, Critic, Reward, RewardModel, ...)
-      → if elastic_rm.enable: set up shared GPU pools
+      → if elastic.enable: set up shared GPU pools
       → PSManager + gRPC service, DataProcessor, RolloutGateway (SMG + SessionRouter)
       → PSRL_RayPPOTrainer(config) → trainer.fit()
 ```
@@ -433,7 +440,7 @@ before rollout finishes. `overlap_scope: pre_step` additionally runs advantage+u
 EngineTrainWorker completes update
   → nixl_push_model() [async background, GPU-direct] → PSManager.push(version=N)
   → PSManager creates StalenessBuffer(version=N)
-  → RolloutCoordinator gates SMG: pause dispatch → publish weight-version update → resume
+  → GlobalCoordinator gates SMG: pause dispatch → publish weight-version update → resume
 
 GenWorker: pulls weights via NIXL → generates. Entries EMPTY→RESERVED→OCCUPIED;
 buffer PENDING→READY. DataProcessor consumes READY buffers → EMPTY; old buffers freed.
@@ -446,7 +453,7 @@ AgentLoopWorker ──HTTP generate/chat──► SMG RolloutGateway
 Session AgentLoop ──session OpenAI API──► SessionRouter ──► SMG
 SMG ◄──gRPC admission + Reserve──► PSManager
 SMG ──gRPC──► PSRL vLLM replicas (PSRL_vLLMReplica)
-RolloutCoordinator ──stats / pause-resume / weight-version──► SMG
+GlobalCoordinator ──stats / pause-resume / weight-version──► SMG
 
 PSRL worker-selection ("psrl" strategy): filter by servable version_tag →
 honor partial/sticky hint → prompt-group affinity → PSManager admission/reserve →
@@ -491,10 +498,10 @@ MiniSWEAgentLoopV1.run(request)
 | `DAPORewardLoop` | `reward_loop/dapo.py` | DAPO dynamic reward |
 | `PRIMERewardLoop` | `reward_loop/prime.py` | PRIME process reward model |
 | `GDPORewardLoop` | `reward_loop/gdpo.py` | GDPO variant |
-| `GenRewardManager` | `reward_loop/gen.py` | Generative/pooling RM via SMG reward gateway |
+| `GenRewardLoop` | `reward_loop/gen.py` | Generative/pooling RM via SMG reward gateway |
 
 - **Registry**: `reward_loop/registry.py` (rule/score) + `gen_reward_function/registry.py` (`@gen_reward_func` generative RMs: `default_gen_rm`, `skywork_rm`).
-- **Reward-model service**: `reward/reward_model/` (manager → coordinator → replicas → gateway) serves RM inference; `RewardWorker` produces/consumes reward fields over TransferQueue.
+- **Reward-model service**: `reward/reward_model/` (manager → scoped global coordinator client → replicas → gateway) serves RM inference; `RewardWorker` produces/consumes reward fields over TransferQueue.
 - **Sources**: rule-based, LLM/RM-as-judge (via SMG model gateway: `/v1/completions`, `/v1/classify`, `/v1/embeddings`), SandboxFusion.
 
 ---
@@ -552,11 +559,11 @@ tests/
 ├── nixl/             → comm planner, sharding, send/recv, e2e (+ config/nixl_e2e.yaml, scripts/)
 ├── parameter_server/ → PSManager, request status tracker
 ├── staleness/        → staleness controller
-├── workers/reward/   → RM manager / coordinator (incl. elastic) / gateway / gen reward manager
+├── workers/reward/   → RM manager / gateway / gen reward manager
 ├── workers/train/    → EngineTrainWorker init, load-weight flag
 ├── gen_dplb/         → SMG adapter cache-aware routing, stats recorder
 ├── tito/, e2e/tito/  → SessionRouter + TITO training-data build (+ test_tito_e2e.sh)
-├── elastic_rm/       → elastic executor + scaling policy instance IDs
+├── elastic/       → elastic executor + scaling policy instance IDs
 ├── ray_utils/        → lazy primitives, lock context, GPU sharing, version waiter, ...
 ├── fsdp/, megatron/, torch_dist/, checkpoint/  → GPU/dist smoke tests (mostly .sh-driven)
 ├── dataset/, environments/, tools/, unit/      → DataProcessor, env registry, LMCache snapshot
@@ -589,11 +596,11 @@ CPU-only tests are marked `pytest.mark.cpu_test`. Run with pytest under the psrl
 | `workers/ps/ps_manager.py` | ~1373 | Central coordination point for all workers (also gRPC-served) |
 | `workers/ps/staleness_controller.py` | ~1365 | THE staleness system — core async innovation |
 | `workers/reward/reward_manager.py` | ~1138 | Reward pipeline over TransferQueue |
-| `workers/gen/rollout_coordination/coordinator.py` | ~838 | SMG-driving coordinator (mixin composition) |
+| `workers/global_coordination/coordinator.py` | ~210 | Model registry and control service dispatch |
 | `workers/train/engine_train_worker.py` | ~592 | Unified FSDP/Megatron update worker |
 | `workers/gen/session_router.py` | ~571 | Session/TITO hang-continue routing |
 | `trainer/ppo/strategies/` | ~510 | Step orchestration: `base.py` (StepStrategy ABC + `STAGE_META`), `full_batch.py` (default), `fine_grain_overlap.py` (chunk-pipelined) |
-| `utils/config.py` | ~394 | `validate_config()` cross-group checks + fine-grain chunk sizing |
+| `utils/config/validation.py` | ~394 | `validate_config()` cross-group checks + fine-grain chunk sizing |
 
 ---
 
@@ -604,16 +611,16 @@ main_ppo.py (TaskRunner, TransferQueue init)
   → ray_trainer.py (PSRL_RayPPOTrainer)
     → workers/gen/vllm_async_server.py (PSRL_vLLMReplica) → utils/nixl/client.py, vllm_rollout.py
     → workers/gen/rollout_gateway.py (RolloutGateway) → smg_adapter.py → third_party/smg
-    → workers/gen/rollout_coordination/coordinator.py (RolloutCoordinator)
-        → session/thunder_agent.py, sync_and_migrate/*, smg_adapter.py, elastic_rm/diagnostics
+    → workers/global_coordination/coordinator.py (GlobalCoordinator)
+        → global_coordination/*, gen/session_scheduler.py, gen/smg_adapter.py
     → workers/train/engine_train_worker.py → base_train_worker.py → nixl/client.py, converter/*
     → workers/ps/ps_manager.py → staleness_controller.py, request_status_tracker.py
         → grpc/ps_manager_service.py (gRPC surface)
     → workers/reward/reward_manager.py → reward_loop/*, reward_model/manager.py
     → workers/agent_loop/manager.py → loops/* (incl. session_agent_loop, mini_swe_*)
         → tools/*, environments/*
-    → utils/dataset/data_processor.py, utils/transferqueue_utils.py
-    → utils/kv_cache/manager.py, utils/elastic_rm/elastic_executor.py
+    → utils/dataset/data_processor.py, utils/transfer_queue/payload.py
+    → utils/kv_cache/manager.py, workers/elastic/executor.py
 ```
 
 ---
@@ -629,13 +636,13 @@ main_ppo.py (TaskRunner, TransferQueue init)
 | Enable rollout/train overlap | `psrl/trainer/config/psrl/fine_grain_overlap.yaml` + `trainer/ppo/strategies/fine_grain_overlap.py` |
 | Change node/GPU layout | `psrl/trainer/config/psrl/deployment.yaml` (`psrl.deployment.*`) |
 | Understand rollout routing / SMG | `docs/design/router_tito.md`, `workers/gen/smg_adapter.py`, `rollout_gateway.py` |
-| Change weight-sync / request migration | `workers/gen/rollout_coordination/sync_and_migrate/` + `sync_and_mig_strategy.yaml` |
-| Change session hang/continue | `rollout_coordination/session/thunder_agent.py` + `session_strategy.yaml`, `session_router.py` |
+| Change weight-sync / request migration | `workers/global_coordination/synchronization.py` + `sync_and_mig_strategy.yaml` |
+| Change session hang/continue | `workers/global_coordination/auxiliary.py` + `workers/gen/session_scheduler.py` + `session_strategy.yaml`, `session_router.py` |
 | Debug model version issues | `workers/ps/staleness_controller.py`, `workers/ps/ps_manager.py` |
 | Debug model transfer failures | `utils/nixl/client.py`, `workers/train/base_train_worker.py` |
-| Work with sample data plane | `utils/transferqueue_utils.py`, `docs/design/transfer_queue.md` |
+| Work with sample data plane | `utils/transfer_queue/payload.py`, `docs/design/transfer_queue.md` |
 | Tune KV cache / LMCache | `utils/kv_cache/`, `psrl.lmcache.*` (`lmcache.yaml`), `docs/design/kv_cache.md` |
-| Configure resource elasticity | `utils/elastic_rm/`, **`psrl.deployment.elastic_rm.*`** (`deployment.yaml`), `docs/design/resource_elasticity.md` |
+| Configure resource elasticity | `workers/elastic/`, **`psrl.deployment.elastic.*`** (`deployment/elastic/*.yaml`), `docs/design/resource_elasticity.md` |
 | Add/modify training backend | `workers/train/engine_train_worker.py` (unified FSDP/Megatron) |
 | Add a rule/score reward | `workers/reward/reward_loop/` + `registry.py` |
 | Add a generative reward model | `workers/reward/gen_reward_function/` (`@gen_reward_func`) + `reward_model/` service |
@@ -661,7 +668,7 @@ main_ppo.py (TaskRunner, TransferQueue init)
 | Term | Meaning |
 |------|---------|
 | **SMG** | Vendored Rust rollout/model **gateway** (`third_party/smg`), PSRL's default router; dispatches live inference requests to vLLM replicas with a PSRL-aware worker-selection strategy |
-| **RolloutCoordinator** | Ray-side controller that keeps SMG state current (worker stats, weight versions, routing-loop pause/resume, sync & migrate) — composed from mixins |
+| **GlobalCoordinator** | Shared Ray actor owning model state and control services for rollout, validation, and reward replicas |
 | **SessionRouter** | Separate uvicorn process exposing a session-scoped OpenAI API; tracks per-session hang/continue state, pins sessions to one instance |
 | **TITO** | "Token-In-Token-Out" session capture in SMG; `GET /tito/sessions` returns accumulated token IDs + per-turn records used to build training arrays |
 | **ThunderAgent** | Capacity-based session hang/continue scheduler (ported); "program→session, reasoning→generate, acting→env, pause/resume→hang/continue" |
@@ -669,7 +676,7 @@ main_ppo.py (TaskRunner, TransferQueue init)
 | **LMCache** | KV cache offload / prefix reuse / cross-instance transfer backend |
 | **NIXL** | GPU-direct RDMA transport for GPU→GPU weight movement |
 | **TMS** | torch_memory_saver — GPU memory pause/resume primitive underpinning resource elasticity |
-| **elastic_rm** | Resource elasticity subsystem re-sharing GPUs across train/gen/eval/reward |
+| **elastic** | Resource elasticity subsystem re-sharing GPUs across train/gen/eval/reward |
 | **partial rollout** | On weight-sync abort, SMG preserves the generated prefix and continues the request after re-selection instead of restarting |
 | **RolloutInstanceId** | `(base_worker_id, dp_rank)` — identifies one data-parallel vLLM instance for routing/affinity |
 | **fine-grain overlap** | Starting training stages on mini/micro-batch chunks before the full rollout batch is collected; implemented as `FineGrainOverlapStrategy` and configured by `psrl.fine_grain_overlap` |

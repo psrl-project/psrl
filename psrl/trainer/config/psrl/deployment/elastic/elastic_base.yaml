@@ -1,0 +1,48 @@
+# Elastic deployment for rollout, reward model and trainer.
+# Whether to enable elastic deployment for rollout, reward model and trainer.
+enable: False
+
+# Number of nodes for shared resource pool
+# IMPORTANT: devices in shared resource pool cannot be used for trainer.
+shared_nnodes: 1
+
+# GPU number for each node in shared resource pool. May be a scalar or a
+# per-node list with length shared_nnodes, e.g. [4, 8].
+shared_ngpus_per_node: 8
+
+# Reuse sleeping trainer GPUs for rollout and RM replicas within each pool. Requires overlap granularity `none`.
+enable_trainer_pool: False
+
+# Whether to enable policy-based scaling decisions in ElasticExecutor monitor loop
+enable_policy: True
+
+# Policy implementation variant:
+# Scaling policies: none, rule-based, throughput-optimal.
+scaling_policy_variant: throughput-optimal
+
+# Monitor interval for elastic policy loop
+monitor_interval_ms: 1000
+
+# Max seconds per monitor tick to wait on coordinator Ray RPCs (engine snapshot + router backlog).
+# Prevents the monitor from hanging silently if a coordinator/router blocks. <=0 disables the cap.
+coordinator_sync_timeout_s: 10
+
+# Coordinator command timeout in seconds. Zero waits indefinitely. Include model load and command queue time.
+coordinator_command_timeout_s: 180
+
+# Keep the trainer awake briefly when the next buffer is not ready yet.
+# This avoids paying a 10-15s trainer wake cost for short generation gaps.
+trainer_ready_grace_s: 5
+
+# Report a blocked policy after this many monitor ticks. Keep its transition lease to prevent overlapping decisions.
+decision_execution_abandon_stall_ticks: 360
+
+# Protect newly awakened or synchronized instances from scale-down for this many milliseconds. Zero disables it.
+wakeup_immunity_ms: 10000
+
+# Minimum number of awake instances kept for each role.
+# Set to 0 to allow one side to fully sleep.
+min_awake_per_role: 1
+
+# Cooldown window after each scaling action to avoid oscillation
+cooldown_ms: 20000

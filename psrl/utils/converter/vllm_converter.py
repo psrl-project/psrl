@@ -269,6 +269,7 @@ class VllmConverter(BaseConverter):
                 new_params = self.convert_parameter(full_name, param, module, fused_mappings, model_info)
                 sharding = self.get_sharding_for_param(module, param_name, full_name)
                 for new_param_name, new_param in new_params.items():
+                    sharding = self.get_sharding_for_param(module, param_name, new_param_name)
                     new_param, sharding_for_param = self.maybe_reshape_qkv_to_3d(new_param_name, new_param, sharding)
                     converted_state_dict[new_param_name] = new_param
                     sharding_dict[new_param_name] = sharding_for_param

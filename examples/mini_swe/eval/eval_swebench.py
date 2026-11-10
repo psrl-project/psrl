@@ -62,12 +62,13 @@ def _run_agent_on_swe_problem(
         dict[str, Any]: Result containing ``patch``, ``messages``, ``n_turns``,
             ``exit_status``, and ``error``.
     """
-    from examples.mini_swe.prepare.swebench_subsets import get_swebench_image_name
     from minisweagent.agents.default import DefaultAgent
     from minisweagent.config import get_config_from_spec
     from minisweagent.models import get_model
     from minisweagent.utils.serialize import recursive_merge
     from psrl.utils.agent.overflow import PromptOverflowError, ensure_overflow_handling
+
+    from examples.mini_swe.prepare.swebench_subsets import get_swebench_image_name
 
     image_name = get_swebench_image_name(swe_problem)
     problem = swe_problem.get("problem_statement", "")
@@ -450,6 +451,7 @@ def run_eval(
         swe_problems: list[dict[str, Any]] = _load_swe_problems_from_path(dataset)
     else:
         from datasets import load_dataset
+
         from examples.mini_swe.prepare.prepare_swebench import _DATASET_HF_MAP
 
         hf_path = _DATASET_HF_MAP.get(dataset, dataset)

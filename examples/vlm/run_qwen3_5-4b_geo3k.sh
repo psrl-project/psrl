@@ -90,8 +90,8 @@ python3 -m psrl.trainer.main_ppo --config-path=./config \
     \
     algorithm.adv_estimator=grpo \
     algorithm.rollout_correction.rollout_is=token \
-    data.train_files="$train_files" \
-    data.val_files="$test_files" \
+    +data.train_files="$train_files" \
+    +data.val_files="$test_files" \
     data.train_batch_size=$train_batch_size \
     data.max_prompt_length=1024 \
     data.max_response_length=10240 \

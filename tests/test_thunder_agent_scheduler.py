@@ -1,14 +1,12 @@
 # tests/test_thunder_agent_scheduler.py
 import pytest
-from psrl.workers.gen.rollout_coordination.session.base import (
+from psrl.workers.gen.session_scheduler import (
     SESSION_HUNG,
     SESSION_RUNNING,
     STATUS_ENV,
     STATUS_GENERATE,
     InstanceCapacity,
     SessionInfo,
-)
-from psrl.workers.gen.rollout_coordination.session.thunder_agent import (
     ThunderAgentScheduler,
 )
 

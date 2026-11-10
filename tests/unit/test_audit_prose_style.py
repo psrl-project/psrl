@@ -2,6 +2,10 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.cpu_test
+
 MODULE_PATH = Path(__file__).parents[2] / "scripts" / "audit_prose_style.py"
 SPEC = importlib.util.spec_from_file_location("audit_prose_style", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None, "Could not load the prose audit module."
