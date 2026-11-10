@@ -28,6 +28,7 @@ An Efficient Asynchronous RL Framework for LLM Post-Training
 
 ## 📰 News
 
+- **[2026/11/10]** 🔬 We release **PivotRL**, which enables computation resources shifting among rollout, reward and training stages, further speeding up in RL post-training with generative rewards. Check out the [paper](https://arxiv.org/abs/2610.16866).
 - **[2026/09/17]** 🔬 PSRL now powers the RL post-training of **[ScienceIDE](https://github.com/aitofound/ScienceIDE)** <a href="https://github.com/aitofound/ScienceIDE"><img src="https://img.shields.io/github/stars/aitofound/ScienceIDE?style=social" alt="ScienceIDE stars" valign="middle"></a>, a collection of **scientific codebase environments**. Check out the [technical report](https://arxiv.org/abs/2609.19134).
 - **[2026/07/28]** 🎉 We **open-source** PSRL.
 - **[2026/06/13]** 🏆 **StaleFlow**, the paper introducing the PSRL system, is accepted to **SIGMOD 2027**. Check out the [paper](https://arxiv.org/abs/2601.12784).
@@ -50,6 +51,7 @@ Built on [veRL](https://github.com/volcengine/verl), PSRL focuses on the system 
 - 🔌 **RDMA-native weight sync**: a CPU-side Parameter Server pushes/pulls weights via NIXL over UCX/RDMA (or local shared memory), avoiding collective-style synchronization barriers between train and gen clusters.
 - 🧵 **Built for long-tailed rollout**: partial rollout, redundant rollout, intelligent routing, and load-balanced migration work together to minimize idle GPU time from uneven trajectory lengths.
 - 🤖 **Agentic RL out of the box**: native environment loops plus SessionRouter/TITO let both integrated and black-box agents train through PSRL with minimal code changes.
+- 🪗 **Resource Elasticity**: computation resources can be re-allocated among rollout, reward and training stages, letting each stage has the corresponding computation ability for its workload.
 
 ## 🚀 Quick Start
 
@@ -104,9 +106,8 @@ bash scripts/install_megatron.sh
 bash scripts/install_lmcache.sh
 
 # Install PSRL
-python -m pip install -e '.[test]'
+python -m pip install -e .
 python scripts/check_environment.py
-python -m pytest tests
 ```
 
 See the [Installation guide](https://psrl.readthedocs.io/en/latest/tutorial/installation.html) for prerequisites, verification steps, and details on each component.
@@ -138,8 +139,8 @@ Production-ready training recipes demonstrating PSRL's capabilities across diffe
 | [SWE-agent](https://psrl.readthedocs.io/en/latest/examples/agentic_rl/swe/index.html) | Software Engineering | Test execution (F2P/P2P) | FSDP / Megatron | [`examples/mini_swe/`](examples/mini_swe/) | ✅ Ready |
 | SciAccel-RL | Scientific Computing (LAPS / MITgcm / Athena++) | Numerical equivalence vs reference | FSDP | [`examples/sciaccel_rl/`](examples/sciaccel_rl/) | ✅ Ready |
 | MemAgent | Long-context QA | Exact-match answer | Megatron | [`examples/mem_agent/`](examples/mem_agent/) | ✅ Ready |
-| [LLM-as-a-Judge](https://psrl.readthedocs.io/en/latest/examples/generative_reward_model/llm_as_a_judge.html) | Math / Custom | Judge LLM score | FSDP / Megatron | [`examples/elastic/`](examples/elastic/) | ✅ Available |
-| [On-Policy Distillation](https://psrl.readthedocs.io/en/latest/examples/generative_reward_model/on_policy_distillation.html) | Open-ended | Teacher token-level supervision | — | — | 🚧 TBD |
+| [LLM-as-a-Judge](https://psrl.readthedocs.io/en/latest/examples/generative_reward_model/llm_as_a_judge.html) | Open-ended | Judge LLM score | FSDP / Megatron | [`examples/elastic/`](examples/elastic/) | ✅ Ready |
+| [On-Policy Distillation](https://psrl.readthedocs.io/en/latest/examples/generative_reward_model/on_policy_distillation.html) | Open-ended | Teacher token-level supervision | FSDP / Megatron | [`examples/opd_trainer/`](examples/opd_trainer/) | ✅ Ready |
 
 ## 📖 Documentation
 
