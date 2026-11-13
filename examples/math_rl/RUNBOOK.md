@@ -375,33 +375,74 @@ Mode L stages a Rethlas checkout into the sandbox and runs its generation, verif
 and repair loop. Only the main agent trajectory is trained. The subagent tools are
 enabled and the policy is `main_only`.
 
-### 8.1 Extra environment
+The entry point is `examples/math_rl/run_qwen3.8-27b_math_rethlas_megatron.sh`. It
+selects `math_rethlas`, applies a 3600 second verifier stage timeout and a 7200 second
+trajectory timeout, and delegates the rest to the shared launcher. The shared launcher
+stays the single source of the batch, optimizer, and deployment settings.
+
+### 8.1 Prerequisites
+
+- A Rethlas checkout with `agents/generation/tests/run_example.sh`.
+- The sandbox image present on every p3b node. The image must contain Codex, uv, and
+  Python 3.11.
+- The verifier variables from section 6.
+- A package proxy for the sandbox. The first episode may need it to build the MCP
+  wheelhouse on the worker.
+
+### 8.2 Episode flow
+
+For every rollout the loop does the following:
+
+1. Packs the Rethlas checkout and extracts it at `/workspace/rethlas`.
+2. Writes `data/psrl/problem.md` from the dataset row.
+3. Writes `data/psrl/problem.refs/references.md` and `literature.md` from the OPP
+   citations and the full literature review.
+4. Links `/workspace/results`, `/workspace/.scratch`, and `/workspace/.memory` into the
+   checkout, so the paths named by the Rethlas skills resolve to the collected tree.
+5. Stages the MCP runtime wheelhouse under `agents/generation/.psrl-wheelhouse`. The
+   runner creates the venv and installs from the wheelhouse without the package index.
+6. Registers the episode in the worker verifier gateway and rewrites the MCP server URL
+   to the episode gateway.
+7. Runs `agents/generation/tests/run_example.sh` through the command harness. Codex
+   drives the main agent, `verify_proof_service` reaches the gateway, and the gateway
+   reaches the external verifier.
+8. Collects `blueprint_verified.md`, then `blueprint.md`, then the last assistant
+   message.
+9. Calls the verifier once on the collected artifact with the dataset problem, records
+   the verdict and receipt, and releases the episode.
+10. TITO stores the main agent trajectory. Subagent turns are captured as tokens and do
+    not carry a loss.
+
+### 8.3 Environment
+
+| Variable | Meaning | Reference value |
+| --- | --- | --- |
+| `MATH_RL_RETHLAS_REPO` | Host Rethlas checkout | required |
+| `MATH_RL_RETHLAS_MAX_ITERATIONS` | Generation and repair rounds | `3`, use `1` for the first smoke |
+| `MATH_RL_RETHLAS_MAX_CALLS` | Verifier calls per episode | `4`, use `2` for a smoke |
+| `MATH_RL_RETHLAS_VENV_PYTHON` | Python version for the MCP venv | `3.11` |
+| `MATH_RL_RETHLAS_PROXY` | Package proxy inside the sandbox | `http://<http-proxy>` |
+| `MATH_RL_VERIFIER_STAGE_TIMEOUT_S` | Verifier stage budget | `3600` |
+| `TRAJECTORY_TIMEOUT` | Episode budget | `7200` |
+
+Use the same base environment as section 7.1. The wrapper sets `MATH_RL_LOOP` to
+`math_rethlas` and the experiment name to the Rethlas run. Pass `--help` to the wrapper
+for the full list.
+
+### 8.4 Smoke
 
 ```bash
-export MATH_RL_LOOP=math_rethlas
 export MATH_RL_RETHLAS_REPO=<rethlas-checkout>
+export MATH_RL_RETHLAS_PROXY=http://<http-proxy>
 export MATH_RL_RETHLAS_MAX_ITERATIONS=1
 export MATH_RL_RETHLAS_MAX_CALLS=2
-export MATH_RL_RETHLAS_VENV_PYTHON=3.11
-export MATH_RL_RETHLAS_PROXY=http://<http-proxy>
-export TRAJECTORY_TIMEOUT=7200
-```
-
-The checkout must contain `agents/generation/tests/run_example.sh`. The loop stages it
-with the problem, the OPP references, the workspace path links, and a wheelhouse for the
-MCP runtime. The runner installs the MCP requirements from the wheelhouse without the
-package index and keeps the proxy only as a fallback.
-
-### 8.2 Smoke
-
-```bash
 export TOTAL_TRAINING_STEPS=1
 export TRAIN_BSZ=2
 export ROLLOUT_N=2
 export TRAIN_MINI_BSZ=2
 export GROUP_POST_PROCESS_ENABLE=false
 
-bash examples/math_rl/run_qwen3.8-27b_math_codex_megatron.sh
+bash examples/math_rl/run_qwen3.8-27b_math_rethlas_megatron.sh
 ```
 
 In a healthy run the episodes finish, the TITO tree contains every turn that the agent
@@ -410,13 +451,33 @@ line. With the current one-iteration smoke the agent usually writes no blueprint
 finalizer logs `No solution for task ...` and the reward is a graded zero. This is the
 known Mode L blocker, not a harness failure.
 
-### 8.3 What a complete episode needs
+### 8.5 Full run
 
-The generation agent must write `blueprint.md` or `blueprint_verified.md`. The agent can
-read `data/<problem>.refs/references.md` and `literature.md`, and the Rethlas prompt
-names that directory. If the blueprint is missing after a completed run the episode is a
-graded failure. Raising `MATH_RL_RETHLAS_MAX_ITERATIONS` gives the agent a repair round
-and is the first thing to try.
+```bash
+export MATH_RL_RETHLAS_REPO=<rethlas-checkout>
+export MATH_RL_RETHLAS_PROXY=http://<http-proxy>
+export MATH_RL_RETHLAS_MAX_ITERATIONS=3
+export TOTAL_TRAINING_STEPS=200
+export TRAIN_BSZ=32
+export ROLLOUT_N=8
+export TRAIN_MINI_BSZ=32
+export GROUP_POST_PROCESS_ENABLE=true
+
+bash examples/math_rl/run_qwen3.8-27b_math_rethlas_megatron.sh
+```
+
+The wrapper keeps the shared 64k window and the actor layout. Do not start a long run
+until the 64k training limit in section 9 is resolved.
+
+### 8.6 Artifact contract and current blocker
+
+The generation agent must write `blueprint.md` or `blueprint_verified.md` under the
+problem results directory. The prompt points the agent at
+`data/<problem>.refs/references.md` and `literature.md`. A completed run with no
+blueprint is a graded failure. Raising `MATH_RL_RETHLAS_MAX_ITERATIONS` gives the agent
+a repair round and is the first thing to try. If the finalizer still records
+`missing_solution`, inspect the runner log and the trajectory for the output path the
+agent used.
 
 ## 9. The 64k training limit
 
@@ -517,6 +578,7 @@ PY
 | `examples/math_rl/audit_opp.py` | Source audit |
 | `examples/math_rl/config/math_harness_config.yaml` | Codex, Rethlas, sandbox, and verifier config |
 | `examples/math_rl/run_qwen3.8-27b_math_codex_megatron.sh` | Shared training launcher |
+| `examples/math_rl/run_qwen3.8-27b_math_rethlas_megatron.sh` | Rethlas training entry point |
 | `examples/math_rl/prepare/` | Sandbox image build and checks |
 | `p3b/README.md` | Sandbox service configuration and operations |
 | `docker/Dockerfile` | Reproducible training environment image |

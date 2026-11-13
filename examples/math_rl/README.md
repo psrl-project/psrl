@@ -74,9 +74,10 @@ For a smoke run without a deployment, start the mock verifier with
 `MATH_RL_VERIFIER_MODE=mock`. The launcher then serves the same four field contract
 from the driver.
 
-The default loop is `math_codex`, one Codex run per episode. The Rethlas loop is
-selected with `MATH_RL_LOOP=math_rethlas` and `MATH_RL_RETHLAS_REPO=<checkout>`.
-It stages the checkout into the sandbox, starts the episode verifier gateway, runs
+The default loop is `math_codex`, one Codex run per episode. The Rethlas loop has
+its own entry point, `run_qwen3.8-27b_math_rethlas_megatron.sh`, and requires
+`MATH_RL_RETHLAS_REPO=<checkout>`. It stages the checkout into the sandbox, starts the
+episode verifier gateway, runs
 the generation loop for `MATH_RL_RETHLAS_MAX_ITERATIONS` rounds, and grades the
 final blueprint. The generation agent reaches the gateway through its MCP tool, so
 the sandbox never calls the external endpoint directly.
@@ -141,7 +142,8 @@ group is dropped and refilled rather than trained.
 | `reward.py` | Projects the verdict metadata into the PSRL reward loop |
 | `config/math_harness_config.yaml` | Codex, sandbox, and verifier settings |
 | `prepare/` | Sandbox image and runtime checks |
-| `run_qwen3.8-27b_math_codex_megatron.sh` | Training launcher |
+| `run_qwen3.8-27b_math_codex_megatron.sh` | Shared training launcher |
+| `run_qwen3.8-27b_math_rethlas_megatron.sh` | Rethlas entry point: selects `math_rethlas` and the harness defaults |
 | `RUNBOOK.md` | End-to-end handoff: p3b, dataset, verifier, and both training modes |
 | `tests/` | Projection, prompt, verifier, reward, and loop tests |
 
