@@ -28,7 +28,8 @@ LMCache, Megatron, SMG, and the PSRL runtime. It is the image to use for
 training and multi-node rollout.
 
 The image installs PSRL from `PSRL_REPO` at `PSRL_COMMIT`. The Dockerfile default is
-`dev/fp8-p3b`, so a feature branch has to be named explicitly. For the math RL branch:
+`dev/math-rl-v2`, so a plain build uses the math RL branch. Override the build arg for
+another ref:
 
 ```bash
 docker build --progress=plain \
