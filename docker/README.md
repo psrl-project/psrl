@@ -27,6 +27,19 @@ The GPU image includes CUDA 13.0.3, PyTorch 2.11, vLLM, veRL, NIXL/UCX,
 LMCache, Megatron, SMG, and the PSRL runtime. It is the image to use for
 training and multi-node rollout.
 
+The image installs PSRL from `PSRL_REPO` at `PSRL_COMMIT`. The Dockerfile default is
+`dev/fp8-p3b`, so a feature branch has to be named explicitly. For the math RL branch:
+
+```bash
+docker build --progress=plain \
+  --build-arg PSRL_COMMIT=dev/math-rl-v2 \
+  -f docker/Dockerfile \
+  -t psrl:math-rl-v2 .
+```
+
+`SMG_REF` defaults to the `psrl-dev` branch, which carries the current TITO and
+template fixes. Pin `SMG_REF` to a commit when the image must be reproducible.
+
 For a release or a reproducible build, pin the PSRL revision explicitly:
 
 ```bash

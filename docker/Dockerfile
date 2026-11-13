@@ -33,6 +33,8 @@ ARG TMS_REF=d64a6394d1e09c613fab90260054cecc2684586d
 ARG NVRX_REF=v0.7.0
 ARG SMG_REF=psrl-dev
 ARG PSRL_REPO=https://github.com/Somoku/psrl.git
+# The ref installed from PSRL_REPO. Feature branches such as dev/math-rl-v2
+# must be passed with --build-arg PSRL_COMMIT=... .
 ARG PSRL_COMMIT=dev/fp8-p3b
 ARG APEX_REF=10417aceddd7d5d05d7cbf7b0fc2daad1105f8b4
 ARG TRANSFORMER_ENGINE_REF=v2.17
