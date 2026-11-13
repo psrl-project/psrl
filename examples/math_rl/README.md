@@ -142,6 +142,7 @@ group is dropped and refilled rather than trained.
 | `config/math_harness_config.yaml` | Codex, sandbox, and verifier settings |
 | `prepare/` | Sandbox image and runtime checks |
 | `run_qwen3.8-27b_math_codex_megatron.sh` | Training launcher |
+| `RUNBOOK.md` | End-to-end handoff: p3b, dataset, verifier, and both training modes |
 | `tests/` | Projection, prompt, verifier, reward, and loop tests |
 
 ## What the recipe fixes
