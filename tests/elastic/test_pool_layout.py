@@ -230,3 +230,83 @@ def test_elastic_replica_pools_are_sliced_from_parent():
     assert replica.start_bundle_index == 2
     assert replica.world_size == 2
     assert replica.pgs is parent.pgs
+
+
+@pytest.mark.parametrize(
+    "spec,role_pools,placements,expected",
+    [
+        (
+            {"train_pool": [8], "rollout_pool_0": [4], "reward_pool_0": [2], "validate_pool_0": [1]},
+            {
+                "Actor": ["train_pool"],
+                "Critic": ["train_pool"],
+                "RefPolicy": ["train_pool"],
+                "Rollout": ["rollout_pool_0"],
+                "RewardModel": ["reward_pool_0"],
+                "Validate": ["validate_pool_0"],
+            },
+            {},
+            {"train_pool": 1, "rollout_pool_0": 1, "reward_pool_0": 1, "validate_pool_0": 1},
+        ),
+        (
+            {"train_pool": [8], "shared_rollout_pool": [8]},
+            {"Actor": ["train_pool"], "Rollout": ["rollout_0", "rollout_1"], "RewardModel": ["reward_0"]},
+            {
+                "rollout_0": ReplicaPlacement("shared_rollout_pool", 0, 4),
+                "rollout_1": ReplicaPlacement("shared_rollout_pool", 4, 4),
+                "reward_0": ReplicaPlacement("shared_rollout_pool", 0, 8),
+            },
+            {"train_pool": 1, "shared_rollout_pool": 2},
+        ),
+        (
+            {"train_pool": [8]},
+            {
+                "Actor": ["train_pool"],
+                "DummyPolicy": ["train_pool"],
+                "Rollout": ["rollout_0"],
+                "RewardModel": ["reward_a", "reward_b"],
+            },
+            {
+                "rollout_0": ReplicaPlacement("train_pool", 0, 8),
+                "reward_a": ReplicaPlacement("train_pool", 0, 8),
+                "reward_b": ReplicaPlacement("train_pool", 0, 8),
+            },
+            {"train_pool": 4},
+        ),
+        (
+            {"train_pool": [8], "rollout_pool_0": [4]},
+            {"Actor": ["train_pool"], "Rollout": ["main", "idle_rollout"], "RewardModel": ["idle_reward"]},
+            {
+                "main": ReplicaPlacement("rollout_pool_0", 0, 4),
+                "idle_rollout": ReplicaPlacement("train_pool", 0, 2),
+                "idle_reward": ReplicaPlacement("train_pool", 2, 4),
+            },
+            {"train_pool": 2, "rollout_pool_0": 1},
+        ),
+        (
+            {"shared_rollout_pool": [2, 3]},
+            {"Rollout": ["rollout_0"], "RewardModel": ["reward_0"]},
+            {
+                "rollout_0": ReplicaPlacement("shared_rollout_pool", 0, 2),
+                "reward_0": ReplicaPlacement("shared_rollout_pool", 2, 3),
+            },
+            {"shared_rollout_pool": 1},
+        ),
+    ],
+    ids=["independent-and-fused", "shared-inference", "multiple-reward-models", "fixed-borrowers", "disjoint-slices"],
+)
+def test_resource_pool_limits_follow_peak_bundle_occupancy(monkeypatch, spec, role_pools, placements, expected):
+    from psrl.trainer.ppo.utils import PSRL_Role, ResourcePoolManager
+
+    manager = ResourcePoolManager(
+        resource_pool_spec=spec,
+        mapping={PSRL_Role[role]: pool_ids for role, pool_ids in role_pools.items()},
+        elastic_replica_placements=placements,
+    )
+    monkeypatch.setattr(manager, "_check_resource_available", lambda: None)
+    monkeypatch.setattr(manager, "_create_elastic_replica_pools", lambda **kwargs: None)
+
+    manager.create_resource_pool()
+
+    actual = {pool_id: pool.max_colocate_count for pool_id, pool in manager.resource_pool_dict.items()}
+    assert actual == expected, f"Pool capacities must match overlapping resident worker groups, got {actual!r}."

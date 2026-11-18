@@ -43,7 +43,7 @@ pssh -H "${HEAD_IP}" -i \
     --port=${PORT} \
     --dashboard-host=0.0.0.0 \
     --dashboard-port=${DASHBOARD_PORT} \
-    --num-cpus=128"
+    --num-cpus=32"
 
 # Start worker nodes
 if [ ${#workers[@]} -gt 0 ]; then
@@ -52,5 +52,5 @@ if [ ${#workers[@]} -gt 0 ]; then
         "source ${env_file} && \
         cd ${PSRL_WORKSPACE} && \
         ray start --address=${HEAD_IP}:${PORT} \
-        --num-cpus=128"
+        --num-cpus=32"
 fi
