@@ -281,7 +281,7 @@ index afa3c4e494c0787b8db9a0950dc450368bbf0367..30b3911737bea565c06948d2cef56ee4
              get_torch_device().set_device(int(local_rank))
  
 diff --git a/verl/single_controller/ray/base.py b/verl/single_controller/ray/base.py
-index bb6a6043a87d85bd119607e8033dfa27af35fe02..eed64e0cdd54e042dc24ba65b7d568fc20b2f020 100644
+index bb6a6043a87d85bd119607e8033dfa27af35fe02..95286e329a66da0a560f6a3f7470c3bc9e1f01c9 100644
 --- a/verl/single_controller/ray/base.py
 +++ b/verl/single_controller/ray/base.py
 @@ -87,6 +87,24 @@ def sort_placement_group_by_node_ip(pgs: list[PlacementGroup]) -> list[Placement
@@ -306,7 +306,8 @@ index bb6a6043a87d85bd119607e8033dfa27af35fe02..eed64e0cdd54e042dc24ba65b7d568fc
 +    )
 +
 +
- @ray.remote
+-@ray.remote
++@ray.remote(num_cpus=0)
  def get_master_addr_port(master_port_range: Optional[list[int]] = None) -> tuple[str, str]:
      addr = ray.util.get_node_ip_address().strip("[]")
 @@ -119,6 +137,7 @@ class RayResourcePool(ResourcePool):

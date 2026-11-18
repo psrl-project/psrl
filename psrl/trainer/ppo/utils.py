@@ -121,22 +121,15 @@ class ResourcePoolManager:
     elastic_replica_placements: dict[str, ReplicaPlacement] = field(default_factory=dict)
 
     def create_resource_pool(self, device_name: str = "cuda"):
-        """Create Ray resource pools for distributed training.
-
-        Initializes resource pools based on the resource pool specification,
-        with each pool managing GPU resources across multiple nodes.
-        For FSDP backend, uses max_colocate_count=4 so three colocated roles
-        plus one spare CPU for WorkerGroup init helpers can share a bundle.
-        For Megatron backend, uses max_colocate_count>1 for different models.
-        Elastic replica tags in `mapping` are sliced from parent pools after
-        the physical placement groups exist.
         """
+        Create resource pools sized for their resident worker groups and slice elastic replicas.
+        """
+        max_colocate_counts = self._get_max_colocate_counts()
         for resource_pool_name, process_on_nodes in self.resource_pool_spec.items():
-            # PSRL assigns one worker group to each resource pool.
             resource_pool = RayResourcePool(
                 process_on_nodes=process_on_nodes,
                 use_gpu=True,
-                max_colocate_count=4,
+                max_colocate_count=max_colocate_counts[resource_pool_name],
                 name_prefix=resource_pool_name,
                 resource_num_per_bundle=self.resource_num_per_bundle.get(resource_pool_name, 1),
             )
@@ -144,6 +137,22 @@ class ResourcePoolManager:
 
         self._check_resource_available()
         self._create_elastic_replica_pools(device_name=device_name)
+
+    def _get_max_colocate_counts(self) -> dict[str, int]:
+        """
+        Count peak bundle occupancy with fused roles sharing one worker group.
+        """
+        counts = {pool_id: np.zeros(sum(spec), dtype=int) for pool_id, spec in self.resource_pool_spec.items()}
+        mapped_pools = {pool_id for pool_ids in self.mapping.values() for pool_id in pool_ids}
+        for pool_id in mapped_pools:
+            placement = self.elastic_replica_placements.get(pool_id)
+            if placement is None:
+                counts[pool_id] += 1
+            else:
+                start = placement.start_bundle_index
+                end = start + placement.world_size
+                counts[placement.pool_id][start:end] += 1
+        return {pool_id: max(1, int(bundle_counts.max(initial=0))) for pool_id, bundle_counts in counts.items()}
 
     def _create_elastic_replica_pools(self, device_name: str) -> None:
         """Slice parent elastic pools into per-replica `SubRayResourcePool` objects."""
