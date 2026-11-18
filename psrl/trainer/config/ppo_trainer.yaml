@@ -53,10 +53,6 @@ train_actor_rollout_ref:
   # Timeout for operations executed against the process group
   nccl_timeout: 3600
 
-  # NIXL rejects FSDP1 `flat_param`. FSDP2 is the FSDP default for this trainer.
-  actor:
-    strategy: fsdp2
-
 # gen_actor_rollout_ref has its own overrides for the generation side.
 gen_actor_rollout_ref:
 
