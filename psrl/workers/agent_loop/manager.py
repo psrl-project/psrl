@@ -1816,21 +1816,20 @@ class PSRL_AgentLoopManager:
                 # Buffer collection runs concurrently with trainer RPCs. Recheck
                 # after acquiring the PS lock before touching accumulated state.
                 if buffer_id in self.train_data_buffers:
-                    return True
-                if buffer_id not in self.train_accumulated_buffers:
-                    return False
-
-                await self.handle_waiting_buffer(buffer_id)
-                self._raise_if_pipeline_failed()
-
-                if self.train_accumulated_buffer_size[buffer_id] == self.ready_entries_per_buffer:
-                    # Share the single publish path so READY validation, chunk
-                    # emission, and accumulator cleanup stay consistent.
-                    add_buffer = await self._flush_ready_buffer(buffer_id, is_validate=False)
+                    return self.consume_buffer(buffer_id)
+                if buffer_id in self.train_accumulated_buffers:
+                    await self.handle_waiting_buffer(buffer_id)
                     self._raise_if_pipeline_failed()
-                    if add_buffer:
-                        psrl_logger.info(f"Recovered training buffer: buffer_id={buffer_id}.")
-                        return self.consume_buffer(buffer_id)
+
+                    if self.train_accumulated_buffer_size[buffer_id] == self.ready_entries_per_buffer:
+                        # Share the single publish path so READY validation, chunk
+                        # emission, and accumulator cleanup stay consistent.
+                        add_buffer = await self._flush_ready_buffer(buffer_id, is_validate=False)
+                        self._raise_if_pipeline_failed()
+                        if add_buffer:
+                            psrl_logger.info(f"Recovered training buffer: buffer_id={buffer_id}.")
+                            return self.consume_buffer(buffer_id)
+                # A concurrent path flushed or dropped the accumulator. Fall through to the wait below.
 
         # If the buffer is still not ready after the abort and truncate strategy, wait for it to be ready
         self._raise_if_pipeline_failed()
