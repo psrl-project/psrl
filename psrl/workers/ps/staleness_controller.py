@@ -628,8 +628,8 @@ class StalenessInventory:
                 not isinstance(tracked_entry_info.model_version, list)
                 and tracked_entry_info.model_version != entry_info.model_version
             ):
-                tracked_entry_info.model_version = [tracked_entry_info.model_version] * len(
-                    tracked_entry_info.request_idx
+                tracked_entry_info.model_version = [tracked_entry_info.model_version] * (
+                    len(tracked_entry_info.request_idx) - 1
                 )
                 tracked_entry_info.model_version.append(entry_info.model_version)
             elif isinstance(tracked_entry_info.model_version, list):
