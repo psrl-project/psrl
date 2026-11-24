@@ -148,11 +148,10 @@ class PSRL_AgentLoopManager:
         self._dispatch_idx = 0
         self._val_buffer_id = 0
 
-        # self.train_collect_task = None
-        # self.val_collect_task = None
         self.running_loop: asyncio.AbstractEventLoop | None = None
         self.train_dispatch_task: asyncio.Task | None = None
         self.val_dispatch_task: asyncio.Task | None = None
+        self.collect_task: asyncio.Task | None = None
         self.stop_train_dispatch_task = False
         self.stop_val_dispatch_task = False
         self.stop_collect_task = False
@@ -337,8 +336,7 @@ class PSRL_AgentLoopManager:
         if (
             (not self.train_dispatch_task or self.train_dispatch_task.done())
             and (not self.val_dispatch_task or self.val_dispatch_task.done())
-            and (not self.train_collect_task or self.train_collect_task.done())
-            and (not self.val_collect_task or self.val_collect_task.done())
+            and (not self.collect_task or self.collect_task.done())
         ):
             return
 
