@@ -2033,7 +2033,7 @@ class NIXLMultiStorageClients:
     ):
         assert self._is_connected, "Not connected to server"
         client = self.get_client_by_name(cur_client)
-        client.wait(key, tag, op_type, target_client, timeout)
+        client.wait(key, tag, op_type, target_client=target_client, timeout=timeout)
 
     def log_shard_info(self, label: str = "", max_elements: int = 8):
         """Call log_shard_info on every sub-client."""

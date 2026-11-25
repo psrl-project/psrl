@@ -51,7 +51,7 @@ def test_qwen35_xml_tool_call_uses_schema_types():
     )
     parser = Qwen3XMLToolParser(_Tokenizer(text))
 
-    content, calls = parser.extract_tool_calls([1, 2, 3], tools=TOOLS)
+    content, calls = parser.extract_tool_calls_from_token_ids([1, 2, 3], tools=TOOLS)
 
     assert content == "I will search."
     assert len(calls) == 1
@@ -68,7 +68,7 @@ def test_qwen35_xml_tool_call_accepts_truncated_closing_tags():
     text = "<tool_call><function=search><parameter=query>qwen3.5</parameter>"
     parser = Qwen3XMLToolParser(_Tokenizer(text))
 
-    content, calls = parser.extract_tool_calls([1], tools=TOOLS)
+    content, calls = parser.extract_tool_calls_from_token_ids([1], tools=TOOLS)
 
     assert content == ""
     assert len(calls) == 1
@@ -78,4 +78,4 @@ def test_qwen35_xml_tool_call_accepts_truncated_closing_tags():
 def test_qwen35_xml_tool_call_returns_text_when_no_call_exists():
     parser = Qwen3XMLToolParser(_Tokenizer("ordinary response"))
 
-    assert parser.extract_tool_calls([1], tools=TOOLS) == ("ordinary response", [])
+    assert parser.extract_tool_calls_from_token_ids([1], tools=TOOLS) == ("ordinary response", [])

@@ -631,7 +631,11 @@ class PSManager(RequestStatusTracker):
             all_requests_of_entry = entry_info.get_all_request_relative_ids()
             rest_requests_of_entry = set(all_requests_of_entry) - set(abort_request_idxs)
             if abort_group and len(rest_requests_of_entry) < self.alg_rollout_n:
-                abort_request_ids = abort_request_ids.union(set(rest_requests_of_entry))
+                # rest_requests_of_entry holds per-prompt relative idxs. Map them
+                # to global request ids before merging into the abort set.
+                abort_request_ids = abort_request_ids.union(
+                    {prompt_id * self.rollout_n + idx for idx in rest_requests_of_entry}
+                )
                 clear_entries.append(entry_info.prompt_id)
                 psrl_logger.info(f"Abort entire entry: (buffer {buffer_id}, entry {entry_id}) for prompt {prompt_id}")
             else:

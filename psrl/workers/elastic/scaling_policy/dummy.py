@@ -275,7 +275,7 @@ class DummyScalingPolicy(ScalingPolicy):
             return ScalingDecision(actions=[], reason="cooldown", estimated_lambda=0.0, role_to_total_mu={})
 
         grouped = self._group_by_role(signals)
-        instance_mu, role_total_mu, _ = self._build_mu_maps(signals)
+        instance_mu, role_total_mu = self._build_mu_maps(signals)
         estimated_lambda = self._estimate_lambda(signals, role_total_mu)
 
         stale_count = 0
