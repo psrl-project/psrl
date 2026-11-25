@@ -660,7 +660,11 @@ class PSRL_RayPPOTrainer(RayPPOTrainer):
             psrl_logger.warning("Agent loop manager is not initialized, skipping stop operation.")
 
     def init_rollout_gateway(self) -> ray.actor.ActorHandle:
-        return RolloutGateway.remote(
+        return RolloutGateway.options(
+            scheduling_strategy=NodeAffinitySchedulingStrategy(
+                node_id=self.ip_to_node_id[self.config.psrl.ps_manager_ip], soft=False
+            )
+        ).remote(
             self.config,
             self.config.psrl.ps_manager_ip,
             self.ps_manager_grpc_port,
@@ -3055,7 +3059,7 @@ class PSRL_RayPPOTrainer(RayPPOTrainer):
         critic_metrics = self._run_scheduled_update(
             batch,
             training_config=critic_config,
-            dp_size=self._get_dp_size(self.critic_wg, "critic"),
+            dp_size=self._get_dp_size(self.critic_wg, "train"),
             base_extra_info={},
             update_fn=update_critic,
             metric_prefix="critic/",

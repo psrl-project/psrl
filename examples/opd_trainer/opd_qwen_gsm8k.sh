@@ -12,8 +12,8 @@ PSRL_WORKSPACE=${PSRL_WORKSPACE:-$PSRL_PATH}
 ROLLOUT_NAME="vllm"
 DATA_PATH="${PSRL_WORKSPACE}/data"
 
-STUDENT_MODEL_PATH="${STUDENT_MODEL_PATH:-models/Qwen/Qwen2.5-0.5B}"
-TEACHER_MODEL_PATH="${TEACHER_MODEL_PATH:-models/Qwen/Qwen2.5-3B-Instruct}"
+STUDENT_MODEL_PATH="${STUDENT_MODEL_PATH:-${PSRL_WORKSPACE}/models/Qwen/Qwen2.5-0.5B}"
+TEACHER_MODEL_PATH="${TEACHER_MODEL_PATH:-${PSRL_WORKSPACE}/models/Qwen/Qwen2.5-3B-Instruct}"
 TEACHER_MODEL_NAME="${TEACHER_MODEL_NAME:-Qwen2.5-3B-Instruct}"
 
 USE_POLICY_GRADIENT=True
@@ -84,6 +84,7 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path="${PSRL_PATH}/p
     reward.reward_loops.opd.rollout.prompt_length=$((MAX_PROMPT + MAX_RESPONSE_LENGTH)) \
     reward.reward_loops.opd.rollout.response_length=1 \
     reward.reward_loops.opd.rollout.max_model_len=$((MAX_PROMPT + MAX_RESPONSE_LENGTH + 1)) \
+    reward.reward_loops.opd.rollout.gpu_memory_utilization=0.3 \
     gen_actor_rollout_ref.rollout.agent.traj_reward_mode=traj \
     data.train_datas="[{file:${gsm8k_train_path},data_source_name:openai/gsm8k,prompt_key:prompt,reward_model_dicts:[{reward_fn_key:data_source,reward_loop_type:naive,reward_fn:default,reward_model_name:null,reward_coef:1.0},{reward_fn_key:data_source,reward_loop_type:opd,reward_fn:default,reward_model_name:${TEACHER_MODEL_NAME},teacher_weight:1.0}]}]" \
     data.val_datas="[{file:${gsm8k_test_path},prompt_key:prompt,reward_model_dicts:[{reward_fn_key:data_source,reward_loop_type:naive,reward_fn:default,reward_model_name:null,reward_coef:1.0}]}]" \
@@ -98,6 +99,7 @@ PYTHONUNBUFFERED=1 python -m psrl.trainer.main_ppo --config-path="${PSRL_PATH}/p
     train_actor_rollout_ref.model.enable_gradient_checkpointing=True \
     train_actor_rollout_ref.model.use_remove_padding=True \
     train_actor_rollout_ref.model.use_fused_kernels=${USE_FUSED_KERNELS} \
+    train_actor_rollout_ref.actor.strategy=fsdp2 \
     train_actor_rollout_ref.actor.use_torch_compile=True \
     train_actor_rollout_ref.actor.optim.lr=1e-6 \
     train_actor_rollout_ref.actor.ppo_mini_batch_size=${TRAIN_PROMPT_BSZ} \

@@ -84,7 +84,6 @@ def clear_megatron_memory_caches(models) -> None:
     Drop cached tensors that are absent from the synchronized model state.
     """
     from megatron.core import parallel_state
-    from transformer_engine.pytorch.cpp_extensions.gemm import get_cublas_workspace
     from transformer_engine.pytorch.module import base
 
     for model in models:
@@ -93,7 +92,13 @@ def clear_megatron_memory_caches(models) -> None:
                 method = getattr(module, name, None)
                 if method is not None and hasattr(method, "cache_clear"):
                     method.cache_clear()
-    get_cublas_workspace.cache_clear()
+    # get_cublas_workspace was removed in transformer_engine 2.x.
+    try:
+        from transformer_engine.pytorch.cpp_extensions.gemm import get_cublas_workspace
+
+        get_cublas_workspace.cache_clear()
+    except ImportError:
+        pass
     base._dummy_wgrads.clear()
     parallel_state.get_global_memory_buffer().buffer.clear()
     torch._C._cuda_clearCublasWorkspaces()
