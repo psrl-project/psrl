@@ -12,7 +12,7 @@ mkdir -p "$OUTPUT_DIR"
 
 staleness=${1:-3}
 project_name=psrl_example
-experiment_name=GRPO-Qwen3-8B-fsdp-staleness_${staleness}
+experiment_name=GRPO-Qwen3-8B-megatron-staleness_${staleness}
 CKPTS_DIR=${OUTPUT_DIR}/ckpts/"${project_name}"/"${experiment_name}"
 LOG_DIR=${OUTPUT_DIR}/logs/$(date +%Y%m%d_%H%M%S)
 
@@ -69,7 +69,7 @@ val_top_k=-1
 val_do_sample=False
 
 
-python3 -m psrl.trainer.main_ppo --config-path=./config \
+python3 -m psrl.trainer.main_ppo --config-path="${PSRL_PATH}/psrl/trainer/config" \
     --config-name='ppo_trainer' model_engine=megatron \
     psrl.ps_manager_ip=${LOCAL_IP} \
     psrl.rollout_n=${rollout_N} \

@@ -143,7 +143,7 @@ python3 -m psrl.trainer.main_ppo --config-path="${PSRL_PATH}/psrl/trainer/config
     critic.use_dynamic_bsz=False \
     critic.ppo_max_token_len_per_gpu=${max_token_len_per_gpu} \
     critic.strategy=fsdp2 \
-    critic.model.fsdp_config.param_offload=False \
+    critic.fsdp.param_offload=False \
     \
     reward.launch_reward_fn_async=True \
     \
